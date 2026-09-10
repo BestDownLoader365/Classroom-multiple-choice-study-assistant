@@ -101,3 +101,39 @@ def is_valid_progress_state(state: Any, mode: QuizMode) -> bool:
         ):
             return False
     return True
+
+
+def valid_state_for(
+    progress: dict[str, Any], mode: QuizMode
+) -> dict[str, Any] | None:
+    """Return the stored state for ``mode``, dropping it if it is invalid."""
+    key = session_key(mode)
+    state = progress.get(key)
+    if not is_valid_progress_state(state, mode):
+        progress.pop(key, None)
+        return None
+    return state
+
+
+def active_summary(
+    progress: dict[str, Any], mode: QuizMode
+) -> dict[str, Any] | None:
+    """Return a small resume summary for an unfinished mode, else ``None``."""
+    state = valid_state_for(progress, mode)
+    if state is None:
+        return None
+    question_ids = state.get("question_ids")
+    current_index = state.get("current_index")
+    if (
+        not isinstance(question_ids, list)
+        or not isinstance(current_index, int)
+        or current_index >= len(question_ids)
+    ):
+        return None
+    return {
+        "current": current_index + 1,
+        "total": len(question_ids),
+        "requested_size": state.get("requested_size", "all"),
+        "chapter_ids": state.get("chapter_ids", []),
+        "source_ids": state.get("source_ids", []),
+    }

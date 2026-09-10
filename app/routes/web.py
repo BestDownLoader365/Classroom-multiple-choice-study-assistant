@@ -34,11 +34,11 @@ from app.services import (
     WeakKnowledgePointService,
     WrongQuestionService,
 )
-from app.services.progress_state import (
-    is_valid_progress_state as _is_valid_progress_state,
-    quiz_limit as _quiz_limit,
-    session_key as _session_key,
-)
+from app.services import progress_state as _progress_state
+
+_is_valid_progress_state = _progress_state.is_valid_progress_state
+_quiz_limit = _progress_state.quiz_limit
+_session_key = _progress_state.session_key
 from app.web import auth as _web_auth
 from app.web import view_helpers as _view
 
@@ -646,33 +646,11 @@ def create_web_blueprint(
         return redirect(url_for(endpoint))
 
     def _state_for(mode: QuizMode) -> dict[str, Any] | None:
-        key = _session_key(mode)
-        state = g.quiz_progress.get(key)
-        if not _is_valid_progress_state(state, mode):
-            g.quiz_progress.pop(key, None)
-            return None
-        return state
+        return _progress_state.valid_state_for(g.quiz_progress, mode)
 
     def _active_progress(mode: QuizMode) -> dict[str, Any] | None:
         """Return a small resume summary for an unfinished mode."""
-        state = _state_for(mode)
-        if state is None:
-            return None
-        question_ids = state.get("question_ids")
-        current_index = state.get("current_index")
-        if (
-            not isinstance(question_ids, list)
-            or not isinstance(current_index, int)
-            or current_index >= len(question_ids)
-        ):
-            return None
-        return {
-            "current": current_index + 1,
-            "total": len(question_ids),
-            "requested_size": state.get("requested_size", "all"),
-            "chapter_ids": state.get("chapter_ids", []),
-            "source_ids": state.get("source_ids", []),
-        }
+        return _progress_state.active_summary(g.quiz_progress, mode)
 
     def _curriculum() -> list[dict[str, Any]]:
         """Build one dynamic catalogue for selection and filtering templates."""
