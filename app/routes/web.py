@@ -1,7 +1,7 @@
 """Web routes for accounts, normal practice, and personal mistake review."""
 
 import secrets
-from functools import wraps
+from functools import partial, wraps
 from typing import Any
 
 from flask import (
@@ -39,6 +39,11 @@ from app.services.progress_state import (
     quiz_limit as _quiz_limit,
     session_key as _session_key,
 )
+from app.web import auth as _web_auth
+
+_csrf_token = _web_auth.csrf_token
+_validate_csrf = _web_auth.validate_csrf
+_registration_error = _web_auth.registration_error
 
 
 def create_web_blueprint(
@@ -57,6 +62,11 @@ def create_web_blueprint(
     public_endpoints = {"web.login", "web.register"}
     glossary_data = glossary_repository.to_dict()
     database = progress_repository.database
+
+    _ip_login_allowed = partial(_web_auth.login_ip_allowed, database)
+    _account_login_allowed = partial(_web_auth.login_account_allowed, database)
+    _record_login_failure = partial(_web_auth.record_login_failure, database)
+    _registration_allowed = partial(_web_auth.registration_allowed, database)
 
     @blueprint.app_context_processor
     def inject_global_page_data() -> dict[str, Any]:
@@ -716,59 +726,6 @@ def create_web_blueprint(
             "next": "web.next_review",
         }
 
-    def _ip_login_allowed(address: str | None) -> bool:
-        window = int(current_app.config["AUTH_LOGIN_WINDOW_SECONDS"])
-        return not database.is_rate_limited(
-            "login-ip",
-            address or "unknown",
-            limit=int(current_app.config["AUTH_LOGIN_IP_LIMIT"]),
-        )
-
-    def _account_login_allowed(username: str) -> bool:
-        return not database.is_rate_limited(
-            "login-account",
-            username.casefold() or "<empty>",
-            limit=int(current_app.config["AUTH_LOGIN_ACCOUNT_LIMIT"]),
-        )
-
-    def _record_login_failure(username: str, address: str | None) -> None:
-        window = int(current_app.config["AUTH_LOGIN_WINDOW_SECONDS"])
-        database.consume_rate_limit(
-            "login-account",
-            username.casefold() or "<empty>",
-            limit=int(current_app.config["AUTH_LOGIN_ACCOUNT_LIMIT"]),
-            window_seconds=window,
-        )
-        database.consume_rate_limit(
-            "login-ip",
-            address or "unknown",
-            limit=int(current_app.config["AUTH_LOGIN_IP_LIMIT"]),
-            window_seconds=window,
-        )
-
-    def _registration_allowed(address: str | None) -> bool:
-        return database.consume_rate_limit(
-            "register-ip",
-            address or "unknown",
-            limit=int(current_app.config["AUTH_REGISTER_IP_LIMIT"]),
-            window_seconds=int(current_app.config["AUTH_REGISTER_WINDOW_SECONDS"]),
-        )
-
-    def _csrf_token() -> str:
-        if not current_app.config["ENABLE_CSRF"]:
-            return ""
-        token = session.get("csrf_token")
-        if not isinstance(token, str) or len(token) < 32:
-            token = secrets.token_urlsafe(32)
-            session["csrf_token"] = token
-        return token
-
-    def _validate_csrf() -> None:
-        submitted = request.form.get("csrf_token", "")
-        expected = session.get("csrf_token")
-        if not isinstance(expected, str) or not submitted or not secrets.compare_digest(submitted, expected):
-            abort(400, description="请求验证失败，请刷新页面后重试。")
-
     return blueprint
 
 
@@ -806,15 +763,3 @@ def _single_catalogue_filter(
     if raw_value not in known_ids:
         abort(400, description=f"提交的{label}筛选不存在，请重新选择。")
     return {raw_value}
-
-
-def _registration_error(username: str, password: str, confirmation: str) -> str | None:
-    if not 2 <= len(username) <= 30:
-        return "用户名长度需要为 2～30 个字符。"
-    if any(character.isspace() for character in username):
-        return "用户名中不能包含空格。"
-    if not 6 <= len(password) <= 128:
-        return "密码长度需要为 6～128 个字符。"
-    if password != confirmation:
-        return "两次输入的密码不一致。"
-    return None

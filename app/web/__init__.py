@@ -1,0 +1,1 @@
+"""Web-layer cross-cutting concerns (authentication, CSRF, rate limiting)."""
