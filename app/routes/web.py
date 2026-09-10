@@ -40,10 +40,12 @@ from app.services.progress_state import (
     session_key as _session_key,
 )
 from app.web import auth as _web_auth
+from app.web import view_helpers as _view
 
 _csrf_token = _web_auth.csrf_token
 _validate_csrf = _web_auth.validate_csrf
 _registration_error = _web_auth.registration_error
+_option_label = _view.option_label
 
 
 def create_web_blueprint(
@@ -674,21 +676,7 @@ def create_web_blueprint(
 
     def _curriculum() -> list[dict[str, Any]]:
         """Build one dynamic catalogue for selection and filtering templates."""
-        return [
-            {
-                "source": source,
-                "chapters": [
-                    {
-                        "chapter": chapter,
-                        "question_count": question_repository.question_count_for_chapter(
-                            chapter.id
-                        ),
-                    }
-                    for chapter in question_repository.get_chapters(source.id)
-                ],
-            }
-            for source in question_repository.get_sources()
-        ]
+        return _view.build_curriculum(question_repository)
 
     @blueprint.app_errorhandler(HTTPException)
     def friendly_http_error(error: HTTPException) -> tuple[str, int]:
@@ -726,40 +714,7 @@ def create_web_blueprint(
             "next": "web.next_review",
         }
 
+    _catalogue_filter = _view.catalogue_filter
+    _single_catalogue_filter = _view.single_catalogue_filter
+
     return blueprint
-
-
-def _option_label(index: int) -> str:
-    """Return spreadsheet-style option labels: A..Z, AA..AZ, BA..."""
-    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
-        raise ValueError("option index must be a non-negative integer")
-    label = ""
-    value = index + 1
-    while value:
-        value, remainder = divmod(value - 1, 26)
-        label = chr(ord("A") + remainder) + label
-    return label
-
-
-def _catalogue_filter(
-    raw_values: list[str], known_ids: set[str], label: str
-) -> set[str] | None:
-    """Normalize a multi-select filter; empty or ``all`` means no restriction."""
-    values = {value.strip() for value in raw_values if value.strip()}
-    if not values or values == {"all"}:
-        return None
-    values.discard("all")
-    unknown = values - known_ids
-    if unknown:
-        abort(400, description=f"提交的{label}筛选不存在，请重新选择。")
-    return values
-
-
-def _single_catalogue_filter(
-    raw_value: str, known_ids: set[str], label: str
-) -> set[str] | None:
-    if not raw_value or raw_value == "all":
-        return None
-    if raw_value not in known_ids:
-        abort(400, description=f"提交的{label}筛选不存在，请重新选择。")
-    return {raw_value}

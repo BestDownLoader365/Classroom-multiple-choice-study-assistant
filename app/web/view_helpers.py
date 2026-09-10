@@ -1,0 +1,68 @@
+"""Template and catalogue helpers for the learner-facing pages.
+
+These are presentation-layer concerns kept separate from the route handlers
+so the routes read as thin HTTP adapters. ``option_label`` and the catalogue
+filters are pure; ``build_curriculum`` only reads from the question
+repository it is given.
+"""
+
+from typing import Any
+
+from flask import abort
+
+from app.repositories import QuestionRepository
+
+
+def option_label(index: int) -> str:
+    """Return spreadsheet-style option labels: A..Z, AA..AZ, BA..."""
+    if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+        raise ValueError("option index must be a non-negative integer")
+    label = ""
+    value = index + 1
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        label = chr(ord("A") + remainder) + label
+    return label
+
+
+def build_curriculum(question_repository: QuestionRepository) -> list[dict[str, Any]]:
+    """Build one dynamic catalogue for selection and filtering templates."""
+    return [
+        {
+            "source": source,
+            "chapters": [
+                {
+                    "chapter": chapter,
+                    "question_count": question_repository.question_count_for_chapter(
+                        chapter.id
+                    ),
+                }
+                for chapter in question_repository.get_chapters(source.id)
+            ],
+        }
+        for source in question_repository.get_sources()
+    ]
+
+
+def catalogue_filter(
+    raw_values: list[str], known_ids: set[str], label: str
+) -> set[str] | None:
+    """Normalize a multi-select filter; empty or ``all`` means no restriction."""
+    values = {value.strip() for value in raw_values if value.strip()}
+    if not values or values == {"all"}:
+        return None
+    values.discard("all")
+    unknown = values - known_ids
+    if unknown:
+        abort(400, description=f"提交的{label}筛选不存在，请重新选择。")
+    return values
+
+
+def single_catalogue_filter(
+    raw_value: str, known_ids: set[str], label: str
+) -> set[str] | None:
+    if not raw_value or raw_value == "all":
+        return None
+    if raw_value not in known_ids:
+        abort(400, description=f"提交的{label}筛选不存在，请重新选择。")
+    return {raw_value}
