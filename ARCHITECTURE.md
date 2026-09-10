@@ -107,6 +107,8 @@ MCQ_Template/
 │   ├── repositories/
 │   │   ├── __init__.py
 │   │   ├── database.py
+│   │   ├── rate_limit_repository.py
+│   │   ├── question_bank_state_repository.py
 │   │   ├── glossary_loader.py
 │   │   ├── glossary_repository.py
 │   │   ├── question_loader.py
@@ -119,9 +121,14 @@ MCQ_Template/
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── grading_service.py
+│   │   ├── progress_state.py
 │   │   ├── quiz_service.py
 │   │   ├── wrong_question_service.py
 │   │   └── weak_knowledge_point_service.py
+│   ├── web/
+│   │   ├── __init__.py
+│   │   ├── auth.py
+│   │   └── view_helpers.py
 │   ├── routes/
 │   │   ├── __init__.py
 │   │   └── web.py
@@ -158,6 +165,7 @@ MCQ_Template/
     ├── test_wrong_question_service.py
     ├── test_learning_upgrade.py
     ├── test_progress_sync.py
+    ├── test_progress_state.py
     ├── test_web.py
     └── test_bundled_question_bank.py
 ```
@@ -297,6 +305,14 @@ Repositories are responsible for loading or persisting data. They do not decide 
 There is no database migration subsystem. Schema creation is additive. `weak_knowledge_points` is created with `CREATE TABLE IF NOT EXISTS`, so an unchanged old database starts without a manual command. The separate bank synchronization step clears all learner course data, including weak points, when the bank changes.
 
 `Database.transaction()` uses `BEGIN IMMEDIATE` and a context-local connection so progress token checks, answer attempts, correction/weak-point updates and progress changes commit or roll back together. SQLite serializes these transactions across threads and Gunicorn workers. Repository operations inside the transaction reuse its connection.
+
+### `app/repositories/rate_limit_repository.py`
+
+`RateLimitRepository` owns the `login_rate_limits` table that backs login throttling. It records failed-attempt timestamps and returns the most recent failures within the active window so the auth layer can decide whether a login attempt is allowed. All operations run inside the caller's transaction, so a rejected login and its recorded failure commit or roll back together.
+
+### `app/repositories/question_bank_state_repository.py`
+
+`QuestionBankStateRepository` owns the question-bank synchronization state table. It stores the active question-bank fingerprint and generation counter, and provides the atomic operations used to detect a changed bank, clear all learner course data, and bump the generation that stale workers compare against. `Database` keeps thin compatibility delegates for these two concerns so existing callers keep working, while the implementations live in these dedicated repositories.
 
 ### `app/repositories/question_loader.py`
 
@@ -447,6 +463,10 @@ It also joins persistent wrong-question records with live in-memory questions an
 - summaries join stable chapter titles, pending concrete wrong counts, available distinct question counts and verification progress;
 - old wrong rows with no weak state are backfilled once with active 0/2 state.
 
+### `app/services/progress_state.py`
+
+Pure, HTTP-independent helpers that validate and describe the per-mode quiz progress state dictionaries. It centralizes the progress `session_key()` names, the `quiz_limit()` parsing for the selected practice size, the `is_valid_progress_state()` structural validation used to accept or clear a stored round, `valid_state_for()` which drops invalid entries, and `active_summary()` which builds the resume banner data for an unfinished round. Keeping these rules here lets the route layer and tests share one definition of what a valid round looks like without touching Flask.
+
 ## 9. HTTP and Session Layer
 
 ### `app/routes/web.py`
@@ -474,6 +494,13 @@ This module creates the Flask blueprint and defines all browser endpoints.
 | POST | `/review/next` | Advance the review queue |
 
 `/health` is registered directly on the Flask application before the web blueprint. It therefore does not run the blueprint's account requirement and does not expose learner, database, question, or secret data.
+
+### `app/web/` request helpers
+
+Two small modules keep cross-cutting HTTP concerns out of the route functions:
+
+- `app/web/auth.py` holds the authentication, CSRF, and login rate-limit helpers. It resolves `session["user_id"]` to a real user for the blueprint's account requirement, issues and checks the CSRF token carried by mutating forms, and consults `RateLimitRepository` to throttle repeated failed logins.
+- `app/web/view_helpers.py` holds the template and catalogue helpers that assemble the course/chapter selection lists and other view models shared by the practice and review screens.
 
 The authentication hook resolves `session["user_id"]` to a real user. Missing or invalid accounts are redirected to `/login`. Protected views then run inside the `shared_progress` wrapper: it loads both modes from SQLite, validates their question-bank fingerprint, runs the view, and persists changed states in one transaction. A changed question bank clears all course data at startup and shows a message. The wrapper checks both the active fingerprint and generation inside its transaction; stale workers return 503 before writing. Legacy cookie import is disabled permanently after the first course reset.
 
@@ -761,6 +788,7 @@ The tests use temporary question/glossary files and temporary SQLite databases, 
 | `tests/test_quiz_service.py` | Limits, coverage cycles/boundaries/scope/all, stable option shuffle, review selection |
 | `tests/test_wrong_question_service.py` | Wrong counts, one-answer correction, distinct verification, resets, isolation |
 | `tests/test_learning_upgrade.py` | Transfer success/failure, multi-chapter state, policy isolation, resume, old DB/progress, insufficient candidates, UI summaries |
+| `tests/test_progress_state.py` | Characterization coverage for the progress-state helpers: validation, resume summaries, session keys, and quiz-size parsing |
 | `tests/test_progress_sync.py` | Independent clients/workers, resume and completion, concurrency, stale forms, reset, legacy migration, transaction rollback |
 | `tests/test_web.py` | Public health response, login, registration, page flows, shared progress, duplicate protection, feedback, errors |
 | `tests/test_bundled_question_bank.py` | Completeness and quality rules for the real bundled bank |
