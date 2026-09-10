@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% set is_login = page == "login" %}
+{% block title %}{{ "登录" if is_login else "注册" }} · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="auth-layout">
+    <header class="auth-intro">
+        <p class="section-label">个人学习空间</p>
+        <h1>{{ "登录" if is_login else "创建账号" }}</h1>
+        <p class="lead">
+            {% if is_login %}
+            登录后继续你的练习和错题巩固。
+            {% else %}
+            只需用户名和密码；你的错题不会显示给其他账号。
+            {% endif %}
+        </p>
+    </header>
+    <div class="auth-card">
+
+    <form class="auth-form" method="post">
+        {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+        <label>
+            <span>用户名</span>
+            <input name="username" autocomplete="username" maxlength="30" required autofocus
+                   value="{{ request.form.get('username', '') }}">
+        </label>
+        <label>
+            <span>密码</span>
+            <input type="password" name="password"
+                   autocomplete="{{ 'current-password' if is_login else 'new-password' }}"
+                   minlength="6" maxlength="128" required>
+        </label>
+        {% if not is_login %}
+        <label>
+            <span>确认密码</span>
+            <input type="password" name="password_confirmation"
+                   autocomplete="new-password" minlength="6" maxlength="128" required>
+        </label>
+        {% endif %}
+        <button class="button button-primary" type="submit">
+            {{ "登录" if is_login else "创建账号并登录" }}
+        </button>
+    </form>
+
+    <p class="auth-switch">
+        {% if is_login %}
+        还没有账号？<a href="{{ url_for('web.register') }}">立即注册</a>
+        {% else %}
+        已经有账号？<a href="{{ url_for('web.login') }}">返回登录</a>
+        {% endif %}
+    </p>
+    </div>
+</section>
+{% endblock %}

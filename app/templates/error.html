@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+
+{% block title %}页面出现问题 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="error-card">
+    <div class="error-code">{{ error_code }}</div>
+    <h1>页面出现问题</h1>
+    <p class="lead">{{ error_message }}</p>
+    <div class="inline-actions">
+        {% if g.user %}
+        <a class="button button-primary" href="{{ url_for('web.home') }}">返回首页</a>
+        <a class="button button-ghost" href="{{ url_for('web.mistakes') }}">查看我的错题</a>
+        {% else %}
+        <a class="button button-primary" href="{{ url_for('web.login') }}">返回登录</a>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

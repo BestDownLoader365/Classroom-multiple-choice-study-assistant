@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>{% block title %}{{ bank_title_zh or bank_title }}{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <header class="site-header">
+        <a class="brand" href="{{ url_for('web.home') if g.user else url_for('web.login') }}">
+            课堂选择题
+        </a>
+        <div class="header-actions">
+            <button class="language-toggle" type="button" data-bilingual-toggle hidden
+                    title="中文为辅助翻译，学习时请以英文原文为准">显示中英双语</button>
+            {% if g.user %}
+            <span class="current-user">{{ g.user.username }}</span>
+            <form method="post" action="{{ url_for('web.logout') }}">
+                {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <button class="header-link" type="submit">退出登录</button>
+            </form>
+            {% endif %}
+        </div>
+    </header>
+    <main class="page-shell {% block page_shell_class %}{% endblock %}" id="main-content">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% for category, message in messages %}
+                <div class="flash flash-{{ category }}" role="status">{{ message }}</div>
+            {% endfor %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+    {% if g.user %}
+    <script id="glossary-data" type="application/json">{{ glossary_data | tojson }}</script>
+    {% endif %}
+    <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
+    {% if g.user %}
+    <script src="{{ url_for('static', filename='js/glossary.js') }}" defer></script>
+    {% endif %}
+</body>
+</html>

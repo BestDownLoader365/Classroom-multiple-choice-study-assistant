@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block title %}选择章节 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="content-stack setup-page">
+    <div class="page-heading">
+        <div>
+            <p class="section-label">章节强化学习</p>
+            <h1>选择练习章节</h1>
+            <p>本题库包含 {{ curriculum|length }} 份课程资料。选择一个或多个章节进行专项练习，或保留“全部章节”使用完整题库。</p>
+        </div>
+        <div class="heading-actions">
+            <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+            {% if normal_progress %}
+            <a class="button button-secondary" href="{{ url_for('web.quiz') }}">继续当前练习</a>
+            {% endif %}
+        </div>
+    </div>
+
+    <form method="post" action="{{ url_for('web.start_quiz') }}"
+          {% if normal_progress %}data-confirm-restart="当前正常练习尚未完成，确定要放弃进度并开始新的章节练习吗？"{% endif %}>
+        {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+        <fieldset class="chapter-picker">
+            <legend class="sr-only">选择章节</legend>
+            <label class="chapter-option chapter-option-all">
+                <input type="checkbox" name="chapter_ids" value="all" checked data-all-chapters>
+                <span>
+                    <strong>All Chapters</strong>
+                    <small>全部课件 · {{ question_count }} 题</small>
+                </span>
+            </label>
+
+            {% for group in curriculum %}
+            <section class="source-group" data-chapter-group>
+                <header>
+                    <p class="section-label">{{ group.source.lecture or "Course material" }}</p>
+                    <h2>{{ group.source.title }}</h2>
+                    {% if group.source.filename %}<p class="source-filename">{{ group.source.filename }}</p>{% endif %}
+                    <label class="source-select-all">
+                        <input type="checkbox" data-chapter-group-all>
+                        <span>全选本课件章节</span>
+                        <small>{{ group.chapters|length }} 个章节</small>
+                    </label>
+                </header>
+                <div class="chapter-grid">
+                    {% for item in group.chapters %}
+                    <label class="chapter-option">
+                        <input type="checkbox" name="chapter_ids" value="{{ item.chapter.id }}" data-specific-chapter>
+                        <span>
+                            <strong>{{ item.chapter.title }}</strong>
+                            <small>{{ item.question_count }} 题</small>
+                        </span>
+                    </label>
+                    {% endfor %}
+                </div>
+            </section>
+            {% endfor %}
+        </fieldset>
+
+        <div class="setup-controls">
+            <div class="field-group">
+                <span class="picker-label" id="quiz-size-label">本轮题量</span>
+                <div class="quiz-size-picker" data-select-picker="quiz-size" data-picker>
+                    <input type="hidden" id="quiz-size" name="quiz_size" value="20" data-picker-value>
+                    <button class="size-picker-trigger" type="button"
+                            aria-haspopup="listbox" aria-expanded="false"
+                            aria-controls="quiz-size-menu"
+                            aria-labelledby="quiz-size-label quiz-size-current">
+                        <span id="quiz-size-current" data-select-current>标准练习 · 最多 20 题</span>
+                    </button>
+                    <div class="size-picker-menu" id="quiz-size-menu" role="listbox"
+                         aria-labelledby="quiz-size-label" data-select-menu aria-hidden="true" inert>
+                        <button class="size-picker-option" type="button" role="option" data-picker-option data-value="10">快速练习 · 最多 10 题</button>
+                        <button class="size-picker-option" type="button" role="option" data-picker-option data-value="20" aria-selected="true">标准练习 · 最多 20 题</button>
+                        <button class="size-picker-option" type="button" role="option" data-picker-option data-value="50">强化练习 · 最多 50 题</button>
+                        <button class="size-picker-option" type="button" role="option" data-picker-option data-value="all">完整练习 · 所选章节全部题目</button>
+                    </div>
+                </div>
+            </div>
+            <button class="button button-primary button-large" type="submit">开始章节练习</button>
+        </div>
+    </form>
+</section>
+{% endblock %}

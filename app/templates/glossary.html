@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}{{ glossary.title_zh }} · {{ glossary.title }}{% endblock %}
+
+{% block content %}
+<section class="content-stack glossary-page" data-glossary-page>
+    <div class="page-heading glossary-heading">
+        <div>
+            <p class="section-label">词汇学习 · English first</p>
+            <h1>{{ glossary.title_zh }}</h1>
+            <p class="bank-title-en">{{ glossary.title }}</p>
+            {% if glossary.description_zh %}<p>{{ glossary.description_zh }}</p>{% elif glossary.description %}<p>{{ glossary.description }}</p>{% endif %}
+        </div>
+        <div class="heading-actions">
+            <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+        </div>
+    </div>
+
+    <div class="summary-row glossary-summary" aria-label="词汇统计">
+        <div class="summary-card"><span>专业词汇</span><strong data-glossary-visible-count>{{ terms|length }}</strong></div>
+        <div class="summary-card"><span>分类</span><strong>{{ categories|length }}</strong></div>
+    </div>
+
+    <div class="glossary-controls">
+        <div class="field-group glossary-search-field">
+            <label for="glossary-search">搜索专业词汇</label>
+            <input id="glossary-search" type="search" autocomplete="off" placeholder="English、中文或别名" data-glossary-search>
+        </div>
+        <div class="field-group">
+            <span class="picker-label" id="glossary-category-label">分类</span>
+            <div class="quiz-size-picker" data-select-picker="glossary-category" data-picker>
+                <input type="hidden" id="glossary-category" value="all" data-picker-value>
+                <button class="size-picker-trigger" type="button" aria-haspopup="listbox"
+                        aria-expanded="false" aria-controls="glossary-category-menu"
+                        aria-labelledby="glossary-category-label glossary-category-current">
+                    <span id="glossary-category-current" data-select-current>全部分类</span>
+                </button>
+                <div class="size-picker-menu" id="glossary-category-menu" role="listbox"
+                     aria-labelledby="glossary-category-label" data-select-menu aria-hidden="true" inert>
+                    <button class="size-picker-option" type="button" role="option" data-picker-option data-value="all" aria-selected="true">全部分类</button>
+                    {% for category in categories %}
+                    <button class="size-picker-option" type="button" role="option" data-picker-option data-value="{{ category }}">{{ category }}</button>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="glossary-grid" data-glossary-grid>
+        {% for term in terms %}
+        <article class="glossary-card" data-glossary-card data-term-id="{{ term.id }}">
+            <div class="glossary-card-heading">
+                <div>
+                    <p class="glossary-category">{{ term.category or "General" }}</p>
+                    <h2>{{ term.term }}</h2>
+                </div>
+                <span class="glossary-index">{{ "%03d" | format(loop.index) }}</span>
+            </div>
+            {% if term.aliases %}
+            <div class="glossary-aliases" aria-label="别名">
+                {% for alias in term.aliases %}<span>{{ alias }}</span>{% endfor %}
+            </div>
+            {% endif %}
+            <button class="button button-ghost glossary-reveal" type="button"
+                    aria-expanded="false" aria-controls="glossary-detail-{{ loop.index }}"
+                    data-glossary-reveal>显示中文</button>
+            <div class="glossary-card-detail" id="glossary-detail-{{ loop.index }}" hidden>
+                <h3>{{ term.term_zh }}</h3>
+                {% if term.definition_zh %}<p>{{ term.definition_zh }}</p>{% endif %}
+                {% if term.definition %}<p class="glossary-definition-en">{{ term.definition }}</p>{% endif %}
+            </div>
+        </article>
+        {% endfor %}
+    </div>
+    <div class="empty-state glossary-empty" data-glossary-empty hidden>
+        <h2>没有匹配的词汇</h2>
+        <p>请尝试其他英文、中文、别名或分类。</p>
+    </div>
+</section>
+{% endblock %}

@@ -1,0 +1,24 @@
+[Unit]
+Description=MCQ Template Gunicorn service
+After=network.target
+
+[Service]
+Type=simple
+User=fangsihan
+Group=fangsihan
+WorkingDirectory=/home/fangsihan/CodeSpace/Python/MCQ_Template
+EnvironmentFile=/etc/mcq-template/mcq-template.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/fangsihan/CodeSpace/Python/MCQ_Template/.venv-prod/bin/gunicorn --config /home/fangsihan/CodeSpace/Python/MCQ_Template/gunicorn.conf.py wsgi:app
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=35
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/fangsihan/CodeSpace/Python/MCQ_Template/instance
+
+[Install]
+WantedBy=multi-user.target

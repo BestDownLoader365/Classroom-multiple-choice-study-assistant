@@ -1,0 +1,243 @@
+{% extends "base.html" %}
+
+{% block title %}我的错题 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="content-stack">
+    <div class="page-heading">
+        <div>
+            <p class="section-label">个人学习记录</p>
+            <h1>我的错题</h1>
+            <p>这里只显示账号“{{ g.user.username }}”的学习记录。原错题在巩固中答对一次即完成纠正，所属知识点还需答对 {{ verification_target }} 道不同题目。</p>
+        </div>
+        <div class="heading-actions">
+            <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+            {% if review_progress %}
+            <a class="button button-primary" href="{{ url_for('web.review') }}">继续错题巩固</a>
+            <form method="post" action="{{ url_for('web.start_review') }}"
+                  data-confirm-restart="当前错题巩固尚未完成，确定要放弃进度并重新开始吗？">
+                {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <input type="hidden" name="source_id" value="{{ selected_source }}">
+                <input type="hidden" name="chapter_id" value="{{ selected_chapter }}">
+                <button class="button button-secondary" type="submit" {% if not has_review_work %}disabled{% endif %}>
+                    重新开始巩固
+                </button>
+            </form>
+            {% else %}
+            <form method="post" action="{{ url_for('web.start_review') }}">
+                {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <input type="hidden" name="source_id" value="{{ selected_source }}">
+                <input type="hidden" name="chapter_id" value="{{ selected_chapter }}">
+                <button class="button button-primary" type="submit" {% if not has_review_work %}disabled{% endif %}>
+                    开始错题巩固
+                </button>
+            </form>
+            {% endif %}
+            <form method="post" action="{{ url_for('web.reset_mistakes') }}"
+                  data-confirm-reset="这会清空你的全部错题状态（答题历史仍会保留），确定要重置为 0 吗？">
+                {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <button class="button button-danger" type="submit"
+                        {% if not has_mistakes %}disabled{% endif %}>
+                    重置全部错题
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <form class="mistake-filters" method="get" action="{{ url_for('web.mistakes') }}"
+          data-picker-submit-on-change>
+        <div class="field-group">
+            <span class="picker-label" id="mistake-source-label">课件</span>
+            <div class="quiz-size-picker" data-select-picker="mistake-source" data-picker>
+                <input type="hidden" id="mistake-source" name="source" value="{{ selected_source }}" data-picker-value>
+                <button class="size-picker-trigger" type="button"
+                        aria-haspopup="listbox" aria-expanded="false"
+                        aria-controls="mistake-source-menu"
+                        aria-labelledby="mistake-source-label mistake-source-current">
+                    <span id="mistake-source-current" data-select-current>{% if selected_source %}{% for group in curriculum if selected_source == group.source.id %}{{ group.source.title }}{% endfor %}{% else %}All Course Materials{% endif %}</span>
+                </button>
+                <div class="size-picker-menu" id="mistake-source-menu" role="listbox"
+                     aria-labelledby="mistake-source-label" data-select-menu aria-hidden="true" inert>
+                    <button class="size-picker-option" type="button" role="option" data-picker-option data-value="" {% if not selected_source %}aria-selected="true"{% endif %}>All Course Materials</button>
+                    {% for group in curriculum %}
+                    <button class="size-picker-option" type="button" role="option" data-picker-option data-value="{{ group.source.id }}" {% if selected_source == group.source.id %}aria-selected="true"{% endif %}>{{ group.source.title }}</button>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        <div class="field-group">
+            <span class="picker-label" id="mistake-chapter-label">章节</span>
+            <div class="quiz-size-picker" data-select-picker="mistake-chapter" data-picker>
+                <input type="hidden" id="mistake-chapter" name="chapter" value="{{ selected_chapter }}" data-picker-value>
+                <button class="size-picker-trigger" type="button"
+                        aria-haspopup="listbox" aria-expanded="false"
+                        aria-controls="mistake-chapter-menu"
+                        aria-labelledby="mistake-chapter-label mistake-chapter-current">
+                    <span id="mistake-chapter-current" data-select-current>{% if selected_chapter %}{% for group in curriculum %}{% for entry in group.chapters if selected_chapter == entry.chapter.id %}{{ entry.chapter.title }}{% endfor %}{% endfor %}{% else %}All Chapters{% endif %}</span>
+                </button>
+                <div class="size-picker-menu" id="mistake-chapter-menu" role="listbox"
+                     aria-labelledby="mistake-chapter-label" data-select-menu aria-hidden="true" inert>
+                    <button class="size-picker-option" type="button" role="option" data-picker-option data-value="" {% if not selected_chapter %}aria-selected="true"{% endif %}>All Chapters</button>
+                    {% for group in curriculum %}
+                    {% for entry in group.chapters %}
+                    <button class="size-picker-option" type="button" role="option" data-picker-option data-value="{{ entry.chapter.id }}" {% if selected_chapter == entry.chapter.id %}aria-selected="true"{% endif %}>{{ entry.chapter.title }}</button>
+                    {% endfor %}
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </form>
+
+    <div class="summary-row" aria-label="错题统计">
+        <div class="summary-card">
+            <span>待纠正错题</span>
+            <strong>{{ stats.pending }}</strong>
+        </div>
+        <div class="summary-card">
+            <span>已纠正错题</span>
+            <strong>{{ stats.corrected }}</strong>
+        </div>
+    </div>
+
+    {% if weak_points %}
+    <section class="knowledge-summary" aria-labelledby="knowledge-summary-title">
+        <div class="section-heading">
+            <div>
+                <p class="section-label">章节强化进度</p>
+                <h2 id="knowledge-summary-title">薄弱知识点</h2>
+            </div>
+        </div>
+        <div class="table-card">
+            <div class="table-wrap">
+                <table class="mistake-table">
+                    <thead>
+                        <tr>
+                            <th>知识点</th>
+                            <th>待纠正错题</th>
+                            <th>强化验证</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for summary in weak_points %}
+                        <tr>
+                            <td data-label="知识点">{{ summary.chapter.title }}</td>
+                            <td data-label="待纠正错题">{{ summary.pending_wrong_count }} 道</td>
+                            <td data-label="强化验证">{{ summary.verification_count }} / {{ summary.verification_target }} 道不同题目</td>
+                            <td data-label="状态">
+                                <div class="knowledge-status">
+                                {% if summary.point.active %}
+                                <span class="status status-pending">待强化</span>
+                                {% else %}
+                                <span class="status status-mastered">✓ 强化完成</span>
+                                {% endif %}
+                                {% if summary.insufficient_questions %}
+                                <span class="knowledge-note">题量不足，无法完成完整迁移验证</span>
+                                {% endif %}
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+    {% endif %}
+
+    <div class="table-card">
+        {% if items %}
+        <div class="table-wrap">
+            <table class="mistake-table">
+                <thead>
+                    <tr>
+                        <th>题目</th>
+                        <th>错误次数</th>
+                        <th>纠正状态</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for item in items %}
+                    <tr>
+                        <td data-label="题目">
+                            <div class="mistake-question-content">
+                                <span class="question-en" data-glossary-highlight>{{ item.question.text }}</span>
+                                {% if item.question.text_zh %}
+                                <span class="translation-zh">{{ item.question.text_zh }}</span>
+                                {% endif %}
+
+                                <div class="mistake-context">
+                                    <strong>{% for chapter_id in item.question.chapter_ids %}{{ chapters_by_id[chapter_id].title }}{% if not loop.last %} · {% endif %}{% endfor %}</strong>
+                                    <span>{{ sources_by_id[item.question.source_id].title }}</span>
+                                    {% if item.question.section %}<span>{{ item.question.section }}</span>{% endif %}
+                                    {% if item.question.pages %}<span>p.{{ item.question.pages | join('–') }}</span>{% endif %}
+                                </div>
+                                <div class="mistake-answer-summary {% if not item.record.corrected %}mistake-answer-summary-private{% endif %}">
+                                    <div>
+                                        <strong>你的答案</strong>
+                                        <p>
+                                            {% set selected_options = item.question.options | selectattr('id', 'in', item.selected_answers) | list %}
+                                            {% if selected_options %}
+                                                {% for option in selected_options %}<span data-selected-option="{{ option.id }}" data-glossary-highlight>{{ option.text }}</span>{% if not loop.last %}、{% endif %}{% endfor %}
+                                            {% else %}
+                                                历史答案不可用
+                                            {% endif %}
+                                        </p>
+                                    </div>
+                                    {% if item.record.corrected %}
+                                    <div>
+                                        <strong>正确答案</strong>
+                                        <p>
+                                            {% for option in item.question.options if option.id in item.question.correct_answers %}
+                                            <span data-correct-option="{{ option.id }}" data-glossary-highlight>{{ option.text }}</span>{% if not loop.last %}、{% endif %}
+                                            {% endfor %}
+                                        </p>
+                                    </div>
+                                    {% endif %}
+                                </div>
+
+                                {% if item.record.corrected %}
+                                <details class="mastered-question-details" data-corrected-question="{{ item.question.id }}">
+                                    <summary>查看题目解析</summary>
+                                    <div class="mastered-detail-body">
+                                        <div class="mastered-detail-meta">
+                                            {% if item.question.question_type == "single" %}单选题{% else %}多选题{% endif %}
+                                        </div>
+
+                                        <section class="mastered-explanation">
+                                            <h3>题目解析</h3>
+                                            <p class="question-en" data-glossary-highlight>{{ item.question.explanation or "本题暂无英文解析。" }}</p>
+                                            {% if item.question.explanation_zh %}
+                                            <p class="translation-zh">{{ item.question.explanation_zh }}</p>
+                                            {% endif %}
+                                        </section>
+                                    </div>
+                                </details>
+                                {% endif %}
+                            </div>
+                        </td>
+                        <td data-label="错误次数">{{ item.record.wrong_count }}</td>
+                        <td data-label="纠正状态">{% if item.record.corrected %}已纠正{% else %}待纠正{% endif %}</td>
+                        <td data-label="状态">
+                            {% if item.record.corrected %}
+                            <span class="status status-mastered">✓ 已纠正</span>
+                            {% else %}
+                            <span class="status status-pending">待纠正</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <h2>当前范围没有错题</h2>
+            <p>可更改筛选条件，或从章节练习开始继续学习。</p>
+            <a class="button button-primary" href="{{ url_for('web.quiz_setup') }}">选择章节开始练习</a>
+        </div>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

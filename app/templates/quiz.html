@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+
+{% set mode_name = "正常练习" if mode.value == "normal" else "错题巩固" %}
+{% block title %}{{ mode_name }} · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+{% if is_complete %}
+<section class="result-card">
+    <p class="section-label">{{ mode_name }}</p>
+    <h1>本轮完成</h1>
+    {% if mode.value == "review" %}
+        {% if state.review_shortages %}
+        <p class="lead">当前可用题目已完成，但部分知识点缺少足够的不同题目，暂时无法完成 2 道题的迁移验证。</p>
+        <div class="review-feedback">
+            {% for shortage in state.review_shortages %}
+            <p>{{ shortage.chapter_title }}：已验证 {{ shortage.verified_count }} / {{ shortage.verification_target }} 道不同题目（当前题库共 {{ shortage.available_question_count }} 道）。</p>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="lead">当前范围的错题已纠正，薄弱知识点已完成强化；本轮共完成 {{ state.correct_count + state.incorrect_count }} 次作答。</p>
+        {% endif %}
+    {% else %}
+    <p class="lead">你已完成本轮全部 {{ state.initial_question_count }} 道题，正确率 {{ accuracy }}%。</p>
+    {% endif %}
+    <div class="stats-grid result-stats">
+        <div class="stat stat-correct">
+            <strong>{{ state.correct_count }}</strong>
+            <span>回答正确</span>
+        </div>
+        <div class="stat stat-incorrect">
+            <strong>{{ state.incorrect_count }}</strong>
+            <span>回答错误</span>
+        </div>
+    </div>
+    <div class="inline-actions">
+        {% if mode.value == "normal" %}
+        <form method="post" action="{{ url_for('web.start_quiz') }}">
+            {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+            <input type="hidden" name="quiz_size" value="{{ state.requested_size }}">
+            {% for chapter_id in state.chapter_ids %}
+            <input type="hidden" name="chapter_ids" value="{{ chapter_id }}">
+            {% endfor %}
+            <button class="button button-primary" type="submit">按相同题量再练一轮</button>
+        </form>
+        <a class="button button-secondary" href="{{ url_for('web.quiz_setup') }}">选择其他章节</a>
+        <a class="button button-secondary" href="{{ url_for('web.mistakes') }}">查看我的错题</a>
+        {% else %}
+        <a class="button button-primary" href="{{ url_for('web.mistakes') }}">返回我的错题</a>
+        {% endif %}
+        <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+    </div>
+</section>
+{% else %}
+<section class="quiz-layout">
+    <div class="quiz-navigation">
+        <a class="back-link" href="{{ url_for('web.home') }}">返回首页</a>
+        <div class="quiz-meta">
+            <span class="mode-pill">{{ mode_name }}</span>
+            <span>
+                {% if mode.value == "review" %}
+                第 {{ state.current_index + 1 }} 次作答 · 当前队列 {{ total }} 次
+                {% else %}
+                第 {{ state.current_index + 1 }} / {{ total }} 题
+                {% endif %}
+            </span>
+        </div>
+    </div>
+    <div class="progress" role="progressbar" aria-label="练习进度"
+         aria-valuenow="{{ state.current_index + 1 }}" aria-valuemin="1" aria-valuemax="{{ total }}">
+        <span style="width: {{ ((state.current_index + 1) / total * 100) | round }}%"></span>
+    </div>
+
+    <article class="question-card">
+        <div class="question-context">
+            {% for chapter in chapters %}<span>{{ chapter.title }}</span>{% endfor %}
+            <span>{{ source.title }}</span>
+            {% if question.section %}<span>{{ question.section }}</span>{% endif %}
+            {% if question.pages %}<span>p.{{ question.pages | join('–') }}</span>{% endif %}
+        </div>
+        <div class="question-heading">
+        <div class="question-type">
+            {% if mode.value == "review" %}
+                {% if review_item.role == "original_correction" %}错题纠正{% else %}同知识点强化{% endif %} ·
+            {% endif %}
+            {% if question.question_type == "single" %}单选题{% else %}多选题 · 可选择多项 · 必须完全匹配{% endif %}
+        </div>
+        <span class="question-position">题目 {{ state.current_index + 1 }}</span>
+        </div>
+        <h1 class="question-text">
+            <span class="question-en" data-glossary-highlight>{{ question.text }}</span>
+            {% if question.text_zh %}
+            <span class="translation-zh question-translation">{{ question.text_zh }}</span>
+            {% endif %}
+        </h1>
+
+        {% set feedback = state.get('feedback') %}
+        {% if state.status == "pending" %}
+        <form class="answer-form" method="post" action="{{ url_for(answer_endpoint) }}" data-answer-form>
+            {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+            <input type="hidden" name="answer_token" value="{{ state.answer_token }}">
+            <fieldset class="options">
+                <legend class="sr-only">请选择答案</legend>
+                {% for option in ordered_options %}
+                <div class="option-row" data-option-row>
+                    <input
+                        id="option-{{ loop.index0 }}"
+                        type="{{ 'radio' if question.question_type == 'single' else 'checkbox' }}"
+                        name="answers"
+                        value="{{ option.id }}"
+                        aria-labelledby="option-label-{{ loop.index0 }} option-text-{{ loop.index0 }}"
+                        {% if question.question_type == 'single' %}required{% endif %}
+                    >
+                    <span class="option-index" id="option-label-{{ loop.index0 }}">{{ option_label(loop.index0) }}</span>
+                    <span class="option-text" id="option-text-{{ loop.index0 }}">
+                        <span class="question-en" data-glossary-highlight>{{ option.text }}</span>
+                        {% if option.text_zh %}
+                        <span class="translation-zh">{{ option.text_zh }}</span>
+                        {% endif %}
+                    </span>
+                </div>
+                {% endfor %}
+            </fieldset>
+            <p class="selection-hint" data-selection-hint>请至少选择一个答案</p>
+            <button class="button button-primary submit-answer" type="submit"
+                    data-submit-answer disabled>提交答案</button>
+        </form>
+        {% else %}
+        <div class="options options-answered" aria-label="答案反馈">
+            {% for option in ordered_options %}
+                {% set selected = option.id in feedback.selected_answers %}
+                {% set correct = option.id in question.correct_answers %}
+                <div class="option-row {% if correct and selected %}option-correct{% elif correct %}option-missed{% elif selected %}option-wrong{% endif %}">
+                    <span class="answer-marker" aria-hidden="true">
+                        {% if correct and selected %}✓{% elif correct %}!{% elif selected %}✗{% else %}{{ option_label(loop.index0) }}{% endif %}
+                    </span>
+                    <span class="option-text">
+                        <span class="question-en" data-glossary-highlight>{{ option.text }}</span>
+                        {% if option.text_zh %}
+                        <span class="translation-zh">{{ option.text_zh }}</span>
+                        {% endif %}
+                    </span>
+                    {% if correct and selected %}
+                    <span class="selected-tag tag-correct">正确选择</span>
+                    {% elif correct %}
+                    <span class="selected-tag tag-missed">漏选</span>
+                    {% elif selected %}
+                    <span class="selected-tag tag-wrong">误选</span>
+                    {% endif %}
+                </div>
+            {% endfor %}
+        </div>
+
+        <section class="feedback {% if feedback.is_correct %}feedback-correct{% else %}feedback-wrong{% endif %}" role="status" tabindex="-1" data-feedback>
+            <h2>{% if feedback.is_correct %}回答正确{% else %}回答错误{% endif %}</h2>
+
+            {% if mode.value == "review" %}
+            <div class="review-feedback">
+                {% if feedback.is_correct %}
+                    {% if feedback.review_role == "original_correction" %}
+                    <strong>原错题已纠正</strong>
+                    {% else %}
+                    <strong>同知识点强化题回答正确</strong>
+                    {% endif %}
+                    {% if feedback.knowledge_updates %}
+                        {% for update in feedback.knowledge_updates %}
+                        <p>
+                            {{ update.chapter_title }}：
+                            {% if update.active %}
+                            本知识点已验证 {{ update.verified_count }} / {{ update.verification_target }} 道不同题目。
+                            {% else %}
+                            本知识点强化完成（{{ update.verified_count }} / {{ update.verification_target }} 道不同题目）。
+                            {% endif %}
+                        </p>
+                        {% endfor %}
+                    {% else %}
+                    <p>这道题所属的知识点已保持完成状态。</p>
+                    {% endif %}
+                {% else %}
+                    {% if feedback.review_role == "transfer_verification" %}
+                        {% if feedback.became_wrong_question %}
+                        <strong>这道题已加入错题</strong>
+                        {% else %}
+                        <strong>这道题已重新进入待纠正状态</strong>
+                        {% endif %}
+                    {% else %}
+                    <strong>原错题仍待纠正</strong>
+                    {% endif %}
+                    <p>相关知识点的强化验证已重新开始。</p>
+                {% endif %}
+            </div>
+            {% endif %}
+
+            <div class="answer-summary">
+                <div>
+                    <strong>你的答案</strong>
+                    <p data-glossary-highlight>
+                    {% set selected_options = ordered_options | selectattr('id', 'in', feedback.selected_answers) | list %}
+                    {% if selected_options %}
+                        {{ selected_options | map(attribute='text') | join('、') }}
+                    {% else %}
+                        未选择
+                    {% endif %}
+                    </p>
+                </div>
+                <div>
+                    <strong>正确答案</strong>
+                    <p data-glossary-highlight>{{ ordered_options | selectattr('id', 'in', question.correct_answers) | map(attribute='text') | join('、') }}</p>
+                </div>
+            </div>
+            <div class="explanation">
+                <strong>英文解析</strong>
+                <p data-glossary-highlight>{{ question.explanation or "本题暂无英文解析。" }}</p>
+                {% if question.explanation_zh %}
+                <div class="translation-zh translation-explanation">
+                    <strong>中文解析</strong>
+                    <p>{{ question.explanation_zh }}</p>
+                </div>
+                {% endif %}
+            </div>
+        </section>
+
+        <form method="post" action="{{ url_for(next_endpoint) }}">
+            {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+            <input type="hidden" name="answer_token" value="{{ state.answer_token }}">
+            <button class="button button-primary submit-answer" type="submit">
+                {% if mode.value == "review" %}继续巩固{% elif state.current_index + 1 == total %}查看本轮结果{% else %}下一题{% endif %}
+            </button>
+        </form>
+        {% endif %}
+    </article>
+</section>
+{% endif %}
+{% endblock %}

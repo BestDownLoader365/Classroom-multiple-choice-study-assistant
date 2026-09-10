@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block title %}首页 · {{ bank_title_zh or bank_title }}{% endblock %}
+{% block page_shell_class %}page-shell-workspace{% endblock %}
+
+{% block content %}
+<section class="home-dashboard">
+    <header class="home-intro">
+        <div class="home-title-block">
+            <p class="section-label">当前题库</p>
+            <h1>{{ bank_title_zh or bank_title }}</h1>
+        </div>
+    </header>
+
+    <div class="home-actions">
+        <section class="mode-action-group practice-launcher">
+            {% if normal_progress %}
+            <div class="section-heading compact-heading">
+                <div>
+                    <p class="section-label">进行中的练习</p>
+                    <h2>正常练习</h2>
+                </div>
+                <span class="session-position">第 {{ normal_progress.current }} / {{ normal_progress.total }} 题</span>
+            </div>
+            <div class="resume-block">
+                <div class="resume-progress" role="progressbar" aria-label="正常练习进度"
+                     aria-valuemin="0" aria-valuemax="{{ normal_progress.total }}"
+                     aria-valuenow="{{ normal_progress.current - 1 }}">
+                    <span style="width: {{ ((normal_progress.current - 1) / normal_progress.total * 100) if normal_progress.total else 0 }}%"></span>
+                </div>
+            </div>
+            <div class="practice-actions">
+                <a class="button button-primary resume-button" href="{{ url_for('web.quiz') }}">
+                    <span class="sr-only">继续正常练习：</span>继续答题 <span aria-hidden="true">→</span>
+                </a>
+                <form method="get" action="{{ url_for('web.quiz_setup') }}"
+                      data-confirm-restart="当前正常练习尚未完成，确定要放弃进度并重新开始吗？">
+                    <button class="button button-ghost restart-button" type="submit">重新开始正常练习</button>
+                </form>
+            </div>
+            <div class="home-metrics" aria-label="题库概览">
+                <div><strong>{{ question_count }}</strong><span>题库题目</span></div>
+                <div><strong>{{ stats.pending }}</strong><span>待纠正</span></div>
+                <div><strong>{{ stats.corrected }}</strong><span>已纠正</span></div>
+            </div>
+            {% else %}
+            <div class="section-heading compact-heading">
+                <div>
+                    <p class="section-label">下一步</p>
+                    <h2>开始一轮练习</h2>
+                </div>
+            </div>
+            <div class="practice-actions">
+                <a class="button button-primary resume-button" href="{{ url_for('web.quiz_setup') }}">开始正常练习 <span aria-hidden="true">→</span></a>
+            </div>
+            <p class="launcher-note">快速练习 · 10 题　/　标准练习 · 20 题　/　强化练习 · 50 题</p>
+            <div class="home-metrics" aria-label="题库概览">
+                <div><strong>{{ question_count }}</strong><span>题库题目</span></div>
+                <div><strong>{{ stats.pending }}</strong><span>待纠正</span></div>
+                <div><strong>{{ stats.corrected }}</strong><span>已纠正</span></div>
+            </div>
+            {% endif %}
+        </section>
+
+        <section class="mode-action-group review-launcher">
+            <div class="section-heading">
+                <div>
+                    <p class="section-label">次要任务</p>
+                    <h2>复习与查阅</h2>
+                </div>
+            </div>
+            <nav class="resource-list" aria-label="复习与查阅">
+                <a class="resource-row" href="{{ url_for('web.mistakes') }}">
+                    <span class="resource-row-copy">
+                        <strong>我的错题</strong>
+                        {% if stats.pending or stats.corrected or review_progress %}
+                        <span>{{ stats.pending }} 道待纠正{% if stats.corrected %} · {{ stats.corrected }} 道已纠正{% endif %}</span>
+                        {% else %}
+                        <span>暂无待纠正错题，答错的题目会在这里出现。</span>
+                        {% endif %}
+                    </span>
+                    <span class="resource-row-arrow" aria-hidden="true">→</span>
+                </a>
+                <a class="resource-row" href="{{ url_for('web.glossary') }}">
+                    <span class="resource-row-copy">
+                        <strong>专业词汇</strong>
+                        <span>{{ glossary_data.title_zh or glossary_data.title }}</span>
+                    </span>
+                    <span class="resource-row-arrow" aria-hidden="true">→</span>
+                </a>
+            </nav>
+            {% if review_progress %}
+            <div class="resume-actions">
+                <a class="button button-ghost" href="{{ url_for('web.review') }}">
+                    继续错题巩固（{{ review_progress.current }} / {{ review_progress.total }}）
+                </a>
+                <form method="post" action="{{ url_for('web.start_review') }}"
+                      data-confirm-restart="当前错题巩固尚未完成，确定要放弃进度并重新开始吗？">
+                    {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                    <button class="button button-ghost" type="submit">重新开始巩固</button>
+                </form>
+            </div>
+            {% endif %}
+        </section>
+    </div>
+</section>
+{% endblock %}
