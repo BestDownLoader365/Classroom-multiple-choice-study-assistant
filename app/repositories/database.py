@@ -17,6 +17,7 @@ class Database:
         self.database_path = database_path
         self._transaction_connection = ContextVar("mcq_connection", default=None)
         self._rate_limits = None
+        self._bank_state = None
 
     def initialize(self) -> None:
         """Create the local database and tables on first startup."""
@@ -155,44 +156,15 @@ class Database:
         Older databases infer their bank from saved progress. If they contain
         learning data but no fingerprint, reset it rather than misattribute it.
         """
-        with self.transaction() as connection:
-            connection.execute("""CREATE TABLE IF NOT EXISTS question_bank_state (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                bank_version TEXT NOT NULL,
-                generation INTEGER NOT NULL
-            )""")
-            row = connection.execute(
-                "SELECT bank_version, generation FROM question_bank_state WHERE id = 1"
-            ).fetchone()
-            generation = row["generation"] if row else 0
-            if row:
-                changed = row["bank_version"] != bank_version
-            else:
-                versions = {item[0] for item in connection.execute(
-                    "SELECT DISTINCT bank_version FROM quiz_progress"
-                )}
-                has_history = any(connection.execute(
-                    f"SELECT 1 FROM {table} LIMIT 1"
-                ).fetchone() for table in ("attempts", "wrong_questions"))
-                changed = bool(versions - {bank_version}) or (not versions and has_history)
-            if changed:
-                for table in (
-                    "attempts",
-                    "wrong_questions",
-                    "weak_knowledge_points",
-                    "quiz_progress",
-                ):
-                    connection.execute(f"DELETE FROM {table}")
-                connection.execute("DELETE FROM sqlite_sequence WHERE name = 'attempts'")
-                generation += 1
-            connection.execute(
-                """INSERT INTO question_bank_state VALUES (1, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    bank_version = excluded.bank_version,
-                    generation = excluded.generation""",
-                (bank_version, generation),
-            )
-            return generation
+        return self._bank_state_repository().synchronize(bank_version)
+
+    def _bank_state_repository(self):
+        """Lazily build the bank-state repository (avoids an import cycle)."""
+        if self._bank_state is None:
+            from .question_bank_state_repository import QuestionBankStateRepository
+
+            self._bank_state = QuestionBankStateRepository(self)
+        return self._bank_state
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

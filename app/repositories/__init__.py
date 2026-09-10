@@ -5,6 +5,7 @@ from .database import Database
 from .glossary_loader import GlossaryError, GlossaryLoader, normalize_glossary_label
 from .glossary_repository import GlossaryRepository
 from .progress_repository import ProgressRepository
+from .question_bank_state_repository import QuestionBankStateRepository
 from .question_loader import QuestionBankError, QuestionLoader
 from .question_repository import QuestionRepository
 from .rate_limit_repository import RateLimitRepository
@@ -20,6 +21,7 @@ __all__ = [
     "GlossaryRepository",
     "ProgressRepository",
     "QuestionBankError",
+    "QuestionBankStateRepository",
     "QuestionLoader",
     "QuestionRepository",
     "RateLimitRepository",
