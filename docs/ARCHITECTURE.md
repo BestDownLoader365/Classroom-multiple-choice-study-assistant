@@ -90,10 +90,12 @@ MCQ_Template/
 ├── questions.json
 ├── glossary.json
 ├── README.md
-├── ARCHITECTURE.md
-├── QUESTION_JSON_GUIDE.md
-├── GLOSSARY_JSON_GUIDE.md
 ├── pytest.ini
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── FRONTEND_DESIGN_SYSTEM.md
+│   ├── QUESTION_JSON_GUIDE.md
+│   └── GLOSSARY_JSON_GUIDE.md
 ├── deploy/
 │   ├── mcq-template.service
 │   └── nginx-mcq-template.conf
@@ -207,7 +209,7 @@ aliases, translations, definitions and optional categories. Every process valida
 and loads it once at startup. It is independent of learner state and the question-bank
 fingerprint.
 
-#### `QUESTION_JSON_GUIDE.md` and `GLOSSARY_JSON_GUIDE.md`
+#### `docs/QUESTION_JSON_GUIDE.md` and `docs/GLOSSARY_JSON_GUIDE.md`
 
 These are the user-facing authoring contracts for the two startup-loaded JSON files.
 They document the fields accepted by the current loaders, validation commands,
@@ -1072,7 +1074,7 @@ To replace this course with Statistics, Finance, Medicine, or another domain,
 provide schema-compatible `questions.json` and `glossary.json` files and restart
 all application workers. No Python, HTML, JavaScript, CSS, or database changes
 are required. The exact authoring contracts are maintained in
-`QUESTION_JSON_GUIDE.md` and `GLOSSARY_JSON_GUIDE.md`.
+`docs/QUESTION_JSON_GUIDE.md` and `docs/GLOSSARY_JSON_GUIDE.md`.
 
 ## Course replacement and global bank state
 

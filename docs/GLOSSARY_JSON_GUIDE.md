@@ -2,7 +2,7 @@
 
 本文面向创建、审核和维护课程术语库的用户。目标是写出一份能被当前应用直接加载的 `glossary.json`，让术语学习页、题目与错题中的术语高亮，以及中文释义弹层自动适配任意课程。
 
-本文描述当前项目实际支持的契约。最终校验逻辑以 [`app/repositories/glossary_loader.py`](app/repositories/glossary_loader.py) 为准；题库本身的写法见 [`questions.json` 题库编写指南](QUESTION_JSON_GUIDE.md)。
+本文描述当前项目实际支持的契约。最终校验逻辑以 [`app/repositories/glossary_loader.py`](../app/repositories/glossary_loader.py) 为准；题库本身的写法见 [`questions.json` 题库编写指南](QUESTION_JSON_GUIDE.md)。
 
 ## 1. 文件用途与放置位置
 

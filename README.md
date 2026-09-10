@@ -74,8 +74,8 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 两个数据文件都有与当前 Loader 同步的独立指南：
 
-- [`questions.json` 题库编写指南](QUESTION_JSON_GUIDE.md)：题目、目录、多章节归属、内容质量、校验与迁移；
-- [`glossary.json` 专业术语库编写指南](GLOSSARY_JSON_GUIDE.md)：术语、别名、翻译、定义、分类、匹配规则、覆盖审计与验收。
+- [`questions.json` 题库编写指南](docs/QUESTION_JSON_GUIDE.md)：题目、目录、多章节归属、内容质量、校验与迁移；
+- [`glossary.json` 专业术语库编写指南](docs/GLOSSARY_JSON_GUIDE.md)：术语、别名、翻译、定义、分类、匹配规则、覆盖审计与验收。
 
 ```json
 {
@@ -143,7 +143,7 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 ## 将专业词汇系统用于其他课程
 
-专业词汇是独立、通用的数据子系统。`questions.json` 定义要练习的题目，根目录的 `glossary.json` 定义当前课程需要识别和学习的词汇；浏览器不会直接请求该文件，应用会在启动时完成校验并通过模板安全下发。完整字段和匹配规则见 [`GLOSSARY_JSON_GUIDE.md`](GLOSSARY_JSON_GUIDE.md)。
+专业词汇是独立、通用的数据子系统。`questions.json` 定义要练习的题目，根目录的 `glossary.json` 定义当前课程需要识别和学习的词汇；浏览器不会直接请求该文件，应用会在启动时完成校验并通过模板安全下发。完整字段和匹配规则见 [`docs/GLOSSARY_JSON_GUIDE.md`](docs/GLOSSARY_JSON_GUIDE.md)。
 
 更换课程只需要：
 

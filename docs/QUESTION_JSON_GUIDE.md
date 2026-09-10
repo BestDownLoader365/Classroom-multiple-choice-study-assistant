@@ -2,7 +2,7 @@
 
 本文面向生成、审核和维护题库的开发者。目标是生成一份可以被当前应用直接加载的 `questions.json`，无需为不同课程修改 Python、HTML 或 JavaScript 代码。
 
-本文描述的是当前项目实际支持的题库契约。最终校验逻辑以 [`app/repositories/question_loader.py`](app/repositories/question_loader.py) 为准。专业术语、别名、翻译、定义和分类不写在题库中，请使用独立的 [`glossary.json` 专业术语库编写指南](GLOSSARY_JSON_GUIDE.md)。
+本文描述的是当前项目实际支持的题库契约。最终校验逻辑以 [`app/repositories/question_loader.py`](../app/repositories/question_loader.py) 为准。专业术语、别名、翻译、定义和分类不写在题库中，请使用独立的 [`glossary.json` 专业术语库编写指南](GLOSSARY_JSON_GUIDE.md)。
 
 ## 1. 适用范围
 
