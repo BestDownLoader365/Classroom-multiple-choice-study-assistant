@@ -2,7 +2,7 @@
 
 ## 1. Purpose and Scope
 
-This project is a local multiple-choice learning application built with Flask. It loads an English question bank and a separate domain glossary from JSON, provides optional Chinese learning aids, grades single-choice and multiple-choice answers, stores personal learning history, gives normal practice a random coverage guarantee, and reviews mistakes through one-answer correction plus same-chapter transfer verification.
+This project is a local multiple-choice learning application built with Flask. It loads an English question bank and a separate domain glossary from JSON, provides optional Chinese learning aids, grades single-choice and multiple-choice answers, stores personal learning history, gives normal practice a random coverage guarantee, and reviews mistakes through one-answer correction, same-chapter transfer verification, and fixed-interval spaced repetition (SRS) for corrected questions.
 
 The application deliberately uses a small deployment model:
 
@@ -19,7 +19,7 @@ The project has four different kinds of state:
 |---|---|---|
 | Question-bank state | `questions.json`, then immutable in-memory objects | question text, options, correct answers, explanations, Chinese translations |
 | Glossary content | `glossary.json`, then immutable in-memory objects | canonical terms, aliases, translations, definitions, dynamic categories |
-| Persistent learner state | `instance/mcq.db` | users, attempts, question correction state, weak-chapter verification, normal/review progress |
+| Persistent learner state | `instance/mcq.db` | users, attempts, question correction state and SRS schedule, weak-chapter verification, normal/review progress |
 | Temporary browser state | Flask's signed session cookie | signed-in user ID, flash messages |
 
 Question content is not copied into SQLite. Persistent records refer to questions by their stable question IDs.
@@ -60,6 +60,7 @@ flowchart TD
     WrongService --> AttemptRepo[AttemptRepository]
     WrongService --> WrongRepo[WrongQuestionRepository]
     WrongService --> WeakService
+    WrongService --> SRS[srs_service scheduling rules]
     WeakService --> WeakRepo[WeakKnowledgePointRepository]
     QuizService --> QuestionRepo[QuestionRepository]
     WrongService --> QuestionRepo
@@ -125,6 +126,7 @@ MCQ_Template/
 │   │   ├── grading_service.py
 │   │   ├── progress_state.py
 │   │   ├── quiz_service.py
+│   │   ├── srs_service.py
 │   │   ├── wrong_question_service.py
 │   │   └── weak_knowledge_point_service.py
 │   ├── web/
@@ -166,6 +168,8 @@ MCQ_Template/
     ├── test_quiz_service.py
     ├── test_wrong_question_service.py
     ├── test_learning_upgrade.py
+    ├── test_srs.py
+    ├── test_srs_web.py
     ├── test_progress_sync.py
     ├── test_progress_state.py
     ├── test_web.py
@@ -279,7 +283,7 @@ This file contains immutable dataclasses and the quiz-mode enum:
 - `Glossary`: root glossary metadata and an immutable tuple of `GlossaryTerm` objects.
 - `User`: one local account with a UUID, username, password hash, and creation time.
 - `Attempt`: one persisted answer event.
-- `WrongQuestion`: the current mistake and correction state for one user/question pair. Its `corrected` property maps to the legacy SQLite `mastered` column.
+- `WrongQuestion`: the current mistake and correction state for one user/question pair. Its `corrected` property maps to the legacy SQLite `mastered` column. It also carries the SRS schedule: `srs_level` (0 for a freshly corrected question) and `next_review_at` (ISO timestamp, `None` while uncorrected or unscheduled).
 - `WeakKnowledgePoint`: one user/chapter pair containing active state and distinct verified Review question IDs.
 
 These objects do not know about Flask, HTML, or SQL. They are the shared data language between repositories and services.
@@ -304,7 +308,7 @@ Repositories are responsible for loading or persisting data. They do not decide 
 - rolls back failed operations;
 - always closes the connection.
 
-There is no database migration subsystem. Schema creation is additive. `weak_knowledge_points` is created with `CREATE TABLE IF NOT EXISTS`, so an unchanged old database starts without a manual command. The separate bank synchronization step clears all learner course data, including weak points, when the bank changes.
+There is no database migration framework. Schema creation is additive, and column additions use guarded, idempotent `ALTER TABLE` statements: `Database.initialize()` checks `PRAGMA table_info(...)` before adding the `wrong_questions.srs_level` and `next_review_at` columns to databases that predate spaced repetition. Legacy rows keep `srs_level = 0` and `next_review_at = NULL`, so they are never scheduled until corrected again. `weak_knowledge_points` is created with `CREATE TABLE IF NOT EXISTS`, so an unchanged old database starts without a manual command. The separate bank synchronization step clears all learner course data, including weak points, when the bank changes.
 
 `Database.transaction()` uses `BEGIN IMMEDIATE` and a context-local connection so progress token checks, answer attempts, correction/weak-point updates and progress changes commit or roll back together. SQLite serializes these transactions across threads and Gunicorn workers. Repository operations inside the transaction reuse its connection.
 
@@ -371,8 +375,11 @@ Inserts one row for every graded answer, then retains only the three most recent
 Maintains question-level state for each `(learner_id, question_id)` pair:
 
 - a real wrong answer in either mode creates or reopens the record;
-- every wrong answer increments `wrong_count`, clears the legacy `review_streak`, and sets legacy `mastered=0`;
-- one correct Review answer for an existing wrong record sets `review_streak=1` and `mastered=1`, whose current domain meaning is `corrected`;
+- every wrong answer increments `wrong_count`, clears the legacy `review_streak`, sets legacy `mastered=0`, and resets the SRS schedule (`srs_level=0`, `next_review_at=NULL`) so a failed review always returns to the plain correction flow first;
+- one correct Review answer for an uncorrected record sets `review_streak=1` and `mastered=1`, whose current domain meaning is `corrected`, and starts the SRS schedule at level 0 with the supplied `next_review_at`;
+- a correct Review answer for an already-corrected, due record advances the SRS schedule through `record_srs_reviewed()` (guarded by `mastered=1`);
+- a correct Review answer for an already-corrected but not-yet-due record leaves the SRS schedule untouched;
+- `get_due()` returns one learner's corrected records whose `next_review_at` has been reached (inclusive comparison on ISO UTC strings);
 - a correct transfer question with no prior wrong record never creates one;
 - resetting mistakes deletes only the signed-in learner's rows and leaves attempts intact.
 
@@ -392,8 +399,8 @@ The central boundary is:
 Normal Selection Policy != Review Selection Policy
 
 Normal: filter → fairness selection → round queue
-Review: wrong correction state + weak knowledge state
-        → original/transfer selection → review queue
+Review: wrong correction state + due SRS schedule + weak knowledge state
+        → original/srs/transfer selection → review queue
 ```
 
 ### `app/services/grading_service.py`
@@ -422,9 +429,11 @@ Normal selection receives no wrong-question or weak-knowledge input. The route c
 **Review Selection Policy**
 
 - starts with all real wrong questions whose legacy database flag maps to `corrected=False`;
-- each item records `original_correction` or `transfer_verification` and an optional target chapter;
-- after pending originals, active weak chapters choose a random live same-chapter ID not already verified and not equal to the immediately preceding occurrence where an alternative exists;
+- each item records `original_correction`, `srs_review`, or `transfer_verification` and an optional target chapter;
+- after pending originals, corrected questions whose SRS `next_review_at` has been reached are selected as `srs_review` items;
+- after due SRS reviews, active weak chapters choose a random live same-chapter ID not already verified and not equal to the immediately preceding occurrence where an alternative exists;
 - if a wrong original needs spacing, another pending original or a transfer question is preferred before falling back to immediate repetition;
+- a question occupies exactly one state at a time (`corrected=False` rows never carry a due timestamp), so it cannot enter the queue twice through different roles;
 - no weighted sampling and no Normal fairness state are used;
 - when no distinct candidate exists, selection returns finite shortage metadata and logs a warning.
 
@@ -446,12 +455,26 @@ For a normal answer:
 For a review answer:
 
 - every result is written to `attempts`;
-- an incorrect result creates/reopens the concrete wrong question and resets all of its chapter verification;
-- a correct result marks an existing wrong question corrected after that one answer;
+- an incorrect result creates/reopens the concrete wrong question, clears its SRS schedule, and resets all of its chapter verification;
+- a correct result marks an existing uncorrected wrong question corrected after that one answer and starts its SRS schedule (level 0, one day later);
+- a correct result for an already-corrected question whose SRS review is due advances the schedule one level (3/7/15/30 days, capped at 30);
+- a correct result for an already-corrected question that is not due leaves the schedule untouched;
 - every correct result contributes its question ID once to each active chapter on the question;
 - a transfer question is not inserted into `wrong_questions` unless its submitted answer is actually wrong.
 
-It also joins persistent wrong-question records with live in-memory questions and each question's latest incorrect selection from `attempts`. Source/chapter filtering is applied to this joined model. If a recorded question ID no longer exists in `questions.json`, the item is skipped and a warning is logged.
+It also joins persistent wrong-question records with live in-memory questions and each question's latest incorrect selection from `attempts`. Source/chapter filtering is applied to this joined model. If a recorded question ID no longer exists in `questions.json`, the item is skipped and a warning is logged. The same join/filter pipeline powers `get_due_srs_items()` / `get_due_srs_count()` / `get_filtered_due_srs_question_ids()`, which back the home-page "due today" entry and SRS review selection.
+
+### `app/services/srs_service.py`
+
+Pure, Flask-free spaced-repetition scheduling rules shared by the wrong-question service and its tests:
+
+- `SRS_INTERVAL_DAYS = (1, 3, 7, 15, 30)` is the single source of truth for the level ladder; the last entry caps every level at or beyond it;
+- `initial_schedule(now)` returns level 0 with `next_review_at` one day out, applied whenever a correction completes;
+- `advanced_schedule(level, now)` increments the level and returns the next due timestamp for the new level;
+- `is_due(next_review_at, now)` compares aware UTC datetimes and treats the exact scheduled moment as due;
+- `utc_now()` / `parse_timestamp()` centralize time handling; naive stored timestamps are interpreted as UTC so naive/aware comparisons never mix.
+
+Every function accepts `now` explicitly, which keeps scheduling deterministic under test. There is no background scheduler: "due" is only evaluated when a learner opens a page or enters Review.
 
 ### `app/services/weak_knowledge_point_service.py`
 
@@ -527,7 +550,7 @@ Each state dictionary contains fields such as:
 | `chapter_ids` / `source_ids` | Stable curriculum filters for restarting the same focused round |
 | `initial_question_count` | Number of questions present at round start |
 | `fairness_scope` / `fairness_remaining_ids` | Normal-only eligible-set signature and remaining coverage bag |
-| `review_items` | Review-only queue metadata: question ID, `original_correction` / `transfer_verification`, and optional target chapter |
+| `review_items` | Review-only queue metadata: question ID, `original_correction` / `srs_review` / `transfer_verification`, and optional target chapter |
 | `corrected_count` / `knowledge_completed_count` | Review round outcomes |
 | `review_shortages` | Finite completion metadata when a chapter has too few distinct live questions |
 | `feedback` | Temporary result data for the answered question |
@@ -538,9 +561,9 @@ Old Normal progress remains valid without fairness fields; the next new Normal r
 
 ### Review queue behavior
 
-`POST /review/start` persists all currently uncorrected originals as role-bearing queue items. Answer submission persists grading and feedback but does not randomize the next candidate. Only `POST /review/next`, after advancing beyond the existing queue, asks the Review Selection Policy for one later item. The generated question ID, role, target chapter, option seed, token and feedback therefore remain stable across GET refreshes and devices.
+`POST /review/start` persists all currently uncorrected originals as role-bearing queue items; when none are pending, all currently due SRS reviews are queued instead. Answer submission persists grading and feedback but does not randomize the next candidate. Only `POST /review/next`, after advancing beyond the existing queue, asks the Review Selection Policy for one later item: a pending original first, then a due SRS review, then a same-chapter transfer. The generated question ID, role, target chapter, option seed, token and feedback therefore remain stable across GET refreshes and devices.
 
-The queue ends only when its selected scope has no uncorrected original and no active weak chapter below 2/2. If the live bank cannot supply two distinct IDs, the service does not loop or count a duplicate; it leaves the chapter active, logs a warning, and completes the finite page with a shortage explanation.
+The queue ends only when its selected scope has no uncorrected original, no due SRS review, and no active weak chapter below 2/2. If the live bank cannot supply two distinct IDs, the service does not loop or count a duplicate; it leaves the chapter active, logs a warning, and completes the finite page with a shortage explanation.
 
 ### Error handling
 
@@ -558,7 +581,7 @@ Renders both login and registration forms. The route passes a page mode so one t
 
 ### `app/templates/home.html`
 
-Shows the active bank title, question count, mistake statistics, entry to chapter selection, resume links, and restart actions.
+Shows the active bank title, question count, mistake statistics, entry to chapter selection, resume links, and restart actions. A resource row in the review section surfaces the signed-in learner's due SRS count ("今日待复习 X 题"): it links into the in-progress review round when one exists, otherwise submits `POST /review/start`; with nothing due it renders the static "今日暂无到期复习" row.
 
 ### `app/templates/quiz_setup.html`
 
@@ -576,11 +599,11 @@ Renders normal practice and review with one shared template. It handles:
 - explanations and role-aware correction/knowledge-point feedback;
 - round-completion summaries.
 
-Review adds only a small text role in the existing question-type metadata and semantic sentences inside the existing feedback block. It does not add another question card, navigation system, modal, or client-side state.
+Review adds only a small text role in the existing question-type metadata ("错题纠正" / "间隔复习" / "同知识点强化") and semantic sentences inside the existing feedback block. It does not add another question card, navigation system, modal, or client-side state.
 
 ### `app/templates/mistakes.html`
 
-Renders only the current account's mistake records, including source/chapter/page context, latest wrong answer, wrong count, and corrected status. Correct answers and explanations are server-rendered after correction. Above the existing mistake table, a second section built from the same `section-heading`, `table-card`, `mistake-table`, status, and metadata primitives summarizes each weak chapter, pending corrections, distinct 0/2 progress, completion, and any insufficient-question warning. GET filters support source, chapter, or both through the shared custom picker. A filtered review retains the same scope. Reset clears that learner's wrong and weak rows, cancels Review, and preserves attempts and Normal progress.
+Renders only the current account's mistake records, including source/chapter/page context, latest wrong answer, wrong count, and corrected status. Correct answers and explanations are server-rendered after correction. The summary row adds a "今日待复习" card with the currently due SRS count, which also counts toward whether the start-review action is enabled. Above the existing mistake table, a second section built from the same `section-heading`, `table-card`, `mistake-table`, status, and metadata primitives summarizes each weak chapter, pending corrections, distinct 0/2 progress, completion, and any insufficient-question warning. GET filters support source, chapter, or both through the shared custom picker. A filtered review retains the same scope. Reset clears that learner's wrong and weak rows, cancels Review, and preserves attempts and Normal progress.
 
 ### `app/templates/glossary.html`
 
@@ -592,7 +615,7 @@ Provides a consistent recovery page for friendly HTTP errors.
 
 ### `app/static/css/style.css`
 
-Contains the full visual system and responsive behavior. The learning upgrade adds only local spacing/title/note rules for `.knowledge-summary`; colors, fonts, borders, cards, buttons, focus rings and breakpoints are reused. Both mistake tables inherit the existing `max-width: 640px` table-to-card conversion, so no separate mobile UI or horizontal dependency is introduced. Normal quiz has no intentional visual change.
+Contains the full visual system and responsive behavior. The learning upgrade adds only local spacing/title/note rules for `.knowledge-summary`; colors, fonts, borders, cards, buttons, focus rings and breakpoints are reused. The SRS home entry reuses `.resource-row` on a submit button via a small appearance-reset rule plus a non-interactive `.resource-row-static` variant; both mistake tables inherit the existing `max-width: 640px` table-to-card conversion, so no separate mobile UI or horizontal dependency is introduced. Normal quiz has no intentional visual change.
 
 The presentation invariant is that review reinforcement reuses the existing quiz/mistakes structures, CSS primitives, feedback patterns, bilingual/glossary behavior, keyboard focus, and 820px/640px responsive behavior. Role and progress differences are written as text and never conveyed by color alone.
 
@@ -657,10 +680,12 @@ At most three rows are retained for each `(learner_id, question_id)` pair, order
 | `wrong_count` | Total number of wrong answers |
 | `review_streak` | Legacy compatibility column: `0` before correction, `1` after correction |
 | `mastered` | Legacy compatibility column mapped to domain `corrected` |
+| `srs_level` | Spaced-repetition level; `0` for a freshly corrected question, incremented after each passed due review |
+| `next_review_at` | UTC ISO timestamp when the next SRS review becomes due; `NULL` while uncorrected or unscheduled |
 | `last_wrong_at` | Most recent wrong-answer timestamp |
 | `last_reviewed_at` | Most recent review timestamp, if any |
 
-The composite primary key `(learner_id, question_id)` guarantees one current correction record per user and question. The columns keep their historical SQL names to avoid destructive migration; knowledge-point completion is never inferred from them.
+The composite primary key `(learner_id, question_id)` guarantees one current correction record per user and question. The columns keep their historical SQL names to avoid destructive migration; knowledge-point completion is never inferred from them. An invariant ties the two state machines together: `mastered=0` rows always have `next_review_at IS NULL`, so a question is either pending correction or scheduled, never both. The two SRS columns are added at startup through guarded `ALTER TABLE` statements when missing, and pre-existing rows stay unscheduled (`next_review_at = NULL`) until they are corrected again.
 
 ### `weak_knowledge_points`
 
@@ -754,21 +779,26 @@ Browser POST /quiz/answer
 Browser POST /review/start
   -> WrongQuestionService returns this user's uncorrected real wrong IDs
   -> QuizService creates persisted original_correction items
-  -> if no original is pending, an active weak chapter supplies one persisted
+  -> if no original is pending, due SRS reviews are queued as srs_review items
+  -> if nothing is due either, an active weak chapter supplies one persisted
      transfer_verification item
   -> web.py stores role-bearing Review progress in its own account/mode row
 
 Browser POST /review/answer
   -> the answer is graded and persisted
-  -> one correct original answer marks that concrete question corrected
+  -> one correct original answer marks that concrete question corrected and
+     starts its SRS schedule at level 0, one day later
+  -> one correct due srs_review answer advances the schedule one level
+     (3/7/15/30 days, capped)
   -> only a correct Review answer adds its question ID once to each active chapter
-  -> any wrong answer creates/reopens the concrete wrong row and resets all chapters
+  -> any wrong answer creates/reopens the concrete wrong row, clears its SRS
+     schedule, and resets all chapters
   -> role and chapter progress are stored in feedback; no next candidate is randomized
 
 Browser POST /review/next
   -> advances the persisted occurrence and rotates the answer token
   -> only when the existing queue is exhausted, Review Selection Policy chooses
-     another pending original or a same-chapter transfer
+     another pending original, then a due SRS review, then a same-chapter transfer
   -> no candidate plus active <2/2 state produces a finite shortage summary
 ```
 
@@ -790,6 +820,8 @@ The tests use temporary question/glossary files and temporary SQLite databases, 
 | `tests/test_quiz_service.py` | Limits, coverage cycles/boundaries/scope/all, stable option shuffle, review selection |
 | `tests/test_wrong_question_service.py` | Wrong counts, one-answer correction, distinct verification, resets, isolation |
 | `tests/test_learning_upgrade.py` | Transfer success/failure, multi-chapter state, policy isolation, resume, old DB/progress, insufficient candidates, UI summaries |
+| `tests/test_srs.py` | SRS interval ladder and cap, due boundary inclusivity, UTC/naive handling, schedule persistence, due queries, legacy schema migration, correction/advance/reset state machine, review selection priority |
+| `tests/test_srs_web.py` | End-to-end SRS flow through HTTP: correction schedules +1 day, home due entry, srs_review role and badge, level advance, failure returning to correction, per-user isolation, session resume |
 | `tests/test_progress_state.py` | Characterization coverage for the progress-state helpers: validation, resume summaries, session keys, and quiz-size parsing |
 | `tests/test_progress_sync.py` | Independent clients/workers, resume and completion, concurrency, stale forms, reset, legacy migration, transaction rollback |
 | `tests/test_web.py` | Public health response, login, registration, page flows, shared progress, duplicate protection, feedback, errors |
@@ -868,11 +900,14 @@ Developers should preserve these rules when extending the application:
 18. Reuse the existing visual language, responsive structures and accessible text/focus patterns.
 19. Do not expose Normal fairness as a new user-facing control or algorithm panel.
 20. Keep glossary labels globally unambiguous; keep glossary content outside SQLite and the question-bank fingerprint.
+21. An uncorrected wrong question never carries an SRS due timestamp; a failed review always returns to the correction flow before being rescheduled at level 0.
+22. Keep SRS timestamps as UTC ISO strings, evaluate "due" with `next_review_at <= now` (inclusive), and keep the interval ladder in `srs_service.SRS_INTERVAL_DAYS` rather than scattering numbers across layers.
 
 ## 17. Common Extension Points
 
 - Add a question field: extend `domain.py`, parse it in `question_loader.py`, then render it in the relevant template.
 - Change the reinforcement target: update `KNOWLEDGE_VERIFICATION_TARGET` in `app/__init__.py` and keep Review selection, summaries and shortage behavior consistent.
+- Change the spaced-repetition ladder: edit `SRS_INTERVAL_DAYS` in `app/services/srs_service.py`; scheduling, due checks, and the home entry all derive from it.
 - Add a persistent learner feature: add repository operations first, then service rules, then route/template integration.
 - Add a new page: define its route in `web.py`, create a template extending `base.html`, and add an integration test in `test_web.py`.
 - Extend Normal selection: keep it limited to live eligible IDs plus `fairness_scope`/`fairness_remaining_ids`; do not inject review signals.

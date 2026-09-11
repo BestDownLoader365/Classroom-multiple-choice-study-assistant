@@ -1,6 +1,6 @@
 # 课堂选择题学习助手
 
-一个本地运行、由 `questions.json` 题库和 `glossary.json` 专业术语库驱动的 MCQ 学习工具。支持个人账号、公平随机练习、个人错题纠正、同章节迁移验证、中英双语辅助、全文术语释义和独立词汇学习页。
+一个本地运行、由 `questions.json` 题库和 `glossary.json` 专业术语库驱动的 MCQ 学习工具。支持个人账号、公平随机练习、个人错题纠正、同章节迁移验证、基于固定间隔的错题间隔重复复习（SRS）、中英双语辅助、全文术语释义和独立词汇学习页。
 
 ## Development
 
@@ -39,6 +39,9 @@ python run.py
 - 单选和多选都必须至少选择一项才能提交。
 - 多选反馈区分“正确选择”“漏选”和“误选”。
 - 错题巩固分为“原错题纠正”和“同知识点强化”：原错题在 Review 中答对一次即完成题目纠正；以 `chapter_ids` 作为知识点，同一知识点必须在 Review 中答对 2 道不同题目才完成强化。
+- 已纠正的错题不会永久消失：纠正完成后进入间隔重复（SRS）排期，按 1 / 3 / 7 / 15 / 30 天的间隔在 Review 中再次出现；连续答对逐级拉长间隔（30 天封顶），任何一次答错都会让该题重新回到纠错流程，重新纠正后从 1 天周期重新开始。
+- Review 选题优先级为：待纠正原错题 → 已到期的 SRS 复习题 → 同知识点强化题；同一道题在一次巩固中只会以一种角色出现。
+- 首页显示“今日待复习 X 题”入口，点击进入现有错题巩固流程；错题页也展示今日到期数量。只统计当前账号已到期的题目。
 - 原错题纠正后若仍不足 2 道不同题，Review 会从同章节选择另一题进行迁移验证。迁移题不会自动成为错题，只有实际答错时才会加入错题并重置相关知识点进度。
 - 正常练习和错题巩固的进度按账号分别保存在服务器；Normal coverage bag 与 Review 队列/知识点进度完全独立。不同设备登录同一账号，打开或刷新练习页即可接续相同的题目、角色、答题反馈和巩固进度。
 - 题目默认显示英文；有中文辅助字段时，可用页面顶部按钮切换“仅英文 / 中英双语”。
@@ -61,8 +64,9 @@ source/chapter filter
 
 Review:
 uncorrected wrong questions
++ due SRS reviews (corrected questions whose scheduled time has arrived)
 + active weak chapters
-→ original correction / transfer verification
+→ original correction / srs review / transfer verification
 → review queue
 ```
 

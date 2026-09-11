@@ -60,6 +60,26 @@ def test_valid_state_passes(mode):
     assert ps.is_valid_progress_state(state, mode) is True
 
 
+def test_review_state_accepts_srs_review_items():
+    state = _review_state()
+    state["review_items"][1] = {
+        "question_id": "q2",
+        "role": "srs_review",
+        "chapter_id": None,
+    }
+    assert ps.is_valid_progress_state(state, QuizMode.REVIEW) is True
+
+
+def test_review_state_rejects_unknown_roles():
+    state = _review_state()
+    state["review_items"][1] = {
+        "question_id": "q2",
+        "role": "spaced",
+        "chapter_id": None,
+    }
+    assert ps.is_valid_progress_state(state, QuizMode.REVIEW) is False
+
+
 def test_mode_mismatch_is_rejected():
     assert ps.is_valid_progress_state(_normal_state(), QuizMode.REVIEW) is False
     assert ps.is_valid_progress_state(_review_state(), QuizMode.NORMAL) is False

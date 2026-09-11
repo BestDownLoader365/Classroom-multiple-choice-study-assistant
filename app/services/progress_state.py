@@ -10,7 +10,7 @@ from typing import Any
 
 from app.models import QuizMode
 
-from .quiz_service import ORIGINAL_CORRECTION, TRANSFER_VERIFICATION
+from .quiz_service import ORIGINAL_CORRECTION, SRS_REVIEW, TRANSFER_VERIFICATION
 
 
 def session_key(mode: QuizMode) -> str:
@@ -65,6 +65,7 @@ def is_valid_progress_state(state: Any, mode: QuizMode) -> bool:
             if item.get("role") not in {
                 ORIGINAL_CORRECTION,
                 TRANSFER_VERIFICATION,
+                SRS_REVIEW,
             }:
                 return False
             chapter_id = item.get("chapter_id")

@@ -222,6 +222,7 @@ def create_web_blueprint(
             "home.html",
             question_count=len(question_repository.get_all()),
             stats=stats,
+            srs_due_count=wrong_question_service.get_due_srs_count(g.learner_id),
             normal_progress=_active_progress(QuizMode.NORMAL),
             review_progress=_active_progress(QuizMode.REVIEW),
         )
@@ -306,6 +307,11 @@ def create_web_blueprint(
             "pending": sum(not item.record.corrected for item in items),
             "corrected": sum(item.record.corrected for item in items),
         }
+        due_srs_count = len(
+            wrong_question_service.get_filtered_due_srs_question_ids(
+                g.learner_id, chapter_ids=chapter_ids, source_ids=source_ids
+            )
+        )
         total_stats = wrong_question_service.get_stats(g.learner_id)
         weak_points = weak_knowledge_point_service.get_summaries(
             g.learner_id, chapter_ids=chapter_ids, source_ids=source_ids
@@ -315,9 +321,11 @@ def create_web_blueprint(
             "mistakes.html",
             items=items,
             stats=stats,
+            srs_due_count=due_srs_count,
             weak_points=weak_points,
             has_review_work=(
                 stats["pending"] > 0
+                or due_srs_count > 0
                 or any(summary.point.active for summary in weak_points)
             ),
             has_mistakes=(

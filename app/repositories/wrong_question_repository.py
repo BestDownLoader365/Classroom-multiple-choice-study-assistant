@@ -20,7 +20,11 @@ class WrongQuestionRepository:
         timestamp: str,
         reviewed: bool,
     ) -> None:
-        """Create or reopen a wrong question and clear correction state."""
+        """Create or reopen a wrong question and clear correction state.
+
+        Reopening also resets the SRS schedule: the question must pass the
+        regular correction flow again before it is rescheduled.
+        """
         reviewed_at = timestamp if reviewed else None
         with self.database.connect() as connection:
             connection.execute(
@@ -33,6 +37,8 @@ class WrongQuestionRepository:
                     wrong_count = wrong_count + 1,
                     review_streak = 0,
                     mastered = 0,
+                    srs_level = 0,
+                    next_review_at = NULL,
                     last_wrong_at = excluded.last_wrong_at,
                     last_reviewed_at = COALESCE(
                         excluded.last_reviewed_at,
@@ -47,18 +53,49 @@ class WrongQuestionRepository:
         learner_id: str,
         question_id: str,
         timestamp: str,
+        *,
+        srs_level: int | None = None,
+        next_review_at: str | None = None,
     ) -> None:
-        """Mark an existing wrong question corrected after one review answer."""
+        """Mark an existing wrong question corrected after one review answer.
+
+        Passing ``srs_level``/``next_review_at`` (re)starts the SRS schedule;
+        omitting them keeps any existing schedule untouched.
+        """
         with self.database.connect() as connection:
             connection.execute(
                 """
                 UPDATE wrong_questions
                 SET review_streak = 1,
                     mastered = 1,
-                    last_reviewed_at = ?
+                    last_reviewed_at = ?,
+                    srs_level = COALESCE(?, srs_level),
+                    next_review_at = COALESCE(?, next_review_at)
                 WHERE learner_id = ? AND question_id = ?
                 """,
-                (timestamp, learner_id, question_id),
+                (timestamp, srs_level, next_review_at, learner_id, question_id),
+            )
+
+    def record_srs_reviewed(
+        self,
+        learner_id: str,
+        question_id: str,
+        timestamp: str,
+        *,
+        srs_level: int,
+        next_review_at: str,
+    ) -> None:
+        """Advance the SRS schedule of a corrected question whose review was due."""
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE wrong_questions
+                SET srs_level = ?,
+                    next_review_at = ?,
+                    last_reviewed_at = ?
+                WHERE learner_id = ? AND question_id = ? AND mastered = 1
+                """,
+                (srs_level, next_review_at, timestamp, learner_id, question_id),
             )
 
     def get_by_id(
@@ -96,6 +133,26 @@ class WrongQuestionRepository:
                 ).fetchall()
         return [self._to_model(row) for row in rows]
 
+    def get_due(self, learner_id: str, now: str) -> list[WrongQuestion]:
+        """Return one learner's corrected records whose SRS review is due.
+
+        ``now`` is an ISO timestamp; a record is due when its scheduled time
+        has been reached (inclusive). Unscheduled legacy rows are excluded.
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM wrong_questions
+                WHERE learner_id = ?
+                  AND mastered = 1
+                  AND next_review_at IS NOT NULL
+                  AND next_review_at <= ?
+                ORDER BY next_review_at, question_id
+                """,
+                (learner_id, now),
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
     def delete_all_for_learner(self, learner_id: str) -> int:
         """Delete one learner's current mistake state and return its row count."""
         with self.database.connect() as connection:
@@ -115,4 +172,6 @@ class WrongQuestionRepository:
             corrected=bool(row["mastered"]),
             last_wrong_at=row["last_wrong_at"],
             last_reviewed_at=row["last_reviewed_at"],
+            srs_level=int(row["srs_level"] or 0),
+            next_review_at=row["next_review_at"],
         )

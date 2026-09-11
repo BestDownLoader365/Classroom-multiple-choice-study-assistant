@@ -117,6 +117,8 @@ class WrongQuestion:
     corrected: bool
     last_wrong_at: str
     last_reviewed_at: str | None
+    srs_level: int = 0
+    next_review_at: str | None = None
 
     @property
     def mastered(self) -> bool:

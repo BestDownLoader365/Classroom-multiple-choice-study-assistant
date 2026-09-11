@@ -104,6 +104,11 @@ h2 { font-family: var(--font-display); font-weight: 500; letter-spacing: -0.03em
 .resource-row:active { background: var(--accent-soft); }
 .resource-row:active .resource-row-copy { transform: translateX(2px); }
 .resource-row:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.resource-row-form { margin: 0; }
+button.resource-row { appearance: none; border: 0; border-bottom: 1px solid var(--line); color: inherit; background: none; font: inherit; text-align: left; cursor: pointer; }
+.resource-row-static, .resource-row-static:hover { color: inherit; background: none; }
+.resource-row-static .resource-row-copy > strong { color: var(--muted); }
+.resource-row-static:hover .resource-row-copy { transform: none; }
 .resume-actions { margin-top: 12px; }
 .section-heading > p { margin: 32px 0 0; color: var(--muted); font-size: 0.72rem; line-height: 1.7; text-align: right; }
 .start-quiz-form { display: grid; grid-template-columns: 1fr auto; border-top: 1px solid var(--ink); border-bottom: 1px solid var(--line); align-items: stretch; }

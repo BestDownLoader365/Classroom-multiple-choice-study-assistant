@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 from app.models import Attempt, Question, QuizMode, WrongQuestion
 from app.repositories import (
@@ -11,6 +11,7 @@ from app.repositories import (
     WeakKnowledgePointRepository,
     WrongQuestionRepository,
 )
+from . import srs_service as srs
 from .weak_knowledge_point_service import (
     KnowledgePointUpdate,
     WeakKnowledgePointService,
@@ -68,9 +69,12 @@ class WrongQuestionService:
         mode: QuizMode,
         selected_answers: tuple[str, ...],
         is_correct: bool,
+        *,
+        now: datetime | None = None,
     ) -> LearningUpdate:
         """Persist one attempt and update wrong-question state when applicable."""
-        timestamp = datetime.now(timezone.utc).isoformat()
+        now = now or srs.utc_now()
+        timestamp = now.isoformat()
         previous = self.wrong_question_repository.get_by_id(
             learner_id, question_id
         )
@@ -107,7 +111,31 @@ class WrongQuestionService:
                 ),
             )
         elif mode is QuizMode.REVIEW:
-            if previous is not None:
+            if previous is not None and not previous.corrected:
+                # Correction completed: (re)start the SRS schedule at level 0.
+                srs_level, next_review_at = srs.initial_schedule(now)
+                self.wrong_question_repository.record_corrected(
+                    learner_id=learner_id,
+                    question_id=question_id,
+                    timestamp=timestamp,
+                    srs_level=srs_level,
+                    next_review_at=next_review_at,
+                )
+            elif previous is not None and srs.is_due(previous.next_review_at, now):
+                # A due scheduled review answered correctly advances one level.
+                srs_level, next_review_at = srs.advanced_schedule(
+                    previous.srs_level, now
+                )
+                self.wrong_question_repository.record_srs_reviewed(
+                    learner_id=learner_id,
+                    question_id=question_id,
+                    timestamp=timestamp,
+                    srs_level=srs_level,
+                    next_review_at=next_review_at,
+                )
+            elif previous is not None:
+                # Already corrected but not due (e.g. a transfer question):
+                # keep the existing SRS schedule untouched.
                 self.wrong_question_repository.record_corrected(
                     learner_id=learner_id,
                     question_id=question_id,
@@ -196,6 +224,59 @@ class WrongQuestionService:
                 corrected=False,
                 chapter_ids=chapter_ids,
                 source_ids=source_ids,
+            )
+        ]
+
+    def get_due_srs_items(
+        self,
+        learner_id: str,
+        *,
+        chapter_ids: set[str] | None = None,
+        source_ids: set[str] | None = None,
+        now: datetime | None = None,
+    ) -> list[MistakeItem]:
+        """Return live questions whose scheduled SRS review is due."""
+        moment = now or srs.utc_now()
+        items: list[MistakeItem] = []
+        for record in self.wrong_question_repository.get_due(
+            learner_id, moment.isoformat()
+        ):
+            question = self.question_repository.get_by_id(record.question_id)
+            if question is None:
+                LOGGER.warning(
+                    'Wrong question "%s" no longer exists in questions.json.',
+                    record.question_id,
+                )
+                continue
+            if chapter_ids is not None and chapter_ids.isdisjoint(question.chapter_ids):
+                continue
+            if source_ids is not None and question.source_id not in source_ids:
+                continue
+            items.append(MistakeItem(record=record, question=question))
+        return items
+
+    def get_due_srs_count(
+        self, learner_id: str, *, now: datetime | None = None
+    ) -> int:
+        """Return how many of one learner's SRS reviews are due right now."""
+        return len(self.get_due_srs_items(learner_id, now=now))
+
+    def get_filtered_due_srs_question_ids(
+        self,
+        learner_id: str,
+        *,
+        chapter_ids: set[str] | None = None,
+        source_ids: set[str] | None = None,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Return due SRS question IDs restricted to curriculum filters."""
+        return [
+            item.question.id
+            for item in self.get_due_srs_items(
+                learner_id,
+                chapter_ids=chapter_ids,
+                source_ids=source_ids,
+                now=now,
             )
         ]
 

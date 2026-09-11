@@ -17,6 +17,7 @@ from .wrong_question_service import LearningUpdate, WrongQuestionService
 LOGGER = logging.getLogger(__name__)
 ORIGINAL_CORRECTION = "original_correction"
 TRANSFER_VERIFICATION = "transfer_verification"
+SRS_REVIEW = "srs_review"
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,7 @@ class QuizService:
         chapter_ids: set[str] | None = None,
         source_ids: set[str] | None = None,
     ) -> ReviewSelectionResult:
-        """Start with all pending original corrections before transfer work."""
+        """Start with all pending corrections, then all due SRS reviews."""
         pending = self.wrong_question_service.get_filtered_uncorrected_question_ids(
             learner_id,
             chapter_ids=chapter_ids,
@@ -152,6 +153,16 @@ class QuizService:
                     ReviewItem(question_id, ORIGINAL_CORRECTION)
                     for question_id in pending
                 )
+            )
+        due = self.wrong_question_service.get_filtered_due_srs_question_ids(
+            learner_id,
+            chapter_ids=chapter_ids,
+            source_ids=source_ids,
+        )
+        self.shuffler(due)
+        if due:
+            return ReviewSelectionResult(
+                items=tuple(ReviewItem(question_id, SRS_REVIEW) for question_id in due)
             )
         return self.next_review_item(
             learner_id,
@@ -183,6 +194,21 @@ class QuizService:
                 items=(
                     ReviewItem(available_pending[0], ORIGINAL_CORRECTION),
                 )
+            )
+
+        due = [
+            question_id
+            for question_id in self.wrong_question_service.get_filtered_due_srs_question_ids(
+                learner_id,
+                chapter_ids=chapter_ids,
+                source_ids=source_ids,
+            )
+            if question_id not in avoid
+        ]
+        self.shuffler(due)
+        if due:
+            return ReviewSelectionResult(
+                items=(ReviewItem(due[0], SRS_REVIEW),)
             )
 
         points = self.weak_knowledge_point_service.get_active_points(

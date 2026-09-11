@@ -3,6 +3,7 @@
 from .grading_service import AnswerValidationError, GradingService
 from .quiz_service import (
     ORIGINAL_CORRECTION,
+    SRS_REVIEW,
     TRANSFER_VERIFICATION,
     AnswerResult,
     NormalSelectionResult,
@@ -29,6 +30,7 @@ __all__ = [
     "QuizService",
     "ReviewItem",
     "ReviewSelectionResult",
+    "SRS_REVIEW",
     "TRANSFER_VERIFICATION",
     "WeakKnowledgePointService",
     "WeakKnowledgeSummary",

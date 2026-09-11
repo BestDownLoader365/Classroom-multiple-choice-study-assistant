@@ -59,6 +59,8 @@ class Database:
                     wrong_count INTEGER NOT NULL DEFAULT 1,
                     review_streak INTEGER NOT NULL DEFAULT 0,
                     mastered INTEGER NOT NULL DEFAULT 0 CHECK (mastered IN (0, 1)),
+                    srs_level INTEGER NOT NULL DEFAULT 0,
+                    next_review_at TEXT,
                     last_wrong_at TEXT NOT NULL,
                     last_reviewed_at TEXT,
                     PRIMARY KEY (learner_id, question_id)
@@ -84,6 +86,7 @@ class Database:
                 );
                 """
             )
+            self._migrate_wrong_question_srs_columns(connection)
             connection.execute(
                 """
                 DELETE FROM attempts
@@ -114,6 +117,29 @@ class Database:
                 """
             )
         os.chmod(self.database_path, 0o600)
+
+    @staticmethod
+    def _migrate_wrong_question_srs_columns(connection: sqlite3.Connection) -> None:
+        """Add SRS scheduling columns to databases created before this feature.
+
+        The ``CREATE TABLE`` above already covers fresh databases; these
+        guarded ``ALTER TABLE`` statements upgrade existing ones in place.
+        Legacy rows keep ``srs_level = 0`` and ``next_review_at = NULL``, so
+        they are never scheduled until they are corrected again.
+        """
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(wrong_questions)")
+        }
+        if "srs_level" not in columns:
+            connection.execute(
+                "ALTER TABLE wrong_questions "
+                "ADD COLUMN srs_level INTEGER NOT NULL DEFAULT 0"
+            )
+        if "next_review_at" not in columns:
+            connection.execute(
+                "ALTER TABLE wrong_questions ADD COLUMN next_review_at TEXT"
+            )
 
     def consume_rate_limit(
         self,

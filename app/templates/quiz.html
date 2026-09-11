@@ -80,7 +80,7 @@
         <div class="question-heading">
         <div class="question-type">
             {% if mode.value == "review" %}
-                {% if review_item.role == "original_correction" %}错题纠正{% else %}同知识点强化{% endif %} ·
+                {% if review_item.role == "original_correction" %}错题纠正{% elif review_item.role == "srs_review" %}间隔复习{% else %}同知识点强化{% endif %} ·
             {% endif %}
             {% if question.question_type == "single" %}单选题{% else %}多选题 · 可选择多项 · 必须完全匹配{% endif %}
         </div>
@@ -157,7 +157,9 @@
             <div class="review-feedback">
                 {% if feedback.is_correct %}
                     {% if feedback.review_role == "original_correction" %}
-                    <strong>原错题已纠正</strong>
+                    <strong>原错题已纠正（已加入间隔复习）</strong>
+                    {% elif feedback.review_role == "srs_review" %}
+                    <strong>间隔复习完成，已安排下次复习</strong>
                     {% else %}
                     <strong>同知识点强化题回答正确</strong>
                     {% endif %}
@@ -182,6 +184,8 @@
                         {% else %}
                         <strong>这道题已重新进入待纠正状态</strong>
                         {% endif %}
+                    {% elif feedback.review_role == "srs_review" %}
+                    <strong>间隔复习未通过，这道题已重新进入待纠正状态</strong>
                     {% else %}
                     <strong>原错题仍待纠正</strong>
                     {% endif %}

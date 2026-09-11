@@ -81,6 +81,35 @@
                     </span>
                     <span class="resource-row-arrow" aria-hidden="true">→</span>
                 </a>
+                {% if srs_due_count %}
+                    {% if review_progress %}
+                    <a class="resource-row" href="{{ url_for('web.review') }}">
+                        <span class="resource-row-copy">
+                            <strong>今日待复习 {{ srs_due_count }} 题</strong>
+                            <span>已纠正错题的间隔复习已到期，继续巩固即可完成。</span>
+                        </span>
+                        <span class="resource-row-arrow" aria-hidden="true">→</span>
+                    </a>
+                    {% else %}
+                    <form class="resource-row-form" method="post" action="{{ url_for('web.start_review') }}">
+                        {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                        <button class="resource-row" type="submit">
+                            <span class="resource-row-copy">
+                                <strong>今日待复习 {{ srs_due_count }} 题</strong>
+                                <span>已纠正错题的间隔复习已到期，现在开始复习。</span>
+                            </span>
+                            <span class="resource-row-arrow" aria-hidden="true">→</span>
+                        </button>
+                    </form>
+                    {% endif %}
+                {% else %}
+                <div class="resource-row resource-row-static">
+                    <span class="resource-row-copy">
+                        <strong>今日暂无到期复习</strong>
+                        <span>已纠正的错题会按 1 / 3 / 7 / 15 / 30 天的间隔再次出现。</span>
+                    </span>
+                </div>
+                {% endif %}
                 <a class="resource-row" href="{{ url_for('web.glossary') }}">
                     <span class="resource-row-copy">
                         <strong>专业词汇</strong>
