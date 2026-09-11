@@ -70,13 +70,13 @@ def test_corrected_question_returns_for_scheduled_srs_reviews(
     assert record.srs_level == 0
     assert srs.parse_timestamp(record.next_review_at) > datetime.now(timezone.utc)
     home = client.get("/")
-    assert "今日暂无到期复习" in home.text
-    assert "今日待复习" not in home.text
+    assert "今日到期" not in home.text
+    assert "待复习" not in home.text
 
-    # 时间推进到到期 → 首页出现“今日待复习 1 题”。
+    # 时间推进到到期 → 首页待处理区出现“待复习 1 题”。
     _make_due(app, user_id, "q1")
     home = client.get("/")
-    assert "今日待复习 1 题" in home.text
+    assert "待复习 1 题" in home.text
 
     # 再次进入 Review：以“间隔复习”角色抽到该题。
     client.post("/review/start")
@@ -159,9 +159,9 @@ def test_home_due_count_is_isolated_per_user(tmp_path, valid_payload):
     bob_home = register(bob, "bob")
     alice_home = alice.get("/")
 
-    assert "今日暂无到期复习" in bob_home.text
-    assert "今日待复习 1 题" not in bob_home.text
-    assert "今日待复习 1 题" in alice_home.text
+    assert "今日到期" not in bob_home.text
+    assert "待复习 1 题" not in bob_home.text
+    assert "待复习 1 题" in alice_home.text
 
 
 def test_srs_review_session_survives_interruption(tmp_path, valid_payload):

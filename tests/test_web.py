@@ -119,8 +119,8 @@ def test_home_has_practice_sizes_and_two_core_entries(tmp_path, valid_payload):
 
     assert "开始正常练习" in response.text
     assert "我的错题" in response.text
-    assert "快速练习 · 10 题" in response.text
-    assert "标准练习 · 20 题" in response.text
+    assert "快速练习 10 题" in response.text
+    assert "标准练习 20 题" in response.text
     assert "其他学习者" not in response.text
 
 
