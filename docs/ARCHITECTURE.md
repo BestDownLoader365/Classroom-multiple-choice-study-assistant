@@ -624,6 +624,8 @@ Renders both login and registration forms. The route passes a page mode so one t
 
 Shows the active bank title, question count, mistake statistics, entry to chapter selection, resume links, and restart actions. The secondary rail links to mock exams and the dashboard, and renders a "继续模拟考试" row whenever an unfinished, unexpired exam exists. A resource row in the review section surfaces the signed-in learner's due SRS count ("今日待复习 X 题"): it links into the in-progress review round when one exists, otherwise submits `POST /review/start`; with nothing due it renders the static "今日暂无到期复习" row.
 
+The desktop composition is task-first rather than hero-first. The bank title stays within Display M so it remains the viewport's single dominant serif heading; the in-progress normal practice renders as a controlled-measure resume block (`.practice-resume`, max-width 660px) grouping the mono session status, a completed-work progress indicator (`current - 1` of `total`), one primary continue action, and a ghost restart action; the question/mistake counts follow as a compact metric summary whose zero values stay smaller than the bank total instead of forming three equal KPIs. The left column ends with its content (`align-items: start`, no stretched bottom rule) and the secondary rail keeps its fixed width and row order.
+
 ### `app/templates/quiz_setup.html`
 
 Builds the practice selector entirely from the repository catalogue. It supports All Chapters, one or more chapter selections, and a group-level selector for all chapters in each source document, followed by the existing quiz-size control.
@@ -677,6 +679,8 @@ Contains the full visual system and responsive behavior. The learning upgrade ad
 The dashboard and mock-exam pages follow the same rule: `.metric-strip`, `.trend-chart`, `.mastery-bar`, `.data-table`, `.exam-nav`, and `.exam-submit-panel` are built from the existing tokens (paper/sheet surfaces, ink rules, accent progress, mono metadata, square corners, no shadows), and `.data-table` reuses the same 640px table-to-card conversion as the mistake tables. Exam status labels reuse the `.status` text-and-dot pattern so state is never conveyed by color alone.
 
 The presentation invariant is that review reinforcement reuses the existing quiz/mistakes structures, CSS primitives, feedback patterns, bilingual/glossary behavior, keyboard focus, and 820px/640px responsive behavior. Role and progress differences are written as text and never conveyed by color alone.
+
+The home task-area refinement holds the same line: it adds only the local `.practice-resume` measure plus home-scoped heading, spacing and metric rules, reusing the existing color/typography tokens, `.button` variants, the 4px square progress primitive, focus rings and the 820px/640px breakpoints. No new tokens, dependencies, `!important` rules, or backend data were introduced.
 
 ### `app/static/js/app.js`
 

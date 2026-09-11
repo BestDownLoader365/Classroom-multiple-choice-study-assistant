@@ -63,33 +63,35 @@ h2 { font-family: var(--font-display); font-weight: 500; letter-spacing: -0.03em
 .bank-title-en { margin: 0; color: var(--muted); font-family: var(--font-display); font-size: 0.92rem; font-style: italic; letter-spacing: 0.01em; }
 
 .page-shell-workspace { width: min(calc(100% - 96px), 1360px); padding-top: 64px; }
-.home-intro { display: flex; min-height: 0; padding-bottom: 42px; border-bottom: 1px solid var(--line); align-items: end; justify-content: space-between; gap: 40px; }
+.home-intro { display: flex; min-height: 0; padding-bottom: 30px; border-bottom: 1px solid var(--line); align-items: end; justify-content: space-between; gap: 40px; }
 .home-title-block { max-width: 900px; }
 .home-title-block h1 {
     margin-bottom: 0;
-    font-size: clamp(3rem, 3.4vw, 3.5rem);
-    letter-spacing: -0.045em;
-    line-height: 1.1;
+    font-size: clamp(1.625rem, 3vw, 2.25rem);
+    letter-spacing: -0.03em;
+    line-height: 1.12;
 }
 .home-dashboard .section-label { margin-bottom: 10px; font-size: .84rem; font-weight: 650; letter-spacing: .045em; }
-.home-actions { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 27vw, 380px); margin-top: 54px; column-gap: clamp(48px, 4.5vw, 72px); }
+.home-actions { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 27vw, 380px); margin-top: 38px; column-gap: clamp(48px, 4.5vw, 72px); align-items: start; }
 .mode-action-group { display: grid; align-content: start; gap: 12px; }
-.practice-launcher { min-width: 0; padding: 0 clamp(24px, 2.5vw, 36px) 34px 0; border-bottom: 2px solid var(--ink); }
+.practice-launcher { align-self: start; min-width: 0; padding-right: clamp(24px, 2.5vw, 36px); }
+.practice-resume { display: grid; max-width: 660px; align-content: start; gap: 14px; }
+.home-actions .section-heading h2 { font-size: clamp(1.3rem, 1.6vw, 1.45rem); }
 .review-launcher { padding-left: clamp(36px, 3.5vw, 52px); border-left: 1px solid var(--line); }
 .section-heading { display: flex; min-height: 66px; margin-bottom: 24px; justify-content: space-between; align-items: end; gap: 32px; }
 .section-heading h2 { margin: 0; font-size: clamp(1.75rem, 2.1vw, 2rem); line-height: 1.15; }
 .session-position { margin-bottom: 4px; color: var(--ink-soft); font-family: var(--font-data); font-size: .9rem; font-weight: 600; white-space: nowrap; }
 .resume-block { width: 100%; }
-.resume-progress { width: 100%; height: 4px; background: var(--line); }
+.resume-progress { width: 100%; height: 4px; background: var(--paper-deep); }
 .resume-progress span { display: block; height: 100%; background: var(--accent); transition: width 220ms cubic-bezier(.2,.8,.4,1); }
-.practice-actions { display: flex; margin-top: 24px; align-items: center; flex-wrap: wrap; gap: 12px 16px; }
-.resume-button { min-width: 176px; min-height: 50px; padding-inline: 26px; font-size: 1rem; }
+.practice-actions { display: flex; margin-top: 10px; align-items: center; flex-wrap: wrap; gap: 12px 18px; }
 .practice-actions form .button { width: auto; }
-.restart-button { min-height: 46px; padding-inline: 8px; color: var(--ink-soft); font-size: .9rem; }
-.home-metrics { display: flex; margin-top: 26px; padding-top: 28px; border-top: 1px solid var(--line); gap: 0; }
-.home-metrics > div { display: grid; min-width: 142px; padding-right: 38px; gap: 7px; }
-.home-metrics > div + div { padding-left: 38px; border-left: 1px solid var(--line); }
-.home-metrics strong { font-family: var(--font-display); font-size: clamp(1.65rem, 2.2vw, 2rem); font-weight: 500; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+.restart-button { min-height: 46px; padding-inline: 2px; color: var(--ink-soft); font-size: .9rem; }
+.home-metrics { display: flex; width: fit-content; max-width: 100%; margin-top: 18px; padding-top: 20px; border-top: 1px solid var(--line); gap: 0; }
+.home-metrics > div { display: flex; min-width: 0; padding-right: 28px; align-items: baseline; gap: 9px; }
+.home-metrics > div + div { padding-left: 28px; border-left: 1px solid var(--line); }
+.home-metrics strong { font-family: var(--font-display); font-size: clamp(1.35rem, 1.8vw, 1.55rem); font-weight: 500; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+.home-metrics > div:first-child strong { font-size: clamp(1.8rem, 2.3vw, 2.05rem); }
 .home-metrics span { color: var(--ink-soft); font-size: .84rem; line-height: 1.4; }
 .launcher-note { margin: 2px 0 0; color: var(--ink-soft); font-size: .88rem; line-height: 1.6; }
 .resource-list { border-top: 1px solid var(--line-strong); }
@@ -368,7 +370,7 @@ body.show-bilingual .translation-zh { display: block; }
     .page-shell { width: min(100% - 44px, 680px); padding-top: 56px; }
     .page-shell-workspace { width: min(calc(100% - 44px), 900px); padding-top: 56px; }
     .home-intro { align-items: start; }
-    .home-actions { grid-template-columns: 1fr; gap: 58px; }
+    .home-actions { grid-template-columns: 1fr; gap: 44px; }
     .practice-launcher { padding-right: 0; }
     .review-launcher { padding: 50px 0 0; border-top: 1px solid var(--line); border-left: 0; }
     .page-heading { grid-template-columns: 1fr; }
@@ -392,15 +394,15 @@ body.show-bilingual .translation-zh { display: block; }
     .home-intro { order: 1; }
     .home-intro { flex-wrap: wrap; padding-bottom: 22px; gap: 12px 24px; }
     .home-title-block { flex: 1 1 240px; }
-    .home-title-block h1 { font-size: clamp(1.8rem, 9vw, 2.45rem); }
+    .home-title-block h1 { font-size: clamp(1.625rem, 6vw, 2.25rem); }
     .home-actions { order: 2; margin-top: 36px; gap: 48px; }
     .practice-launcher { padding-right: 0; }
     .resume-block { grid-template-columns: 1fr; gap: 16px; }
     .resume-button { width: 100%; }
     .practice-actions { align-items: stretch; flex-direction: column; }
     .practice-actions form, .practice-actions form .button { width: 100%; }
-    .home-metrics { justify-content: space-between; }
-    .home-metrics > div { min-width: 0; flex: 1; padding-right: 12px; }
+    .home-metrics { width: 100%; justify-content: space-between; }
+    .home-metrics > div { min-width: 0; flex: 1; padding-right: 12px; flex-direction: column; align-items: flex-start; gap: 3px; }
     .home-metrics > div + div { padding-left: 12px; }
     .session-position { margin-top: 5px; }
     .section-heading { min-height: 0; margin-bottom: 18px; }

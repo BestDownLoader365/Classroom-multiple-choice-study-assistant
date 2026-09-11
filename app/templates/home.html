@@ -15,28 +15,30 @@
     <div class="home-actions">
         <section class="mode-action-group practice-launcher">
             {% if normal_progress %}
-            <div class="section-heading compact-heading">
-                <div>
-                    <p class="section-label">进行中的练习</p>
-                    <h2>正常练习</h2>
+            <div class="practice-resume">
+                <div class="section-heading compact-heading">
+                    <div>
+                        <p class="section-label">进行中的练习</p>
+                        <h2>正常练习</h2>
+                    </div>
+                    <span class="session-position">第 {{ normal_progress.current }} / {{ normal_progress.total }} 题</span>
                 </div>
-                <span class="session-position">第 {{ normal_progress.current }} / {{ normal_progress.total }} 题</span>
-            </div>
-            <div class="resume-block">
-                <div class="resume-progress" role="progressbar" aria-label="正常练习进度"
-                     aria-valuemin="0" aria-valuemax="{{ normal_progress.total }}"
-                     aria-valuenow="{{ normal_progress.current - 1 }}">
-                    <span style="width: {{ ((normal_progress.current - 1) / normal_progress.total * 100) if normal_progress.total else 0 }}%"></span>
+                <div class="resume-block">
+                    <div class="resume-progress" role="progressbar" aria-label="正常练习进度"
+                         aria-valuemin="0" aria-valuemax="{{ normal_progress.total }}"
+                         aria-valuenow="{{ normal_progress.current - 1 }}">
+                        <span style="width: {{ ((normal_progress.current - 1) / normal_progress.total * 100) if normal_progress.total else 0 }}%"></span>
+                    </div>
                 </div>
-            </div>
-            <div class="practice-actions">
-                <a class="button button-primary resume-button" href="{{ url_for('web.quiz') }}">
-                    <span class="sr-only">继续正常练习：</span>继续答题 <span aria-hidden="true">→</span>
-                </a>
-                <form method="get" action="{{ url_for('web.quiz_setup') }}"
-                      data-confirm-restart="当前正常练习尚未完成，确定要放弃进度并重新开始吗？">
-                    <button class="button button-ghost restart-button" type="submit">重新开始正常练习</button>
-                </form>
+                <div class="practice-actions">
+                    <a class="button button-primary resume-button" href="{{ url_for('web.quiz') }}">
+                        <span class="sr-only">继续正常练习：</span>继续答题 <span aria-hidden="true">→</span>
+                    </a>
+                    <form method="get" action="{{ url_for('web.quiz_setup') }}"
+                          data-confirm-restart="当前正常练习尚未完成，确定要放弃进度并重新开始吗？">
+                        <button class="button button-ghost restart-button" type="submit">重新开始正常练习</button>
+                    </form>
+                </div>
             </div>
             <div class="home-metrics" aria-label="题库概览">
                 <div><strong>{{ question_count }}</strong><span>题库题目</span></div>
