@@ -2,7 +2,7 @@
 
 ## 1. Purpose and Scope
 
-This project is a local multiple-choice learning application built with Flask. It loads an English question bank and a separate domain glossary from JSON, provides optional Chinese learning aids, grades single-choice and multiple-choice answers, stores personal learning history, gives normal practice a random coverage guarantee, and reviews mistakes through one-answer correction, same-chapter transfer verification, and fixed-interval spaced repetition (SRS) for corrected questions.
+This project is a local multiple-choice learning application built with Flask. It loads an English question bank and a separate domain glossary from JSON, provides optional Chinese learning aids, grades single-choice and multiple-choice answers, stores personal learning history, gives normal practice a random coverage guarantee, and reviews mistakes through one-answer correction, same-chapter transfer verification, and fixed-interval spaced repetition (SRS) for corrected questions. On top of that loop, a dashboard aggregates each learner's recent statistics and chapter mastery, and a mock-exam mode draws a fixed, optionally timed question set whose mistakes flow back into the same correction system.
 
 The application deliberately uses a small deployment model:
 
@@ -119,14 +119,18 @@ MCQ_Template/
 │   │   ├── user_repository.py
 │   │   ├── progress_repository.py
 │   │   ├── attempt_repository.py
+│   │   ├── exam_repository.py
 │   │   ├── wrong_question_repository.py
 │   │   └── weak_knowledge_point_repository.py
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── grading_service.py
+│   │   ├── local_time.py
 │   │   ├── progress_state.py
 │   │   ├── quiz_service.py
 │   │   ├── srs_service.py
+│   │   ├── exam_service.py
+│   │   ├── statistics_service.py
 │   │   ├── wrong_question_service.py
 │   │   └── weak_knowledge_point_service.py
 │   ├── web/
@@ -142,8 +146,12 @@ MCQ_Template/
 │   │   ├── error.html
 │   │   ├── glossary.html
 │   │   ├── home.html
+│   │   ├── dashboard.html
 │   │   ├── quiz.html
 │   │   ├── quiz_setup.html
+│   │   ├── exam.html
+│   │   ├── exam_setup.html
+│   │   ├── exam_report.html
 │   │   └── mistakes.html
 │   └── static/
 │       ├── css/style.css
@@ -165,11 +173,17 @@ MCQ_Template/
     ├── test_question_loader.py
     ├── test_question_metadata_migration.py
     ├── test_grading_service.py
+    ├── test_local_time.py
     ├── test_quiz_service.py
     ├── test_wrong_question_service.py
     ├── test_learning_upgrade.py
     ├── test_srs.py
     ├── test_srs_web.py
+    ├── test_security.py
+    ├── test_statistics_service.py
+    ├── test_exam_service.py
+    ├── test_exam_web.py
+    ├── test_dashboard_web.py
     ├── test_progress_sync.py
     ├── test_progress_state.py
     ├── test_web.py
@@ -243,10 +257,10 @@ This module is the composition root. Its `create_app()` function performs all ap
 2. Load configuration, cookie defaults, and optional test overrides. If `MCQ_SECRET_KEY` is absent outside tests, generate an ephemeral development secret and log a warning.
 3. Load and validate `questions.json` with `QuestionLoader`.
 4. Build the in-memory `QuestionRepository`.
-5. Load and validate `glossary.json` with `GlossaryLoader`, then build the immutable `GlossaryRepository`.
-6. Initialize the current SQLite schema and atomically synchronize the global question-bank fingerprint. A changed bank deletes all attempts, wrong questions, weak knowledge points and quiz progress for every account, preserving users.
-7. Create the user, progress, attempt, wrong-question, and weak-knowledge-point repositories.
-8. Create the grading, weak-knowledge-point, wrong-question, and quiz services. Missing weak rows are backfilled from existing live wrong-question IDs with safe 0/2 progress.
+5. Load and validate `glossary.json` with `GlossaryLoader`, then build the immutable `GlossaryRepository`. The display timezone is resolved from `DISPLAY_TIMEZONE` once and injected into the statistics service and blueprint.
+6. Initialize the current SQLite schema and atomically synchronize the global question-bank fingerprint. A changed bank deletes all attempts, wrong questions, weak knowledge points, quiz progress, and exam records for every account, preserving users.
+7. Create the user, progress, attempt, exam, wrong-question, and weak-knowledge-point repositories.
+8. Create the grading, weak-knowledge-point, wrong-question, quiz, exam, and statistics services. Missing weak rows are backfilled from existing live wrong-question IDs with safe 0/2 progress.
 9. Expose the assembled repositories and services through `app.extensions["mcq_services"]` for tests and diagnostics.
 10. Register the application-level `GET /health` readiness route.
 11. Build and register the authenticated web blueprint.
@@ -262,6 +276,7 @@ Important configuration values are:
 | `GLOSSARY_FILE` | Path to the active schema-version-1 JSON glossary |
 | `DATABASE` | Path to the SQLite database |
 | `KNOWLEDGE_VERIFICATION_TARGET` | Distinct correct Review question IDs required per active chapter; currently `2` |
+| `DISPLAY_TIMEZONE` | Display timezone for rendered timestamps and dashboard trend days; defaults to the server local zone (environment `MCQ_DISPLAY_TIMEZONE`, IANA name such as `Asia/Shanghai`); invalid names fail startup fast |
 | `PERMANENT_SESSION_LIFETIME` | Lifetime of a persistent login/session cookie |
 | `SESSION_COOKIE_HTTPONLY` | Prevents browser JavaScript from reading the session cookie; enabled by default |
 | `SESSION_COOKIE_SAMESITE` | Uses `Lax` cross-site behavior for the session cookie |
@@ -275,7 +290,8 @@ The ephemeral development secret prevents a source-controlled fallback secret, b
 
 This file contains immutable dataclasses and the quiz-mode enum:
 
-- `QuizMode`: distinguishes normal practice from mistake review.
+- `QuizMode`: distinguishes normal practice, mistake review, and mock exams.
+- `ExamStatus`: the mock-exam lifecycle (`in_progress`, `submitted`, `expired`).
 - `Option`: one answer option with English text and optional Chinese text.
 - `SourceDocument` / `Chapter`: the normalized course-material catalogue used by all filters and labels.
 - `Question`: one validated question, its options, correct answer IDs, explanations, one stable source reference, one or more chapter references, plus optional section/pages.
@@ -285,6 +301,8 @@ This file contains immutable dataclasses and the quiz-mode enum:
 - `Attempt`: one persisted answer event.
 - `WrongQuestion`: the current mistake and correction state for one user/question pair. Its `corrected` property maps to the legacy SQLite `mastered` column. It also carries the SRS schedule: `srs_level` (0 for a freshly corrected question) and `next_review_at` (ISO timestamp, `None` while uncorrected or unscheduled).
 - `WeakKnowledgePoint`: one user/chapter pair containing active state and distinct verified Review question IDs.
+- `ExamSession`: one persisted mock exam with its status, fixed size, optional time limit, deadline, and submission results.
+- `ExamQuestion`: one fixed exam slot with its saved selection and graded outcome.
 
 These objects do not know about Flask, HTML, or SQL. They are the shared data language between repositories and services.
 
@@ -368,7 +386,11 @@ Stores one JSON round state and question-bank fingerprint per `(learner_id, mode
 
 ### `app/repositories/attempt_repository.py`
 
-Inserts one row for every graded answer, then retains only the three most recent rows for that `(learner_id, question_id)` pair in the same transaction. Application startup also prunes older databases to the same limit. The selected option IDs are serialized as JSON so both single and multiple selections can use the same column.
+Inserts one row for every graded answer, then retains only the ten most recent rows for that `(learner_id, question_id)` pair in the same transaction. Application startup also prunes older databases to the same limit. The selected option IDs are serialized as JSON so both single and multiple selections can use the same column. `list_for_learner()` returns one learner's retained window in chronological order for the statistics service.
+
+### `app/repositories/exam_repository.py`
+
+Persists mock-exam sessions and their fixed question slots. Every read is scoped by `learner_id` so one account can never load another account's exam. `save_answer()` replaces one slot's selection (an empty selection clears it) and records the visited position for resume; `apply_grading()` stores per-slot outcomes; `finalize()` flips `in_progress` to a finished status with a conditional `UPDATE`, which is the idempotency guard against double submission. The active-exam query also filters out sessions whose deadline has passed (`get_active_for_learner`), so an expired exam never surfaces as resumable, and `list_expired_in_progress()` feeds the touch-based settlement sweep.
 
 ### `app/repositories/wrong_question_repository.py`
 
@@ -490,7 +512,19 @@ Every function accepts `now` explicitly, which keeps scheduling deterministic un
 
 ### `app/services/progress_state.py`
 
-Pure, HTTP-independent helpers that validate and describe the per-mode quiz progress state dictionaries. It centralizes the progress `session_key()` names, the `quiz_limit()` parsing for the selected practice size, the `is_valid_progress_state()` structural validation used to accept or clear a stored round, `valid_state_for()` which drops invalid entries, and `active_summary()` which builds the resume banner data for an unfinished round. Keeping these rules here lets the route layer and tests share one definition of what a valid round looks like without touching Flask.
+Pure, HTTP-independent helpers that validate and describe the per-mode quiz progress state dictionaries. It centralizes the progress `session_key()` names, the `quiz_limit()` parsing for the selected practice size, the `is_valid_progress_state()` structural validation used to accept or clear a stored round, `valid_state_for()` which drops invalid entries, and `active_summary()` which builds the resume banner data for an unfinished round. `PRACTICE_MODES` names the two modes that own a resumable round; mock exams keep their own persisted state and are deliberately excluded. Keeping these rules here lets the route layer and tests share one definition of what a valid round looks like without touching Flask.
+
+### `app/services/exam_service.py`
+
+`ExamService` owns the mock-exam lifecycle. Creation validates the requested size and time limit against fixed allow-lists and the live bank size, then freezes a random, deduplicated question set with one option seed. Answers are stored verbatim (empty selections clear a slot) without grading or attempt writes, so learners can revisit questions freely. The server-side deadline is authoritative: `is_expired()` uses an inclusive comparison, `finalize_if_expired()` auto-submits on any exam page load or answer save after the deadline, and `finalize_expired_for_learner()` settles all of one learner's expired exams when they open the home, exam, or dashboard page, so results, attempts, and mistakes are persisted promptly without any background worker; `get_active_session()` additionally hides deadline-passed exams from resume entry points. All time checks accept an injected `now` for deterministic tests. `submit()` grades the frozen answers, flips the session through the repository's conditional update (making double submits no-ops), and forwards each answered question to `WrongQuestionService.record_attempt()` exactly once with mode `mock_exam`; unanswered slots count as wrong in the score but create neither attempts nor mistake records. Reports aggregate the stored grading per chapter in curriculum order.
+
+### `app/services/local_time.py`
+
+Resolves and converts the display timezone. Storage and all comparisons stay in UTC; this module only governs what users see. `resolve_display_timezone()` turns the configured IANA name into a `zoneinfo.ZoneInfo`, falls back to the server-local zone when unset, and raises `InvalidTimezoneError` for unknown names so misconfiguration fails at startup. `to_display()`, `display_day()`, and `timezone_label()` are the only conversions used by the statistics service and the view helpers.
+
+### `app/services/statistics_service.py`
+
+`StatisticsService` aggregates the dashboard from one learner's retained attempt window plus the existing wrong-question state machine. It reports total/correct counts and accuracy, 7- and 30-day activity counts (inclusive day cutoffs on UTC timestamps), pending/corrected mistake counts with due SRS reviews, per-chapter mastery (attempts, accuracy, coverage against the live bank, and a threshold-based status: not started, weak below 60%, progressing below 80%, good below 90%, mastered at 90%+, with a low-sample flag below 3 attempts), and a 7-day per-day trend that fills empty days with zeros and buckets attempts by display-timezone calendar day. All bands are module constants and every function accepts an injectable `now`; the zone defaults to UTC and `create_app` injects the resolved display zone.
 
 ## 9. HTTP and Session Layer
 
@@ -517,6 +551,13 @@ This module creates the Flask blueprint and defines all browser endpoints.
 | GET | `/review` | Render the current review question or result |
 | POST | `/review/answer` | Validate and grade the current review answer |
 | POST | `/review/next` | Advance the review queue |
+| GET | `/dashboard` | Show per-learner totals, chapter mastery, and recent activity |
+| GET | `/exam` | Show mock-exam configuration, the resumable exam, and history |
+| POST | `/exam/start` | Validate the configuration and create a fixed question set |
+| GET | `/exam/<exam_id>` | Render one exam question without feedback; auto-submits when expired |
+| POST | `/exam/<exam_id>/answer` | Save one exam answer without grading feedback |
+| POST | `/exam/<exam_id>/submit` | Finalize the exam exactly once and redirect to its report |
+| GET | `/exam/<exam_id>/report` | Show the immutable score report for a finished exam |
 
 `/health` is registered directly on the Flask application before the web blueprint. It therefore does not run the blueprint's account requirement and does not expose learner, database, question, or secret data.
 
@@ -525,9 +566,9 @@ This module creates the Flask blueprint and defines all browser endpoints.
 Two small modules keep cross-cutting HTTP concerns out of the route functions:
 
 - `app/web/auth.py` holds the authentication, CSRF, and login rate-limit helpers. It resolves `session["user_id"]` to a real user for the blueprint's account requirement, issues and checks the CSRF token carried by mutating forms, and consults `RateLimitRepository` to throttle repeated failed logins.
-- `app/web/view_helpers.py` holds the template and catalogue helpers that assemble the course/chapter selection lists and other view models shared by the practice and review screens.
+- `app/web/view_helpers.py` holds the template and catalogue helpers that assemble the course/chapter selection lists and other view models shared by the practice and review screens, plus the display-timezone-aware timestamp/duration formatters injected into every template.
 
-The authentication hook resolves `session["user_id"]` to a real user. Missing or invalid accounts are redirected to `/login`. Protected views then run inside the `shared_progress` wrapper: it loads both modes from SQLite, validates their question-bank fingerprint, runs the view, and persists changed states in one transaction. A changed question bank clears all course data at startup and shows a message. The wrapper checks both the active fingerprint and generation inside its transaction; stale workers return 503 before writing. Legacy cookie import is disabled permanently after the first course reset.
+The authentication hook resolves `session["user_id"]` to a real user. Missing or invalid accounts are redirected to `/login`. Protected views then run inside the `shared_progress` wrapper: it loads both practice modes from SQLite, validates their question-bank fingerprint, runs the view, and persists changed states in one transaction. A changed question bank clears all course data at startup and shows a message. The wrapper checks both the active fingerprint and generation inside its transaction; stale workers return 503 before writing. Legacy cookie import is disabled permanently after the first course reset.
 
 The routes use the Post/Redirect/Get pattern after answer submissions. This prevents a normal browser refresh from resubmitting the form.
 
@@ -581,7 +622,7 @@ Renders both login and registration forms. The route passes a page mode so one t
 
 ### `app/templates/home.html`
 
-Shows the active bank title, question count, mistake statistics, entry to chapter selection, resume links, and restart actions. A resource row in the review section surfaces the signed-in learner's due SRS count ("今日待复习 X 题"): it links into the in-progress review round when one exists, otherwise submits `POST /review/start`; with nothing due it renders the static "今日暂无到期复习" row.
+Shows the active bank title, question count, mistake statistics, entry to chapter selection, resume links, and restart actions. The secondary rail links to mock exams and the dashboard, and renders a "继续模拟考试" row whenever an unfinished, unexpired exam exists. A resource row in the review section surfaces the signed-in learner's due SRS count ("今日待复习 X 题"): it links into the in-progress review round when one exists, otherwise submits `POST /review/start`; with nothing due it renders the static "今日暂无到期复习" row.
 
 ### `app/templates/quiz_setup.html`
 
@@ -605,6 +646,22 @@ Review adds only a small text role in the existing question-type metadata ("错�
 
 Renders only the current account's mistake records, including source/chapter/page context, latest wrong answer, wrong count, and corrected status. Correct answers and explanations are server-rendered after correction. The summary row adds a "今日待复习" card with the currently due SRS count, which also counts toward whether the start-review action is enabled. Above the existing mistake table, a second section built from the same `section-heading`, `table-card`, `mistake-table`, status, and metadata primitives summarizes each weak chapter, pending corrections, distinct 0/2 progress, completion, and any insufficient-question warning. GET filters support source, chapter, or both through the shared custom picker. A filtered review retains the same scope. Reset clears that learner's wrong and weak rows, cancels Review, and preserves attempts and Normal progress.
 
+### `app/templates/dashboard.html`
+
+Renders the signed-in learner's metrics strip (totals, accuracy, 7/30-day activity, pending/corrected mistakes with due SRS count), a zero-filled seven-day bar chart of daily attempts and accuracy, and the chapter mastery table with coverage and threshold-based status labels. A learner without attempts sees a calm empty state with one recovery action while the chapter table still lists every chapter as not started.
+
+### `app/templates/exam_setup.html`
+
+Collects the mock-exam configuration (question count and time limit from fixed allow-lists rendered as selectable rows), surfaces the resumable in-progress exam, and lists recent exam history with score, accuracy, duration, status, and report links. The start action is disabled when the bank is smaller than every allowed exam size.
+
+### `app/templates/exam.html`
+
+Presents one exam question per page with the shared question-card primitives but no grading feedback: options restore the saved selection, navigation saves through the answer form, a progress bar and answered counter track position, and a server-seeded countdown mirror auto-submits at zero. A separate submit panel reports the answered count and confirms before finalizing.
+
+### `app/templates/exam_report.html`
+
+Shows the immutable score (`correct / total`), accuracy, elapsed time, and submission status, a per-chapter breakdown in curriculum order, and every wrong or unanswered question with the shared answered-options markup, correct answer, and explanations. Glossary highlighting keeps working in all rendered question content.
+
 ### `app/templates/glossary.html`
 
 Renders the authenticated, course-neutral vocabulary page from `GlossaryRepository` metadata. It provides live search, a dynamically generated category picker, English-first recall cards, and per-card Chinese reveal controls.
@@ -617,6 +674,8 @@ Provides a consistent recovery page for friendly HTTP errors.
 
 Contains the full visual system and responsive behavior. The learning upgrade adds only local spacing/title/note rules for `.knowledge-summary`; colors, fonts, borders, cards, buttons, focus rings and breakpoints are reused. The SRS home entry reuses `.resource-row` on a submit button via a small appearance-reset rule plus a non-interactive `.resource-row-static` variant; both mistake tables inherit the existing `max-width: 640px` table-to-card conversion, so no separate mobile UI or horizontal dependency is introduced. Normal quiz has no intentional visual change.
 
+The dashboard and mock-exam pages follow the same rule: `.metric-strip`, `.trend-chart`, `.mastery-bar`, `.data-table`, `.exam-nav`, and `.exam-submit-panel` are built from the existing tokens (paper/sheet surfaces, ink rules, accent progress, mono metadata, square corners, no shadows), and `.data-table` reuses the same 640px table-to-card conversion as the mistake tables. Exam status labels reuse the `.status` text-and-dot pattern so state is never conveyed by color alone.
+
 The presentation invariant is that review reinforcement reuses the existing quiz/mistakes structures, CSS primitives, feedback patterns, bilingual/glossary behavior, keyboard focus, and 820px/640px responsive behavior. Role and progress differences are written as text and never conveyed by color alone.
 
 ### `app/static/js/app.js`
@@ -626,11 +685,13 @@ Adds small client-side enhancements:
 - enables answer submission only after at least one option is selected;
 - displays the number of selected options;
 - disables the submit button during submission;
-- asks for confirmation before discarding unfinished progress;
+- asks for confirmation before discarding unfinished progress or submitting an exam (the shared `data-confirm` family);
 - toggles Chinese learning aids and stores the preference in `localStorage`;
 - moves focus to answer feedback for accessibility;
 - implements the shared accessible listbox picker and submits marked GET forms as soon as a picker option is selected;
-- keeps the global and per-source chapter selectors synchronized, including an indeterminate state when only part of a source is selected.
+- keeps the global and per-source chapter selectors synchronized, including an indeterminate state when only part of a source is selected;
+- mirrors the mock-exam countdown from the server-rendered remaining seconds and triggers the same submit form at zero (the server stays authoritative for expiry);
+- mirrors the exam page's selection count in its hint without disabling navigation, since saving an empty selection clears a slot.
 
 ### `app/static/js/glossary.js`
 
@@ -653,7 +714,7 @@ The server repeats important validation, so client-side JavaScript is not treate
 
 | Column | Purpose |
 |---|---|
-| `learner_id` / `mode` | Composite primary key, one round per account and mode |
+| `learner_id` / `mode` | Composite primary key, one round per account and practice mode |
 | `bank_version` | Question-bank fingerprint used to invalidate obsolete rounds |
 | `state` | JSON round state, or SQL NULL for cleared progress |
 
@@ -664,12 +725,12 @@ The server repeats important validation, so client-side JavaScript is not treate
 | `id` | Auto-incrementing attempt ID |
 | `learner_id` | User UUID |
 | `question_id` | Stable ID from `questions.json` |
-| `mode` | `normal` or `review` |
+| `mode` | `normal`, `review`, or `mock_exam` |
 | `selected_answers` | JSON array of selected option IDs |
 | `is_correct` | Boolean stored as `0` or `1` |
 | `answered_at` | UTC ISO timestamp |
 
-At most three rows are retained for each `(learner_id, question_id)` pair, ordered by `answered_at` and then `id`. This retention rule is enforced after every insert and once during application startup. The cumulative `wrong_count` in `wrong_questions` is independent of this rolling attempt window.
+At most ten rows are retained for each `(learner_id, question_id)` pair, ordered by `answered_at` and then `id`. This retention rule is enforced after every insert and once during application startup. The cumulative `wrong_count` in `wrong_questions` is independent of this rolling attempt window. Databases created before mock exams are upgraded in place: because SQLite cannot alter a `CHECK` constraint, the startup migration rebuilds the table with the widened mode list (preserving every row and id) exactly once, guarded by the stored table definition.
 
 ### `wrong_questions`
 
@@ -686,6 +747,35 @@ At most three rows are retained for each `(learner_id, question_id)` pair, order
 | `last_reviewed_at` | Most recent review timestamp, if any |
 
 The composite primary key `(learner_id, question_id)` guarantees one current correction record per user and question. The columns keep their historical SQL names to avoid destructive migration; knowledge-point completion is never inferred from them. An invariant ties the two state machines together: `mastered=0` rows always have `next_review_at IS NULL`, so a question is either pending correction or scheduled, never both. The two SRS columns are added at startup through guarded `ALTER TABLE` statements when missing, and pre-existing rows stay unscheduled (`next_review_at = NULL`) until they are corrected again.
+
+### `exam_sessions`
+
+| Column | Purpose |
+|---|---|
+| `id` | Random hex primary key |
+| `learner_id` | User UUID owning the exam; every query is scoped by it |
+| `status` | `in_progress`, `submitted`, or `expired` |
+| `question_count` | Fixed number of questions drawn at creation |
+| `time_limit_seconds` | Optional limit; `NULL` means untimed |
+| `option_seed` | Seed keeping each slot's option order stable |
+| `created_at` / `started_at` | UTC ISO timestamps (identical at creation) |
+| `deadline_at` | `started_at + time_limit_seconds`, or `NULL` when untimed |
+| `submitted_at` | Finalization timestamp, if finished |
+| `current_position` | Last visited slot, used to resume the exam |
+| `correct_count` | Graded score, filled at finalization |
+| `duration_seconds` | Elapsed time capped at the limit, filled at finalization |
+
+### `exam_questions`
+
+| Column | Purpose |
+|---|---|
+| `exam_id` / `position` | Composite primary key fixing the slot order |
+| `question_id` | Stable ID from `questions.json`; unique per exam |
+| `selected_answers` | JSON array of the saved selection, `NULL` until answered |
+| `is_correct` | Graded outcome, `NULL` until submission |
+| `answered_at` | UTC ISO timestamp of the latest save, `NULL` when cleared |
+
+The question set is fixed at creation and never re-drawn, so refreshes, reopens, and cross-device resumes all see identical slots. Submission flips `status` with a conditional `UPDATE ... WHERE status = 'in_progress'`, which makes repeated submits no-ops before any attempt or mistake side effects run.
 
 ### `weak_knowledge_points`
 
@@ -802,6 +892,41 @@ Browser POST /review/next
   -> no candidate plus active <2/2 state produces a finite shortage summary
 ```
 
+### Running a mock exam
+
+```text
+Browser POST /exam/start
+  -> web.py parses the requested size/time limit
+  -> ExamService validates both against fixed allow-lists and the live bank size
+  -> ExamRepository persists the session and one frozen, deduplicated slot list
+  -> redirect to GET /exam/<id> ( refreshes and other devices see the same set )
+
+Browser POST /exam/<id>/answer
+  -> web.py resolves ownership; ExamService rejects expired/finished exams
+  -> GradingService validates option IDs without grading feedback
+  -> ExamRepository stores the selection verbatim and the visited position
+
+Browser POST /exam/<id>/submit (or any page load after the deadline)
+  -> ExamService grades the frozen answers
+  -> ExamRepository flips status with a conditional UPDATE (double submits are no-ops)
+  -> each answered question is recorded once as a mock_exam Attempt through
+     WrongQuestionService, so mistakes rejoin the regular correction/SRS flow
+  -> redirect to GET /exam/<id>/report with score, chapter breakdown, and
+     wrong-question explanations
+```
+
+### Dashboard statistics
+
+```text
+Browser GET /dashboard
+  -> ExamService settles any expired exams first (touch-based sweep)
+  -> StatisticsService aggregates the learner's retained attempt window:
+     totals, accuracy, 7/30-day activity, chapter mastery with coverage and
+     threshold statuses, and a zero-filled 7-day trend bucketed by
+     display-timezone calendar day
+  -> wrong-question counts come from WrongQuestionService, never redefined
+```
+
 ## 14. Test Architecture
 
 The tests use temporary question/glossary files and temporary SQLite databases, so they do not modify `instance/mcq.db`.
@@ -826,6 +951,12 @@ The tests use temporary question/glossary files and temporary SQLite databases, 
 | `tests/test_progress_sync.py` | Independent clients/workers, resume and completion, concurrency, stale forms, reset, legacy migration, transaction rollback |
 | `tests/test_web.py` | Public health response, login, registration, page flows, shared progress, duplicate protection, feedback, errors |
 | `tests/test_bundled_question_bank.py` | Completeness and quality rules for the real bundled bank |
+| `tests/test_security.py` | Security headers, CSP, CSRF enforcement, login rate limiting, and payload limits |
+| `tests/test_exam_service.py` | Exam creation/frozen sets, config validation, answer persistence, ownership, grading, idempotent submit, mistake sync, SRS reopening, deadline rules, expiry sweep, reports, history |
+| `tests/test_exam_web.py` | Exam pages end to end: no feedback during exams, refresh stability, resume, submission results, locked answers, history links, expiry settlement via home/dashboard visits, legacy attempts-table migration |
+| `tests/test_statistics_service.py` | Dashboard aggregation: totals, accuracy, 7/30-day boundaries, chapter mastery bands, low-sample flags, zero-filled trends, display-timezone bucketing, isolation |
+| `tests/test_dashboard_web.py` | Dashboard page: login guard, empty state, rendered metrics/mastery/trend, mock-exam reflection, per-user scoping, configured-timezone dates |
+| `tests/test_local_time.py` | Timezone resolution/fallback/errors, conversion helpers, offset labels, tz-aware formatting, startup fail-fast |
 
 Run all tests with:
 
@@ -1116,7 +1247,7 @@ are required. The exact authoring contracts are maintained in
 `question_bank_state` stores one active SHA-256 fingerprint and a reset generation.
 After full bank validation, `Database.synchronize_question_bank()` uses `BEGIN IMMEDIATE`
 to compare this fingerprint, delete all rows from `attempts`, `wrong_questions`,
-`weak_knowledge_points`, and `quiz_progress`, reset the attempt sequence, and update the fingerprint/generation
+`weak_knowledge_points`, `quiz_progress`, `exam_questions`, and `exam_sessions`, reset the attempt sequence, and update the fingerprint/generation
 atomically. Users are preserved unchanged. Concurrent workers loading the same bank
 observe the new fingerprint and do not reset again. Invalid banks fail before clearing.
 Even whitespace-only edits trigger replacement; files are loaded at startup, so restart

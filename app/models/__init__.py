@@ -3,6 +3,9 @@
 from .domain import (
     Attempt,
     Chapter,
+    ExamQuestion,
+    ExamSession,
+    ExamStatus,
     Glossary,
     GlossaryTerm,
     Option,
@@ -17,6 +20,9 @@ from .domain import (
 __all__ = [
     "Attempt",
     "Chapter",
+    "ExamQuestion",
+    "ExamSession",
+    "ExamStatus",
     "Glossary",
     "GlossaryTerm",
     "Option",

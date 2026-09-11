@@ -2,6 +2,7 @@
 
 from .attempt_repository import AttemptRepository
 from .database import Database
+from .exam_repository import ExamRepository
 from .glossary_loader import GlossaryError, GlossaryLoader, normalize_glossary_label
 from .glossary_repository import GlossaryRepository
 from .progress_repository import ProgressRepository
@@ -16,6 +17,7 @@ from .wrong_question_repository import WrongQuestionRepository
 __all__ = [
     "AttemptRepository",
     "Database",
+    "ExamRepository",
     "GlossaryError",
     "GlossaryLoader",
     "GlossaryRepository",

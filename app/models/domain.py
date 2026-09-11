@@ -5,10 +5,24 @@ from enum import Enum
 
 
 class QuizMode(str, Enum):
-    """The two supported learning modes."""
+    """The supported learning modes."""
 
     NORMAL = "normal"
     REVIEW = "review"
+    MOCK_EXAM = "mock_exam"
+
+
+class ExamStatus(str, Enum):
+    """Lifecycle states of one persisted mock-exam session."""
+
+    IN_PROGRESS = "in_progress"
+    SUBMITTED = "submitted"
+    EXPIRED = "expired"
+
+    @property
+    def finished(self) -> bool:
+        """Return whether the exam can no longer accept answers."""
+        return self is not ExamStatus.IN_PROGRESS
 
 
 @dataclass(frozen=True)
@@ -136,3 +150,39 @@ class WeakKnowledgePoint:
     verified_question_ids: tuple[str, ...]
     last_wrong_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class ExamSession:
+    """One persisted mock exam owned by a single learner.
+
+    Timestamps are UTC ISO strings. ``time_limit_seconds`` and
+    ``deadline_at`` are ``None`` for untimed exams. ``correct_count`` and
+    ``duration_seconds`` are filled when the exam is finalized.
+    """
+
+    id: str
+    learner_id: str
+    status: ExamStatus
+    question_count: int
+    time_limit_seconds: int | None
+    option_seed: str
+    created_at: str
+    started_at: str
+    deadline_at: str | None = None
+    submitted_at: str | None = None
+    current_position: int = 0
+    correct_count: int | None = None
+    duration_seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class ExamQuestion:
+    """One fixed question slot inside a mock exam."""
+
+    exam_id: str
+    position: int
+    question_id: str
+    selected_answers: tuple[str, ...] = ()
+    is_correct: bool | None = None
+    answered_at: str | None = None

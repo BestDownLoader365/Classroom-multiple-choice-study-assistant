@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}模拟考试 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="quiz-layout">
+    <div class="quiz-navigation">
+        <a class="back-link" href="{{ url_for('web.exam_setup') }}">暂离考试（进度已保存）</a>
+        <div class="quiz-meta">
+            <span class="mode-pill">模拟考试</span>
+            <span>
+                第 {{ position + 1 }} / {{ total }} 题 · 已答 {{ answered_count }}
+                {% if remaining_seconds is not none %}
+                · <span class="exam-timer" data-exam-timer
+                        data-remaining-seconds="{{ remaining_seconds }}">剩余 --:--</span>
+                {% else %}
+                · 不限时
+                {% endif %}
+            </span>
+        </div>
+    </div>
+    <div class="progress" role="progressbar" aria-label="考试进度"
+         aria-valuenow="{{ position + 1 }}" aria-valuemin="1" aria-valuemax="{{ total }}">
+        <span style="width: {{ ((position + 1) / total * 100) | round }}%"></span>
+    </div>
+
+    <article class="question-card">
+        <div class="question-context">
+            {% for chapter in chapters %}<span>{{ chapter.title }}</span>{% endfor %}
+            <span>{{ source.title }}</span>
+            {% if question.section %}<span>{{ question.section }}</span>{% endif %}
+            {% if question.pages %}<span>p.{{ question.pages | join('–') }}</span>{% endif %}
+        </div>
+        <div class="question-heading">
+            <div class="question-type">
+                {% if question.question_type == "single" %}单选题{% else %}多选题 · 可选择多项{% endif %}
+            </div>
+            <span class="question-position">题目 {{ position + 1 }}</span>
+        </div>
+        <h1 class="question-text">
+            <span class="question-en" data-glossary-highlight>{{ question.text }}</span>
+            {% if question.text_zh %}
+            <span class="translation-zh question-translation">{{ question.text_zh }}</span>
+            {% endif %}
+        </h1>
+
+        <form class="answer-form" method="post"
+              action="{{ url_for('web.answer_exam', exam_id=exam_session.id) }}"
+              data-exam-answer-form>
+            {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+            <input type="hidden" name="position" value="{{ position }}">
+            <fieldset class="options">
+                <legend class="sr-only">请选择答案，考试期间不会提示对错</legend>
+                {% for option in ordered_options %}
+                <div class="option-row" data-option-row>
+                    <input
+                        id="option-{{ loop.index0 }}"
+                        type="{{ 'radio' if question.question_type == 'single' else 'checkbox' }}"
+                        name="answers"
+                        value="{{ option.id }}"
+                        aria-labelledby="option-label-{{ loop.index0 }} option-text-{{ loop.index0 }}"
+                        {% if option.id in saved_answers %}checked{% endif %}
+                    >
+                    <span class="option-index" id="option-label-{{ loop.index0 }}">{{ option_label(loop.index0) }}</span>
+                    <span class="option-text" id="option-text-{{ loop.index0 }}">
+                        <span class="question-en" data-glossary-highlight>{{ option.text }}</span>
+                        {% if option.text_zh %}
+                        <span class="translation-zh">{{ option.text_zh }}</span>
+                        {% endif %}
+                    </span>
+                </div>
+                {% endfor %}
+            </fieldset>
+            <p class="selection-hint {% if saved_answers %}has-selection{% endif %}" data-exam-hint>
+                {% if saved_answers %}已保存 {{ saved_answers | length }} 项选择{% else %}尚未作答，可在交卷前随时回来补答{% endif %}
+            </p>
+            <div class="exam-nav">
+                {% if position > 0 %}
+                <button class="button button-ghost" type="submit" name="goto" value="prev" formnovalidate>← 上一题</button>
+                {% else %}
+                <span></span>
+                {% endif %}
+                <button class="button button-primary" type="submit" name="goto" value="next">
+                    {% if position + 1 == total %}保存答案{% else %}保存并下一题{% endif %}
+                </button>
+            </div>
+        </form>
+
+        <div class="exam-submit-panel">
+            <p>
+                已答 {{ answered_count }} / {{ total }} 题。
+                交卷后立即出成绩，且不能再修改答案。
+            </p>
+            <form method="post" action="{{ url_for('web.submit_exam', exam_id=exam_session.id) }}"
+                  data-exam-submit-form
+                  data-confirm="{% if total - answered_count %}还有 {{ total - answered_count }} 题未作答，确定要交卷吗？{% else %}确定要交卷吗？交卷后不能修改答案。{% endif %}">
+                {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <button class="button button-secondary" type="submit">交卷</button>
+            </form>
+        </div>
+    </article>
+</section>
+{% endblock %}

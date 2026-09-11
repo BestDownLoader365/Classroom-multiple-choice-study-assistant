@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+
+{% block title %}学习数据 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="content-stack">
+    <div class="page-heading">
+        <div>
+            <p class="section-label">个人学习记录</p>
+            <h1>学习数据</h1>
+            <p>这里只统计账号“{{ g.user.username }}”的答题记录（正常练习、错题巩固与模拟考试；每道题保留最近 10 次作答）。</p>
+        </div>
+        <div class="heading-actions">
+            <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+            <a class="button button-secondary" href="{{ url_for('web.exam_setup') }}">模拟考试</a>
+        </div>
+    </div>
+
+    {% if not dashboard.has_attempts %}
+    <div class="empty-state">
+        <h2>暂无答题记录</h2>
+        <p>完成几轮正常练习或一场模拟考试后，这里会显示你的累计答题数、正确率和章节掌握度。</p>
+        <div class="inline-actions empty-actions">
+            <a class="button button-primary" href="{{ url_for('web.quiz_setup') }}">开始正常练习</a>
+        </div>
+    </div>
+    {% else %}
+    <div class="metric-strip" aria-label="总体学习指标">
+        <div><strong>{{ dashboard.total_attempts }}</strong><span>累计答题</span></div>
+        <div><strong>{{ "%.0f" | format(dashboard.accuracy) }}%</strong><span>总正确率（{{ dashboard.correct_attempts }} 次答对）</span></div>
+        <div><strong>{{ dashboard.attempts_last_7_days }}</strong><span>最近 {{ dashboard.recent_window_days }} 天答题</span></div>
+        <div><strong>{{ dashboard.attempts_last_30_days }}</strong><span>最近 {{ dashboard.month_window_days }} 天答题</span></div>
+        <div><strong>{{ dashboard.pending_wrong }}</strong><span>待纠正错题</span></div>
+        <div><strong>{{ dashboard.corrected_wrong }}</strong><span>已纠正错题{% if dashboard.due_srs %} · {{ dashboard.due_srs }} 到期复习{% endif %}</span></div>
+    </div>
+
+    <section class="dashboard-section" aria-labelledby="trend-heading">
+        <div class="section-heading compact-heading">
+            <div>
+                <p class="section-label">最近 {{ dashboard.trend_window_days }} 天</p>
+                <h2 id="trend-heading">学习趋势</h2>
+            </div>
+        </div>
+        <div class="trend-chart">
+            {% for day in dashboard.trend %}
+            <div class="trend-day{% if not day.attempts %} trend-day-empty{% endif %}">
+                <span class="trend-count">{{ day.attempts }}</span>
+                <span class="trend-bar" style="height: {{ ((day.attempts / dashboard.trend_max * 100) | round(0, 'floor') | int) if dashboard.trend_max else 0 }}%"></span>
+                <span class="trend-label">{{ day.day[5:] }}</span>
+                <span class="trend-accuracy">{% if day.accuracy is not none %}{{ "%.0f" | format(day.accuracy) }}%{% else %}—{% endif %}</span>
+            </div>
+            {% endfor %}
+        </div>
+        <p class="trend-note">柱形为每天答题数，下方为当天正确率；日期按本地时区（{{ display_tz_label }}）统计。</p>
+    </section>
+    {% endif %}
+
+    <section class="dashboard-section" aria-labelledby="mastery-heading">
+        <div class="section-heading compact-heading">
+            <div>
+                <p class="section-label">按章节</p>
+                <h2 id="mastery-heading">章节掌握度</h2>
+            </div>
+        </div>
+        <div class="table-card">
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>章节</th>
+                            <th class="num">作答（对 / 总）</th>
+                            <th>正确率</th>
+                            <th class="num">覆盖题目</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in dashboard.chapters %}
+                        <tr>
+                            <td data-label="章节">
+                                {{ row.chapter.title }}
+                                <span class="chapter-source">{{ row.source.lecture or row.source.title }}</span>
+                            </td>
+                            <td class="num" data-label="作答">
+                                {% if row.attempts %}{{ row.correct }} / {{ row.attempts }}{% else %}—{% endif %}
+                            </td>
+                            <td data-label="正确率">
+                                {% if row.accuracy is not none %}
+                                <span class="mastery-cell">
+                                    <span class="mastery-value">{{ "%.0f" | format(row.accuracy) }}%</span>
+                                    <span class="mastery-bar"><span style="width: {{ row.accuracy | round(0, 'floor') | int }}%"></span></span>
+                                </span>
+                                {% else %}—{% endif %}
+                            </td>
+                            <td class="num" data-label="覆盖题目">{{ row.covered_questions }} / {{ row.total_questions }}</td>
+                            <td data-label="状态">
+                                {% if row.status == "not_started" %}
+                                <span class="status status-not-started">未开始</span>
+                                {% elif row.status == "weak" %}
+                                <span class="status status-weak">薄弱</span>
+                                {% elif row.status == "progressing" %}
+                                <span class="status status-progressing">进行中</span>
+                                {% elif row.status == "good" %}
+                                <span class="status status-good">良好</span>
+                                {% else %}
+                                <span class="status status-mastered">掌握较好</span>
+                                {% endif %}
+                                {% if row.low_sample %}<span class="sample-note">数据较少</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <p class="trend-note">正确率低于 60% 为薄弱，60–79% 进行中，80–89% 良好，90% 及以上为掌握较好；作答少于 3 次的章节标记为“数据较少”。</p>
+    </section>
+</section>
+{% endblock %}

@@ -38,12 +38,13 @@ document.addEventListener("submit", (event) => {
     const form = event.target;
     if (
         !(form instanceof HTMLFormElement)
-        || !form.matches("[data-confirm-restart], [data-confirm-reset]")
+        || !form.matches("[data-confirm-restart], [data-confirm-reset], [data-confirm]")
     ) {
         return;
     }
     const message = form.dataset.confirmRestart
         || form.dataset.confirmReset
+        || form.dataset.confirm
         || "确定要继续吗？";
     if (!window.confirm(message)) {
         event.preventDefault();
@@ -297,4 +298,60 @@ if (allChapters instanceof HTMLInputElement && specificChapters.length > 0) {
     });
 
     updateSelectionState();
+}
+
+const examAnswerForm = document.querySelector("[data-exam-answer-form]");
+
+if (examAnswerForm instanceof HTMLFormElement) {
+    // Mock exams allow saving an empty selection (it clears the slot), so the
+    // submit buttons stay enabled; only the hint mirrors the selection count.
+    const examInputs = [...examAnswerForm.querySelectorAll("input[name='answers']")];
+    const examHint = examAnswerForm.querySelector("[data-exam-hint]");
+
+    const updateExamHint = () => {
+        const selectedCount = examInputs.filter((input) => input.checked).length;
+        if (examHint instanceof HTMLElement) {
+            examHint.textContent = selectedCount
+                ? `已选择 ${selectedCount} 项，保存后可随时修改`
+                : "未选择任何选项，保存将清空本题答案";
+            examHint.classList.toggle("has-selection", selectedCount > 0);
+        }
+    };
+
+    examInputs.forEach((input) => input.addEventListener("change", updateExamHint));
+}
+
+const examTimer = document.querySelector("[data-exam-timer]");
+
+if (examTimer instanceof HTMLElement) {
+    // The server remains the authority for the deadline; this countdown only
+    // mirrors it and triggers the same submit form when it reaches zero.
+    const submitForm = document.querySelector("[data-exam-submit-form]");
+    let remaining = Number.parseInt(examTimer.dataset.remainingSeconds || "0", 10);
+
+    const renderTimer = () => {
+        const total = Math.max(0, remaining);
+        const hours = Math.floor(total / 3600);
+        const minutes = Math.floor((total % 3600) / 60);
+        const seconds = total % 60;
+        const padded = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+        examTimer.textContent = hours > 0
+            ? `剩余 ${hours}:${padded}`
+            : `剩余 ${padded}`;
+        examTimer.classList.toggle("is-low", total > 0 && total <= 60);
+    };
+
+    renderTimer();
+    const tick = window.setInterval(() => {
+        remaining -= 1;
+        renderTimer();
+        if (remaining <= 0) {
+            window.clearInterval(tick);
+            if (submitForm instanceof HTMLFormElement) {
+                // Time ran out: submit directly without the confirm dialog.
+                submitForm.removeAttribute("data-confirm");
+                submitForm.requestSubmit();
+            }
+        }
+    }, 1000);
 }

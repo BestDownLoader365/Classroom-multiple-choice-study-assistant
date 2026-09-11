@@ -66,10 +66,33 @@
             <div class="section-heading">
                 <div>
                     <p class="section-label">次要任务</p>
-                    <h2>复习与查阅</h2>
+                    <h2>复习、考试与数据</h2>
                 </div>
             </div>
-            <nav class="resource-list" aria-label="复习与查阅">
+            <nav class="resource-list" aria-label="复习、考试与数据">
+                {% if active_exam %}
+                <a class="resource-row" href="{{ url_for('web.exam', exam_id=active_exam.id) }}">
+                    <span class="resource-row-copy">
+                        <strong>继续模拟考试</strong>
+                        <span>第 {{ active_exam.current_position + 1 }} / {{ active_exam.question_count }} 题 · 进行中，中途离开可继续。</span>
+                    </span>
+                    <span class="resource-row-arrow" aria-hidden="true">→</span>
+                </a>
+                {% endif %}
+                <a class="resource-row" href="{{ url_for('web.exam_setup') }}">
+                    <span class="resource-row-copy">
+                        <strong>模拟考试</strong>
+                        <span>随机抽题、限时作答，交卷后统一出成绩，错题自动进入错题本。</span>
+                    </span>
+                    <span class="resource-row-arrow" aria-hidden="true">→</span>
+                </a>
+                <a class="resource-row" href="{{ url_for('web.dashboard') }}">
+                    <span class="resource-row-copy">
+                        <strong>学习数据</strong>
+                        <span>累计答题、正确率、章节掌握度与最近学习趋势。</span>
+                    </span>
+                    <span class="resource-row-arrow" aria-hidden="true">→</span>
+                </a>
                 <a class="resource-row" href="{{ url_for('web.mistakes') }}">
                     <span class="resource-row-copy">
                         <strong>我的错题</strong>

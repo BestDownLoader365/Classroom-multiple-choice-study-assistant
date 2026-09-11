@@ -50,6 +50,9 @@ python run.py
 - 错题页始终显示最近一次错误答案和课程来源；正确答案与解析仅在完成巩固后显示。课件或章节下拉项选中后立即筛选，无需“筛选错题”按钮；两个条件可联合使用，并可按当前范围巩固。
 - 可在错题页确认后将当前账号的全部错题重置为 0；答题历史会保留，其他账号不受影响。
 - 题目、选项、答案反馈、解析和错题中的英文专业术语可点击或用键盘打开中文释义；独立的 `/glossary` 页面支持搜索、动态分类筛选和中英文主动回忆。
+- 学习数据页（`/dashboard`）按当前账号汇总累计答题、总正确率、最近 7/30 天答题量、待纠正/已纠正错题、逐章节掌握度（含覆盖率与状态分级）和最近 7 天每日答题趋势；没有答题记录时显示空状态。页面时间与趋势日期按显示时区呈现（默认跟随服务器本地时区，可用环境变量 `MCQ_DISPLAY_TIMEZONE` 指定如 `Asia/Shanghai` 的 IANA 时区）。
+- 模拟考试（`/exam`）从题库随机抽取固定不重复的一套题，可选不限时或 10/20/30/60 分钟限时；考试过程不提示对错，可上一题/下一题，刷新或关闭页面后可继续；服务端记录开考时间与时限，到时自动交卷，打开首页、考试中心或学习数据页时也会自动结算所有已到期考试。
+- 交卷（或到时自动交卷）后生成成绩报告：总分、正确率、用时、章节表现拆分，以及每道错题的你的答案、正确答案与解析；已作答的错题自动进入现有错题本与薄弱知识点流程，不重复创建错题记录。
 
 ## 两套独立选题策略
 
@@ -73,6 +76,8 @@ uncorrected wrong questions
 Normal 只读取实时题库筛选结果和自己在 `quiz_progress` 中的 coverage 状态，不读取错题、薄弱知识点或 Review 进度。Review 选择迁移题时也不会消费或修改 Normal coverage bag。选择“全部题目”时，每个 eligible question 恰好出现一次。
 
 Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、反馈和选项随机种子都保存在服务器端 SQLite progress 中，不放入 `localStorage`。浏览器刷新、反馈重定向和另一设备继续不会重新抽题；只有真正开始新的 Normal round 才消费 coverage bag，只有推进 Review queue 才生成后续迁移题。
+
+模拟考试使用完全独立的状态：创建时用 `random.sample` 一次性抽出固定题集，与 Normal coverage bag 和 Review 队列互不影响，也不会改写它们。
 
 ## JSON 格式
 
@@ -225,10 +230,11 @@ python scripts\migrate_question_metadata.py generated.json --output questions.js
 `instance/mcq.db` 保存：
 
 - 本地账号的用户名、密码哈希和创建时间；
-- 每个账号每道题最近 3 次作答的模式、所选答案、结果和时间；
+- 每个账号每道题最近 10 次作答的模式、所选答案、结果和时间；
 - 每个账号自己的错题次数和题目纠正状态（旧数据库列 `review_streak` / `mastered` 保留作无损兼容，当前语义为未纠正/已纠正，不再表示知识点掌握）；
 - 每个账号以 chapter 为单位的薄弱状态、Review 中已验证的不同 question IDs 和强化进度；
-- 每个账号正常练习、错题巩固的题目队列、Review item role、当前位置、选项顺序、反馈和本轮统计，以及 Normal coverage bag。
+- 每个账号正常练习、错题巩固的题目队列、Review item role、当前位置、选项顺序、反馈和本轮统计，以及 Normal coverage bag；
+- 每个账号的模拟考试场次（题量、时限、状态、成绩、用时）和每场考试的固定题目集合与保存的作答。
 
 ### 换设备继续做题
 
@@ -288,6 +294,8 @@ if ! sudo test -s /etc/mcq-template/mcq-template.env; then
     sudo sh -c 'umask 077; printf "MCQ_SECRET_KEY=" > /etc/mcq-template/mcq-template.env; openssl rand -hex 32 >> /etc/mcq-template/mcq-template.env'
 fi
 ```
+
+页面时间与 Dashboard 趋势日期默认跟随服务器本地时区；如果 WSL 系统时区不是本地时区，可在同一个 env 文件中追加 `MCQ_DISPLAY_TIMEZONE=Asia/Shanghai` 显式指定。
 
 安装 systemd 和 Nginx 配置：
 

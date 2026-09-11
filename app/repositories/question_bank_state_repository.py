@@ -44,6 +44,8 @@ class QuestionBankStateRepository:
                     "wrong_questions",
                     "weak_knowledge_points",
                     "quiz_progress",
+                    "exam_questions",
+                    "exam_sessions",
                 ):
                     connection.execute(f"DELETE FROM {table}")
                 connection.execute("DELETE FROM sqlite_sequence WHERE name = 'attempts'")

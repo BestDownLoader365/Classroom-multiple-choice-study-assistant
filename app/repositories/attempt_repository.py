@@ -2,7 +2,7 @@
 
 import json
 
-from app.models import Attempt
+from app.models import Attempt, QuizMode
 
 from .database import Database, MAX_ATTEMPTS_PER_QUESTION
 
@@ -60,6 +60,36 @@ class AttemptRepository:
         with self.database.connect() as connection:
             row = connection.execute("SELECT COUNT(*) AS total FROM attempts").fetchone()
         return int(row["total"])
+
+    def list_for_learner(self, learner_id: str) -> list[Attempt]:
+        """Return one learner's retained attempts, oldest first.
+
+        The attempts table keeps at most ``MAX_ATTEMPTS_PER_QUESTION`` rows
+        per question, so this is a bounded, recent learning window rather
+        than a lifetime history. Aggregation stays in the statistics
+        service, keeping SQL minimal.
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM attempts
+                WHERE learner_id = ?
+                ORDER BY answered_at, id
+                """,
+                (learner_id,),
+            ).fetchall()
+        return [
+            Attempt(
+                id=int(row["id"]),
+                learner_id=row["learner_id"],
+                question_id=row["question_id"],
+                mode=QuizMode(row["mode"]),
+                selected_answers=tuple(json.loads(row["selected_answers"])),
+                is_correct=bool(row["is_correct"]),
+                answered_at=row["answered_at"],
+            )
+            for row in rows
+        ]
 
     def get_latest_incorrect_answers(
         self, learner_id: str

@@ -12,6 +12,7 @@ from flask import Flask, request
 from app.repositories import (
     AttemptRepository,
     Database,
+    ExamRepository,
     GlossaryLoader,
     GlossaryRepository,
     ProgressRepository,
@@ -23,10 +24,13 @@ from app.repositories import (
 )
 from app.routes import create_web_blueprint
 from app.services import (
+    ExamService,
     GradingService,
     QuizService,
+    StatisticsService,
     WeakKnowledgePointService,
     WrongQuestionService,
+    resolve_display_timezone,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +55,9 @@ class AppServices:
     wrong_question_service: WrongQuestionService
     progress_repository: ProgressRepository
     quiz_service: QuizService
+    exam_repository: ExamRepository
+    exam_service: ExamService
+    statistics_service: StatisticsService
 
 
 def create_app(test_config: dict[str, Any] | None = None) -> Flask:
@@ -64,6 +71,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         GLOSSARY_FILE=GLOSSARY_FILE,
         DATABASE=DATABASE_FILE,
         KNOWLEDGE_VERIFICATION_TARGET=KNOWLEDGE_VERIFICATION_TARGET,
+        DISPLAY_TIMEZONE=os.environ.get("MCQ_DISPLAY_TIMEZONE"),
         PERMANENT_SESSION_LIFETIME=timedelta(days=30),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
@@ -93,6 +101,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     question_bank_version = question_loader.source_fingerprint
     if question_bank_version is None:
         raise RuntimeError("Question bank fingerprint was not generated.")
+    display_timezone = resolve_display_timezone(app.config["DISPLAY_TIMEZONE"])
     question_repository = QuestionRepository(
         questions,
         title=question_loader.title,
@@ -132,6 +141,19 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         wrong_question_service=wrong_question_service,
         weak_knowledge_point_service=weak_knowledge_point_service,
     )
+    exam_repository = ExamRepository(database)
+    exam_service = ExamService(
+        exam_repository=exam_repository,
+        question_repository=question_repository,
+        grading_service=grading_service,
+        wrong_question_service=wrong_question_service,
+    )
+    statistics_service = StatisticsService(
+        attempt_repository=attempt_repository,
+        question_repository=question_repository,
+        wrong_question_service=wrong_question_service,
+        display_tz=display_timezone,
+    )
 
     services = AppServices(
         question_repository=question_repository,
@@ -145,6 +167,9 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         wrong_question_service=wrong_question_service,
         quiz_service=quiz_service,
         progress_repository=progress_repository,
+        exam_repository=exam_repository,
+        exam_service=exam_service,
+        statistics_service=statistics_service,
     )
     app.extensions["mcq_services"] = services
 
@@ -181,6 +206,9 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             progress_repository=progress_repository,
             wrong_question_service=wrong_question_service,
             weak_knowledge_point_service=weak_knowledge_point_service,
+            exam_service=exam_service,
+            statistics_service=statistics_service,
+            display_timezone=display_timezone,
             question_bank_version=question_bank_version,
             bank_generation=bank_generation,
         )

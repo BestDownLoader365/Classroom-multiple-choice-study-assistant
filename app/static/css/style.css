@@ -456,3 +456,83 @@ body.show-bilingual .translation-zh { display: block; }
     html { scroll-behavior: auto; }
     *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
+
+/* Dashboard and mock-exam components, built from the existing tokens. */
+.metric-strip { display: flex; margin: 0; border-block: 1px solid var(--line); flex-wrap: wrap; }
+.metric-strip > div { display: grid; min-width: 132px; padding: 18px 34px 18px 0; gap: 6px; }
+.metric-strip > div + div { padding-left: 34px; border-left: 1px solid var(--line); }
+.metric-strip strong { font-family: var(--font-display); font-size: clamp(1.65rem, 2.2vw, 2rem); font-weight: 500; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+.metric-strip span { color: var(--ink-soft); font-size: .84rem; line-height: 1.4; }
+.dashboard-section { display: grid; gap: 18px; }
+.compact-heading { min-height: 0; margin-bottom: 0; }
+.trend-note { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.6; }
+.empty-actions { justify-content: center; }
+
+.trend-chart { display: flex; height: 172px; padding-top: 10px; border-bottom: 1px solid var(--line-strong); align-items: stretch; gap: 8px; }
+.trend-day { display: flex; min-width: 0; flex: 1 1 0; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; }
+.trend-count { color: var(--ink-soft); font-family: var(--font-data); font-size: .68rem; font-variant-numeric: tabular-nums; }
+.trend-bar { width: 100%; max-width: 44px; min-height: 2px; background: var(--accent); transition: height 220ms cubic-bezier(.2,.8,.4,1); }
+.trend-day-empty .trend-bar { background: var(--paper-deep); }
+.trend-label { color: var(--muted); font-family: var(--font-data); font-size: .6rem; }
+.trend-accuracy { color: var(--muted); font-family: var(--font-data); font-size: .6rem; font-variant-numeric: tabular-nums; }
+
+.data-table td:first-child { width: auto; min-width: 220px; }
+.data-table .num, .data-table th.num { text-align: right; }
+.chapter-source { display: block; margin-top: 4px; color: var(--muted); font-family: var(--font-data); font-size: .6rem; letter-spacing: .05em; }
+.mastery-cell { display: grid; min-width: 110px; gap: 6px; }
+.mastery-value { font-family: var(--font-data); font-size: .78rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.mastery-bar { height: 4px; background: var(--paper-deep); }
+.mastery-bar > span { display: block; height: 100%; background: var(--accent); }
+.sample-note { display: block; margin-top: 4px; color: var(--muted); font-family: var(--font-data); font-size: .6rem; letter-spacing: .04em; }
+.status-not-started { color: var(--muted); }
+.status-weak { color: var(--danger); }
+.status-progressing { color: var(--warning); }
+.status-good { color: var(--success); }
+.status-active { color: var(--accent); }
+.table-link { color: var(--accent); font-weight: 650; text-decoration: none; white-space: nowrap; }
+.table-link:hover { color: var(--accent-dark); text-decoration: underline; text-underline-offset: 3px; }
+.table-link:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+
+.exam-config { display: grid; margin: 0; padding: 0; border: 0; gap: 14px; }
+.exam-config .section-label { margin-bottom: 0; }
+.exam-option-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.exam-option-grid .chapter-option > span { min-height: 64px; }
+.exam-controls { align-items: center; }
+.exam-note { margin: 0; color: var(--ink-soft); font-size: .84rem; line-height: 1.6; }
+.exam-resume { padding-bottom: 8px; border-bottom: 2px solid var(--ink); }
+.exam-timer { font-variant-numeric: tabular-nums; }
+.exam-timer.is-low { color: var(--danger); font-weight: 700; }
+.exam-nav { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.exam-nav .button-primary { min-width: 180px; }
+.exam-submit-panel { display: flex; margin-top: 30px; padding-top: 22px; border-top: 1px solid var(--line); align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px 20px; }
+.exam-submit-panel p { margin: 0; color: var(--ink-soft); font-size: .84rem; line-height: 1.6; }
+
+.report-summary { padding-top: clamp(28px, 4vw, 44px); border-top: 2px solid var(--ink); }
+.report-score { margin: 0; font-family: var(--font-display); font-size: clamp(3rem, 7vw, 4.6rem); font-weight: 500; letter-spacing: -.045em; line-height: 1; font-variant-numeric: tabular-nums; }
+.report-score-total { color: var(--muted); font-size: .45em; letter-spacing: -.02em; }
+.report-metrics { margin-top: 22px; border-top: 0; }
+.report-question + .report-question { margin-top: 34px; }
+.report-question-text { margin-bottom: 26px; font-size: clamp(1.2rem, 2.4vw, 1.6rem); }
+
+@media (max-width: 820px) {
+    .exam-option-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 640px) {
+    .metric-strip > div { min-width: 42%; padding: 14px 14px 14px 0; }
+    .metric-strip > div + div { padding-left: 14px; border-left: 0; }
+    .trend-chart { height: 138px; gap: 4px; }
+    .exam-nav .button { flex: 1; min-width: 0; }
+    .exam-nav .button-primary { min-width: 0; }
+    .exam-submit-panel { align-items: stretch; flex-direction: column; }
+    .exam-submit-panel .button { width: 100%; }
+    .data-table thead { display: none; }
+    .data-table, .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
+    .data-table tr { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+    .data-table tr:last-child { border-bottom: 0; }
+    .data-table td { display: grid; grid-template-columns: 92px 1fr; min-width: 0; padding: 7px 0; border: 0; gap: 12px; }
+    .data-table td:first-child { display: block; padding: 10px 0 16px; min-width: 0; font-size: 1.05rem; }
+    .data-table td::before { color: var(--muted); content: attr(data-label); font-family: var(--font-data); font-size: 0.6rem; font-weight: 600; letter-spacing: 0.06em; }
+    .data-table td:first-child::before { display: block; margin-bottom: 8px; }
+    .data-table .num { text-align: left; }
+}

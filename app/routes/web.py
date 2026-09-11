@@ -1,6 +1,7 @@
 """Web routes for accounts, normal practice, and personal mistake review."""
 
 import secrets
+from datetime import tzinfo
 from functools import partial, wraps
 from typing import Any
 
@@ -18,7 +19,7 @@ from flask import (
 )
 from werkzeug.exceptions import HTTPException
 
-from app.models import QuizMode
+from app.models import ExamSession, ExamStatus, QuizMode
 from app.repositories import (
     GlossaryRepository,
     QuestionRepository,
@@ -30,11 +31,19 @@ from app.services import (
     ORIGINAL_CORRECTION,
     TRANSFER_VERIFICATION,
     AnswerValidationError,
+    ExamConfigError,
+    ExamExpiredError,
+    ExamNotFoundError,
+    ExamService,
+    ExamStateError,
     QuizService,
+    StatisticsService,
     WeakKnowledgePointService,
     WrongQuestionService,
 )
 from app.services import progress_state as _progress_state
+from app.services import local_time as _local_time
+from app.services import srs_service as _srs
 
 _is_valid_progress_state = _progress_state.is_valid_progress_state
 _quiz_limit = _progress_state.quiz_limit
@@ -57,6 +66,9 @@ def create_web_blueprint(
     question_bank_version: str,
     progress_repository: ProgressRepository,
     weak_knowledge_point_service: WeakKnowledgePointService,
+    exam_service: ExamService,
+    statistics_service: StatisticsService,
+    display_timezone: tzinfo,
     bank_generation: int = 0,
 ) -> Blueprint:
     """Build the learner-facing web blueprint."""
@@ -78,6 +90,11 @@ def create_web_blueprint(
             "glossary_data": glossary_data,
             "option_label": _option_label,
             "csrf_token": _csrf_token,
+            "format_duration": _view.format_duration,
+            "format_datetime": partial(
+                _view.format_datetime, zone=display_timezone
+            ),
+            "display_tz_label": _local_time.timezone_label(display_timezone),
         }
 
     @blueprint.before_request
@@ -118,7 +135,7 @@ def create_web_blueprint(
                 session["bank_generation"] = bank_generation
                 g.quiz_progress = {}
                 changed = False
-                for mode in QuizMode:
+                for mode in _progress_state.PRACTICE_MODES:
                     stored = progress_repository.get(g.learner_id, mode)
                     legacy = session.pop(_session_key(mode), None)
                     if stored is None:
@@ -140,7 +157,7 @@ def create_web_blueprint(
                 if changed:
                     flash("检测到题库更新，未完成的练习进度已重置。", "info")
                 response = view(*args, **kwargs)
-                for mode in QuizMode:
+                for mode in _progress_state.PRACTICE_MODES:
                     state = g.quiz_progress.get(_session_key(mode))
                     stored = progress_repository.get(g.learner_id, mode)
                     if (stored is not None or state is not None) and stored != (
@@ -217,6 +234,7 @@ def create_web_blueprint(
     @blueprint.get("/")
     @shared_progress
     def home() -> str:
+        exam_service.finalize_expired_for_learner(g.learner_id)
         stats = wrong_question_service.get_stats(g.learner_id)
         return render_template(
             "home.html",
@@ -225,6 +243,17 @@ def create_web_blueprint(
             srs_due_count=wrong_question_service.get_due_srs_count(g.learner_id),
             normal_progress=_active_progress(QuizMode.NORMAL),
             review_progress=_active_progress(QuizMode.REVIEW),
+            active_exam=exam_service.get_active_session(g.learner_id),
+        )
+
+    @blueprint.get("/dashboard")
+    @shared_progress
+    def dashboard() -> str:
+        """Show the learner's aggregated learning statistics."""
+        exam_service.finalize_expired_for_learner(g.learner_id)
+        return render_template(
+            "dashboard.html",
+            dashboard=statistics_service.build_dashboard(g.learner_id),
         )
 
     @blueprint.get("/quiz/setup")
@@ -403,6 +432,181 @@ def create_web_blueprint(
     @shared_progress
     def next_review() -> Any:
         return _next(QuizMode.REVIEW)
+
+    @blueprint.get("/exam")
+    @shared_progress
+    def exam_setup() -> str:
+        """Show the mock-exam configuration, resume prompt, and history."""
+        exam_service.finalize_expired_for_learner(g.learner_id)
+        return render_template(
+            "exam_setup.html",
+            active_exam=exam_service.get_active_session(g.learner_id),
+            history=exam_service.list_sessions(g.learner_id),
+            count_options=exam_service.question_count_options(
+                len(question_repository.get_all())
+            ),
+            time_options=exam_service.time_limit_options(),
+        )
+
+    @blueprint.post("/exam/start")
+    @shared_progress
+    def start_exam() -> Any:
+        raw_count = request.form.get("question_count", "")
+        raw_limit = request.form.get("time_limit", "")
+        try:
+            question_count = int(raw_count)
+            time_limit = None if raw_limit == "none" else int(raw_limit)
+        except ValueError:
+            flash("考试配置无效，请重新选择。", "error")
+            return redirect(url_for("web.exam_setup"))
+        try:
+            exam_session = exam_service.create_exam(
+                g.learner_id,
+                question_count=question_count,
+                time_limit_seconds=time_limit,
+            )
+        except ExamConfigError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for("web.exam_setup"))
+        return redirect(url_for("web.exam", exam_id=exam_session.id))
+
+    @blueprint.get("/exam/<exam_id>")
+    @shared_progress
+    def exam(exam_id: str) -> Any:
+        """Render one question of an unfinished exam without feedback."""
+        try:
+            exam_session = exam_service.get_session(g.learner_id, exam_id)
+        except ExamNotFoundError:
+            abort(404)
+        if exam_session.status.finished:
+            return redirect(url_for("web.exam_report", exam_id=exam_id))
+        if exam_service.finalize_if_expired(exam_session):
+            flash("考试时间已结束，系统已自动交卷。", "info")
+            return redirect(url_for("web.exam_report", exam_id=exam_id))
+        position = _exam_position(request.args.get("q"), exam_session)
+        slots = exam_service.get_questions(exam_session)
+        slot = slots[position]
+        question = question_repository.get_by_id(slot.question_id)
+        if question is None:
+            abort(410, description="题库已经更新，当前题目不再存在。")
+        return render_template(
+            "exam.html",
+            exam_session=exam_session,
+            position=position,
+            total=len(slots),
+            answered_count=sum(bool(item.selected_answers) for item in slots),
+            question=question,
+            ordered_options=quiz_service.order_options(
+                question, exam_session.option_seed, position
+            ),
+            saved_answers=slot.selected_answers,
+            remaining_seconds=exam_service.remaining_seconds(
+                exam_session, _srs.utc_now()
+            ),
+            source=question_repository.get_source(question.source_id),
+            chapters=[
+                question_repository.get_chapter(chapter_id)
+                for chapter_id in question.chapter_ids
+            ],
+        )
+
+    @blueprint.post("/exam/<exam_id>/answer")
+    @shared_progress
+    def answer_exam(exam_id: str) -> Any:
+        """Persist one exam answer without revealing correctness."""
+        try:
+            exam_session = exam_service.get_session(g.learner_id, exam_id)
+        except ExamNotFoundError:
+            abort(404)
+        try:
+            position = int(request.form.get("position", "-1"))
+        except ValueError:
+            abort(400, description="提交的数据无效，请返回后重试。")
+        try:
+            exam_service.save_answer(
+                g.learner_id,
+                exam_id,
+                position,
+                request.form.getlist("answers"),
+            )
+        except ExamExpiredError as exc:
+            flash(str(exc), "info")
+            return redirect(url_for("web.exam_report", exam_id=exam_id))
+        except ExamStateError as exc:
+            flash(str(exc), "info")
+            return redirect(url_for("web.exam_report", exam_id=exam_id))
+        except ExamConfigError as exc:
+            abort(400, description=str(exc))
+        except AnswerValidationError:
+            abort(400, description="提交的答案不属于当前题目，请重新作答。")
+        goto = request.form.get("goto", "next")
+        if goto == "prev":
+            target = max(0, position - 1)
+        elif goto == "stay":
+            target = position
+        else:
+            target = min(position + 1, exam_session.question_count - 1)
+        return redirect(url_for("web.exam", exam_id=exam_id, q=target))
+
+    @blueprint.post("/exam/<exam_id>/submit")
+    @shared_progress
+    def submit_exam(exam_id: str) -> Any:
+        """Finalize an exam; repeated submits keep the first result."""
+        try:
+            previous = exam_service.get_session(g.learner_id, exam_id)
+            exam_session = exam_service.submit(g.learner_id, exam_id)
+        except ExamNotFoundError:
+            abort(404)
+        if not previous.status.finished:
+            if exam_session.status is ExamStatus.EXPIRED:
+                flash("考试时间已到，已自动交卷。", "info")
+            else:
+                flash("交卷成功，已生成成绩报告。", "success")
+        return redirect(url_for("web.exam_report", exam_id=exam_id))
+
+    @blueprint.get("/exam/<exam_id>/report")
+    @shared_progress
+    def exam_report(exam_id: str) -> Any:
+        """Show the finalized score report with chapter breakdown."""
+        try:
+            report = exam_service.get_report(g.learner_id, exam_id)
+        except ExamNotFoundError:
+            abort(404)
+        except ExamStateError:
+            return redirect(url_for("web.exam", exam_id=exam_id))
+        wrong_details = [
+            {
+                "item": item,
+                "ordered_options": quiz_service.order_options(
+                    item.question, report.session.option_seed, item.position
+                ),
+                "source": question_repository.get_source(item.question.source_id),
+                "chapters": [
+                    question_repository.get_chapter(chapter_id)
+                    for chapter_id in item.question.chapter_ids
+                ],
+            }
+            for item in report.wrong_items
+        ]
+        return render_template(
+            "exam_report.html",
+            report=report,
+            wrong_details=wrong_details,
+        )
+
+    def _exam_position(raw: str | None, exam_session: ExamSession) -> int:
+        """Resolve the requested exam page, defaulting to the saved spot."""
+        if raw is None or raw == "":
+            return min(
+                exam_session.current_position, exam_session.question_count - 1
+            )
+        try:
+            position = int(raw)
+        except ValueError:
+            abort(400, description="考试页码无效。")
+        if not 0 <= position < exam_session.question_count:
+            abort(400, description="考试页码超出本场考试范围。")
+        return position
 
     def _begin(
         mode: QuizMode,

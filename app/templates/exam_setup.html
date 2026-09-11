@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% block title %}模拟考试 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="content-stack setup-page">
+    <div class="page-heading">
+        <div>
+            <p class="section-label">检验掌握程度</p>
+            <h1>模拟考试</h1>
+            <p>从题库随机抽取固定的一套题，答题过程中不提示对错；交卷后统一查看成绩、章节表现与错题解析，答错的题会自动进入错题本。</p>
+        </div>
+        <div class="heading-actions">
+            <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+        </div>
+    </div>
+
+    {% if active_exam %}
+    <section class="exam-resume" aria-label="进行中的考试">
+        <div class="section-heading compact-heading">
+            <div>
+                <p class="section-label">进行中的考试</p>
+                <h2>第 {{ active_exam.current_position + 1 }} / {{ active_exam.question_count }} 题</h2>
+            </div>
+            <a class="button button-primary resume-button" href="{{ url_for('web.exam', exam_id=active_exam.id) }}">
+                继续考试 <span aria-hidden="true">→</span>
+            </a>
+        </div>
+        <p class="launcher-note">开始于 {{ format_datetime(active_exam.started_at) }}（{{ display_tz_label }}）{% if active_exam.time_limit_seconds %} · 限时 {{ format_duration(active_exam.time_limit_seconds) }}{% else %} · 不限时{% endif %}。刷新或离开后可随时回来继续。</p>
+    </section>
+    {% endif %}
+
+    <form method="post" action="{{ url_for('web.start_exam') }}"
+          {% if active_exam %}data-confirm="已有一场进行中的考试，仍要开始新的一场吗？进行中的考试可以随时继续。"{% endif %}>
+        {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+        <fieldset class="exam-config">
+            <legend class="sr-only">题目数量</legend>
+            <p class="section-label">题目数量</p>
+            <div class="chapter-grid exam-option-grid">
+                {% for count in count_options %}
+                <label class="chapter-option">
+                    <input type="radio" name="question_count" value="{{ count }}" {% if loop.index == 1 %}checked{% endif %}>
+                    <span>
+                        <strong>{{ count }} 题</strong>
+                        <small>随机抽取 · 不重复</small>
+                    </span>
+                </label>
+                {% endfor %}
+            </div>
+        </fieldset>
+        <fieldset class="exam-config">
+            <legend class="sr-only">时间限制</legend>
+            <p class="section-label">时间限制</p>
+            <div class="chapter-grid exam-option-grid">
+                {% for seconds, label in time_options %}
+                <label class="chapter-option">
+                    <input type="radio" name="time_limit" value="{{ seconds if seconds is not none else 'none' }}" {% if loop.index == 1 %}checked{% endif %}>
+                    <span>
+                        <strong>{{ label }}</strong>
+                        <small>{% if seconds %}到时自动交卷{% else %}自己掌控节奏{% endif %}</small>
+                    </span>
+                </label>
+                {% endfor %}
+            </div>
+        </fieldset>
+        <div class="setup-controls exam-controls">
+            <div class="field-group">
+                <span class="picker-label">说明</span>
+                <p class="exam-note">创建后题目集合即固定；服务端记录开考时间与时限，关闭页面不会丢失进度。</p>
+            </div>
+            {% if count_options %}
+            <button class="button button-primary" type="submit">开始模拟考试</button>
+            {% else %}
+            <p class="exam-note">题库题目不足，暂时无法创建模拟考试。</p>
+            {% endif %}
+        </div>
+    </form>
+
+    <section class="dashboard-section" aria-labelledby="exam-history-heading">
+        <div class="section-heading compact-heading">
+            <div>
+                <p class="section-label">历史记录</p>
+                <h2 id="exam-history-heading">过往模拟考试</h2>
+            </div>
+        </div>
+        {% if history %}
+        <div class="table-card">
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>日期（{{ display_tz_label }}）</th>
+                            <th class="num">题数</th>
+                            <th class="num">成绩</th>
+                            <th class="num">正确率</th>
+                            <th class="num">用时</th>
+                            <th>状态</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in history %}
+                        <tr>
+                            <td data-label="日期">{{ format_datetime(item.created_at) }}</td>
+                            <td class="num" data-label="题数">{{ item.question_count }}</td>
+                            <td class="num" data-label="成绩">
+                                {% if item.status.value == 'in_progress' %}—{% else %}{{ item.correct_count }} / {{ item.question_count }}{% endif %}
+                            </td>
+                            <td class="num" data-label="正确率">
+                                {% if item.status.value == 'in_progress' %}—{% else %}{{ "%.0f" | format(item.correct_count / item.question_count * 100) }}%{% endif %}
+                            </td>
+                            <td class="num" data-label="用时">
+                                {% if item.status.value == 'in_progress' %}—{% else %}{{ format_duration(item.duration_seconds) }}{% endif %}
+                            </td>
+                            <td data-label="状态">
+                                {% if item.status.value == 'in_progress' %}
+                                <span class="status status-active">进行中</span>
+                                {% elif item.status.value == 'expired' %}
+                                <span class="status status-progressing">已超时</span>
+                                {% else %}
+                                <span class="status status-mastered">已交卷</span>
+                                {% endif %}
+                            </td>
+                            <td class="num" data-label="操作">
+                                {% if item.status.value == 'in_progress' %}
+                                <a class="table-link" href="{{ url_for('web.exam', exam_id=item.id) }}">继续</a>
+                                {% else %}
+                                <a class="table-link" href="{{ url_for('web.exam_report', exam_id=item.id) }}">查看报告</a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% else %}
+        <p class="trend-note">还没有模拟考试记录。完成第一场模考后，成绩会列在这里。</p>
+        {% endif %}
+    </section>
+</section>
+{% endblock %}

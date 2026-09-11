@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+
+{% block title %}成绩报告 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="content-stack">
+    <div class="page-heading">
+        <div>
+            <p class="section-label">模拟考试 · 成绩报告</p>
+            <h1>本场成绩</h1>
+            <p>
+                {{ format_datetime(report.session.created_at) }}（{{ display_tz_label }}）开始 ·
+                {{ report.question_count }} 题 ·
+                {% if report.session.time_limit_seconds %}限时 {{ format_duration(report.session.time_limit_seconds) }}{% else %}不限时{% endif %} ·
+                {% if report.session.status.value == "expired" %}时间结束，自动交卷{% else %}主动交卷{% endif %}
+            </p>
+        </div>
+        <div class="heading-actions">
+            <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+            <a class="button button-secondary" href="{{ url_for('web.exam_setup') }}">再考一次</a>
+            <a class="button button-primary" href="{{ url_for('web.mistakes') }}">查看我的错题</a>
+        </div>
+    </div>
+
+    <div class="report-summary">
+        <p class="report-score">{{ report.correct_count }} <span class="report-score-total">/ {{ report.question_count }}</span></p>
+        <div class="metric-strip report-metrics" aria-label="本场考试指标">
+            <div><strong>{{ "%.0f" | format(report.accuracy) }}%</strong><span>正确率</span></div>
+            <div><strong>{{ report.correct_count }}</strong><span>答对</span></div>
+            <div><strong>{{ report.wrong_count }}</strong><span>答错{% if report.unanswered_count %}（含 {{ report.unanswered_count }} 题未作答）{% endif %}</span></div>
+            <div><strong>{{ format_duration(report.elapsed_seconds) }}</strong><span>用时</span></div>
+        </div>
+    </div>
+
+    <section class="dashboard-section" aria-labelledby="exam-chapters-heading">
+        <div class="section-heading compact-heading">
+            <div>
+                <p class="section-label">按章节</p>
+                <h2 id="exam-chapters-heading">章节表现</h2>
+            </div>
+        </div>
+        <div class="table-card">
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>章节</th>
+                            <th class="num">题数</th>
+                            <th class="num">答对</th>
+                            <th>正确率</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in report.chapters %}
+                        <tr>
+                            <td data-label="章节">
+                                {{ row.chapter.title }}
+                                <span class="chapter-source">{{ row.source.lecture or row.source.title }}</span>
+                            </td>
+                            <td class="num" data-label="题数">{{ row.total }}</td>
+                            <td class="num" data-label="答对">{{ row.correct }}</td>
+                            <td data-label="正确率">
+                                <span class="mastery-cell">
+                                    <span class="mastery-value">{{ "%.0f" | format(row.accuracy) }}%</span>
+                                    <span class="mastery-bar"><span style="width: {{ row.accuracy | round(0, 'floor') | int }}%"></span></span>
+                                </span>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <section class="dashboard-section" aria-labelledby="exam-wrong-heading">
+        <div class="section-heading compact-heading">
+            <div>
+                <p class="section-label">逐题回顾</p>
+                <h2 id="exam-wrong-heading">错题解析</h2>
+            </div>
+        </div>
+        {% if not wrong_details %}
+        <p class="lead">本场考试全部答对，没有错题。继续保持！</p>
+        {% else %}
+        <p class="lead">
+            共 {{ report.wrong_count }} 道错题{% if report.unanswered_count %}（其中 {{ report.unanswered_count }} 道未作答）{% endif %}。
+            已作答的错题已自动加入“我的错题”，可在错题巩固中纠正。
+        </p>
+        {% for detail in wrong_details %}
+        <article class="question-card report-question">
+            <div class="question-context">
+                {% for chapter in detail.chapters %}<span>{{ chapter.title }}</span>{% endfor %}
+                <span>{{ detail.source.title }}</span>
+                {% if detail.item.question.section %}<span>{{ detail.item.question.section }}</span>{% endif %}
+                {% if detail.item.question.pages %}<span>p.{{ detail.item.question.pages | join('–') }}</span>{% endif %}
+            </div>
+            <div class="question-heading">
+                <div class="question-type">
+                    第 {{ detail.item.position + 1 }} 题 ·
+                    {% if not detail.item.answered %}未作答{% elif detail.item.question.question_type == "single" %}单选题{% else %}多选题{% endif %}
+                </div>
+                <span class="question-position">{{ detail.item.question.id }}</span>
+            </div>
+            <h3 class="question-text report-question-text">
+                <span class="question-en" data-glossary-highlight>{{ detail.item.question.text }}</span>
+                {% if detail.item.question.text_zh %}
+                <span class="translation-zh question-translation">{{ detail.item.question.text_zh }}</span>
+                {% endif %}
+            </h3>
+            <div class="options options-answered" aria-label="答案对照">
+                {% for option in detail.ordered_options %}
+                    {% set selected = option.id in detail.item.selected_answers %}
+                    {% set correct = option.id in detail.item.question.correct_answers %}
+                    <div class="option-row {% if correct and selected %}option-correct{% elif correct %}option-missed{% elif selected %}option-wrong{% endif %}">
+                        <span class="answer-marker" aria-hidden="true">
+                            {% if correct and selected %}✓{% elif correct %}!{% elif selected %}✗{% else %}{{ option_label(loop.index0) }}{% endif %}
+                        </span>
+                        <span class="option-text">
+                            <span class="question-en" data-glossary-highlight>{{ option.text }}</span>
+                            {% if option.text_zh %}
+                            <span class="translation-zh">{{ option.text_zh }}</span>
+                            {% endif %}
+                        </span>
+                        {% if correct and selected %}
+                        <span class="selected-tag tag-correct">正确选择</span>
+                        {% elif correct %}
+                        <span class="selected-tag tag-missed">漏选</span>
+                        {% elif selected %}
+                        <span class="selected-tag tag-wrong">误选</span>
+                        {% endif %}
+                    </div>
+                {% endfor %}
+            </div>
+            <div class="answer-summary">
+                <div>
+                    <strong>你的答案</strong>
+                    <p data-glossary-highlight>
+                    {% set selected_options = detail.ordered_options | selectattr('id', 'in', detail.item.selected_answers) | list %}
+                    {% if selected_options %}
+                        {{ selected_options | map(attribute='text') | join('、') }}
+                    {% else %}
+                        未作答
+                    {% endif %}
+                    </p>
+                </div>
+                <div>
+                    <strong>正确答案</strong>
+                    <p data-glossary-highlight>{{ detail.ordered_options | selectattr('id', 'in', detail.item.question.correct_answers) | map(attribute='text') | join('、') }}</p>
+                </div>
+            </div>
+            <div class="explanation">
+                <strong>英文解析</strong>
+                <p data-glossary-highlight>{{ detail.item.question.explanation or "本题暂无英文解析。" }}</p>
+                {% if detail.item.question.explanation_zh %}
+                <div class="translation-zh translation-explanation">
+                    <strong>中文解析</strong>
+                    <p>{{ detail.item.question.explanation_zh }}</p>
+                </div>
+                {% endif %}
+            </div>
+        </article>
+        {% endfor %}
+        {% endif %}
+    </section>
+</section>
+{% endblock %}

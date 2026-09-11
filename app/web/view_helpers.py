@@ -6,11 +6,32 @@ filters are pure; ``build_curriculum`` only reads from the question
 repository it is given.
 """
 
+from datetime import tzinfo
 from typing import Any
 
 from flask import abort
 
 from app.repositories import QuestionRepository
+from app.services import srs_service as _srs
+from app.services import to_display
+
+
+def format_duration(seconds: int | None) -> str:
+    """Render an elapsed second count as ``mm:ss`` (or ``h:mm:ss``)."""
+    total = max(0, int(seconds or 0))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def format_datetime(iso_timestamp: str | None, *, zone: tzinfo) -> str:
+    """Render a stored UTC ISO timestamp in the display timezone."""
+    if not iso_timestamp:
+        return "—"
+    parsed = _srs.parse_timestamp(iso_timestamp)
+    return to_display(parsed, zone).strftime("%Y-%m-%d %H:%M")
 
 
 def option_label(index: int) -> str:

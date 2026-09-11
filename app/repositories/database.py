@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Iterator
 
-MAX_ATTEMPTS_PER_QUESTION = 3
+MAX_ATTEMPTS_PER_QUESTION = 10
 
 
 class Database:
@@ -47,7 +47,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     learner_id TEXT NOT NULL,
                     question_id TEXT NOT NULL,
-                    mode TEXT NOT NULL CHECK (mode IN ('normal', 'review')),
+                    mode TEXT NOT NULL CHECK (mode IN ('normal', 'review', 'mock_exam')),
                     selected_answers TEXT NOT NULL,
                     is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
                     answered_at TEXT NOT NULL
@@ -84,9 +84,38 @@ class Database:
                     attempt_count INTEGER NOT NULL,
                     PRIMARY KEY (scope, identifier_hash)
                 );
+
+                CREATE TABLE IF NOT EXISTS exam_sessions (
+                    id TEXT PRIMARY KEY,
+                    learner_id TEXT NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK (status IN ('in_progress', 'submitted', 'expired')),
+                    question_count INTEGER NOT NULL,
+                    time_limit_seconds INTEGER,
+                    option_seed TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    deadline_at TEXT,
+                    submitted_at TEXT,
+                    current_position INTEGER NOT NULL DEFAULT 0,
+                    correct_count INTEGER,
+                    duration_seconds INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS exam_questions (
+                    exam_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    question_id TEXT NOT NULL,
+                    selected_answers TEXT,
+                    is_correct INTEGER CHECK (is_correct IN (0, 1)),
+                    answered_at TEXT,
+                    PRIMARY KEY (exam_id, position),
+                    UNIQUE (exam_id, question_id)
+                );
                 """
             )
             self._migrate_wrong_question_srs_columns(connection)
+            self._migrate_attempt_mode_constraint(connection)
             connection.execute(
                 """
                 DELETE FROM attempts
@@ -114,6 +143,8 @@ class Database:
                     ON wrong_questions(learner_id, mastered);
                 CREATE INDEX IF NOT EXISTS idx_weak_points_learner_active
                     ON weak_knowledge_points(learner_id, active);
+                CREATE INDEX IF NOT EXISTS idx_exam_sessions_learner
+                    ON exam_sessions(learner_id, created_at);
                 """
             )
         os.chmod(self.database_path, 0o600)
@@ -140,6 +171,49 @@ class Database:
             connection.execute(
                 "ALTER TABLE wrong_questions ADD COLUMN next_review_at TEXT"
             )
+
+    @staticmethod
+    def _migrate_attempt_mode_constraint(connection: sqlite3.Connection) -> None:
+        """Allow the ``mock_exam`` attempt mode in pre-mock-exam databases.
+
+        SQLite cannot alter a ``CHECK`` constraint, so databases created
+        before mock exams are rebuilt in place. Fresh databases already carry
+        the widened constraint and skip the rebuild. All rows and their ids
+        are preserved, and the learner/question index is recreated below.
+        """
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attempts'"
+        ).fetchone()
+        if row is None or "mock_exam" in row["sql"]:
+            return
+        connection.execute(
+            """
+            CREATE TABLE attempts_mode_migration (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                learner_id TEXT NOT NULL,
+                question_id TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK (mode IN ('normal', 'review', 'mock_exam')),
+                selected_answers TEXT NOT NULL,
+                is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
+                answered_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO attempts_mode_migration (
+                id, learner_id, question_id, mode, selected_answers,
+                is_correct, answered_at
+            )
+            SELECT id, learner_id, question_id, mode, selected_answers,
+                   is_correct, answered_at
+            FROM attempts
+            """
+        )
+        connection.execute("DROP TABLE attempts")
+        connection.execute(
+            "ALTER TABLE attempts_mode_migration RENAME TO attempts"
+        )
 
     def consume_rate_limit(
         self,

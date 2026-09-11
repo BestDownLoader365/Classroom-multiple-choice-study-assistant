@@ -96,14 +96,14 @@ def test_attempt_repository_returns_latest_incorrect_answer_per_question(tmp_pat
     }
 
 
-def test_attempt_repository_keeps_only_latest_three_per_learner_and_question(
+def test_attempt_repository_keeps_only_latest_ten_per_learner_and_question(
     tmp_path,
 ):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
     attempts = AttemptRepository(database)
 
-    for index in range(5):
+    for index in range(12):
         attempts.add(
             Attempt(
                 learner_id="learner-id",
@@ -111,7 +111,7 @@ def test_attempt_repository_keeps_only_latest_three_per_learner_and_question(
                 mode=QuizMode.NORMAL,
                 selected_answers=(str(index),),
                 is_correct=False,
-                answered_at=f"2026-01-0{index + 1}T00:00:00+00:00",
+                answered_at=f"2026-01-{index + 1:02d}T00:00:00+00:00",
             )
         )
     for learner_id, question_id in [
@@ -125,7 +125,7 @@ def test_attempt_repository_keeps_only_latest_three_per_learner_and_question(
                 mode=QuizMode.NORMAL,
                 selected_answers=("separate",),
                 is_correct=False,
-                answered_at="2026-01-06T00:00:00+00:00",
+                answered_at="2026-01-13T00:00:00+00:00",
             )
         )
 
@@ -140,18 +140,16 @@ def test_attempt_repository_keeps_only_latest_three_per_learner_and_question(
         ).fetchall()
 
     assert [json.loads(row["selected_answers"]) for row in retained] == [
-        ["2"],
-        ["3"],
-        ["4"],
+        [str(index)] for index in range(2, 12)
     ]
-    assert attempts.count() == 5
+    assert attempts.count() == 12
 
 
-def test_database_startup_prunes_existing_attempts_to_three(tmp_path):
+def test_database_startup_prunes_existing_attempts_to_ten(tmp_path):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
     with database.connect() as connection:
-        for index in range(5):
+        for index in range(12):
             connection.execute(
                 """
                 INSERT INTO attempts (
@@ -159,12 +157,12 @@ def test_database_startup_prunes_existing_attempts_to_three(tmp_path):
                     is_correct, answered_at
                 ) VALUES ('learner-id', 'q1', 'normal', '[]', 0, ?)
                 """,
-                (f"2026-01-0{index + 1}T00:00:00+00:00",),
+                (f"2026-01-{index + 1:02d}T00:00:00+00:00",),
             )
 
     database.initialize()
 
-    assert AttemptRepository(database).count() == 3
+    assert AttemptRepository(database).count() == 10
 
 
 def test_wrong_question_reset_deletes_only_requested_learners_rows(tmp_path):

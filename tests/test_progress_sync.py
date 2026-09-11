@@ -38,7 +38,7 @@ def setup_devices(tmp_path, payload, mode):
     return app, first, second, user, path
 
 
-@pytest.mark.parametrize('mode', list(QuizMode))
+@pytest.mark.parametrize("mode", [QuizMode.NORMAL, QuizMode.REVIEW])
 def test_two_devices_resume_feedback_next_and_completion(tmp_path, valid_payload, mode):
     app, first, second, user, path = setup_devices(tmp_path, valid_payload, mode)
     services = app.extensions['mcq_services']
@@ -72,7 +72,7 @@ def test_two_devices_resume_feedback_next_and_completion(tmp_path, valid_payload
     assert outsider.get(path).status_code == 302
 
 
-@pytest.mark.parametrize('mode', list(QuizMode))
+@pytest.mark.parametrize("mode", [QuizMode.NORMAL, QuizMode.REVIEW])
 def test_concurrent_answers_are_recorded_once_across_workers(tmp_path, valid_payload, mode):
     app, first, second, user, path = setup_devices(tmp_path, valid_payload, mode)
     current = state(app, user, mode)
@@ -92,7 +92,7 @@ def test_concurrent_answers_are_recorded_once_across_workers(tmp_path, valid_pay
     assert state(app, user, mode)['correct_count'] == 1
 
 
-@pytest.mark.parametrize('mode', list(QuizMode))
+@pytest.mark.parametrize("mode", [QuizMode.NORMAL, QuizMode.REVIEW])
 def test_stale_next_cannot_skip_an_answered_question(tmp_path, valid_payload, mode):
     app, first, second, user, path = setup_devices(tmp_path, valid_payload, mode)
     services = app.extensions['mcq_services']

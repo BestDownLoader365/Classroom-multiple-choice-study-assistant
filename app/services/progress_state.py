@@ -12,6 +12,10 @@ from app.models import QuizMode
 
 from .quiz_service import ORIGINAL_CORRECTION, SRS_REVIEW, TRANSFER_VERIFICATION
 
+# Modes whose rounds are persisted in ``quiz_progress``. Mock exams keep
+# their own server-side state and deliberately stay out of this cycle.
+PRACTICE_MODES: tuple[QuizMode, ...] = (QuizMode.NORMAL, QuizMode.REVIEW)
+
 
 def session_key(mode: QuizMode) -> str:
     """Return the in-request storage key for one mode's progress state."""
