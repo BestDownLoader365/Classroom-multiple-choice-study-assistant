@@ -35,7 +35,15 @@ def is_valid_progress_state(state: Any, mode: QuizMode) -> bool:
     """Reject incomplete or stale session structures before routes use them."""
     if not isinstance(state, dict) or state.get("mode") != mode.value:
         return False
+    if not _has_valid_core_fields(state):
+        return False
+    if mode is QuizMode.REVIEW and not _has_valid_review_fields(state):
+        return False
+    return _has_valid_feedback(state)
 
+
+def _has_valid_core_fields(state: dict[str, Any]) -> bool:
+    """Check the round structure shared by every practice mode."""
     question_ids = state.get("question_ids")
     current_index = state.get("current_index")
     if not isinstance(question_ids, list) or not all(
@@ -53,31 +61,6 @@ def is_valid_progress_state(state: Any, mode: QuizMode) -> bool:
         if not is_nonnegative_int(state.get(field)):
             return False
 
-    if mode is QuizMode.REVIEW:
-        for field in ("corrected_count", "knowledge_completed_count"):
-            if not is_nonnegative_int(state.get(field)):
-                return False
-        review_items = state.get("review_items")
-        if (
-            not isinstance(review_items, list)
-            or len(review_items) != len(question_ids)
-        ):
-            return False
-        for item, question_id in zip(review_items, question_ids):
-            if not isinstance(item, dict) or item.get("question_id") != question_id:
-                return False
-            if item.get("role") not in {
-                ORIGINAL_CORRECTION,
-                TRANSFER_VERIFICATION,
-                SRS_REVIEW,
-            }:
-                return False
-            chapter_id = item.get("chapter_id")
-            if chapter_id is not None and not isinstance(chapter_id, str):
-                return False
-        if not isinstance(state.get("review_shortages", []), list):
-            return False
-
     if state.get("status") not in {"pending", "answered"}:
         return False
     if not isinstance(state.get("answer_token"), str) or not state["answer_token"]:
@@ -93,19 +76,48 @@ def is_valid_progress_state(state: Any, mode: QuizMode) -> bool:
             isinstance(value, str) for value in values
         ):
             return False
-
-    if state["status"] == "answered":
-        feedback = state.get("feedback")
-        if current_index >= len(question_ids) or not isinstance(feedback, dict):
-            return False
-        if not isinstance(feedback.get("is_correct"), bool):
-            return False
-        selected_answers = feedback.get("selected_answers")
-        if not isinstance(selected_answers, list) or not all(
-            isinstance(answer, str) for answer in selected_answers
-        ):
-            return False
     return True
+
+
+def _has_valid_review_fields(state: dict[str, Any]) -> bool:
+    """Check the correction and reinforcement bookkeeping of a review round."""
+    for field in ("corrected_count", "knowledge_completed_count"):
+        if not is_nonnegative_int(state.get(field)):
+            return False
+    question_ids = state["question_ids"]
+    review_items = state.get("review_items")
+    if not isinstance(review_items, list) or len(review_items) != len(question_ids):
+        return False
+    for item, question_id in zip(review_items, question_ids):
+        if not isinstance(item, dict) or item.get("question_id") != question_id:
+            return False
+        if item.get("role") not in {
+            ORIGINAL_CORRECTION,
+            TRANSFER_VERIFICATION,
+            SRS_REVIEW,
+        }:
+            return False
+        chapter_id = item.get("chapter_id")
+        if chapter_id is not None and not isinstance(chapter_id, str):
+            return False
+    return isinstance(state.get("review_shortages", []), list)
+
+
+def _has_valid_feedback(state: dict[str, Any]) -> bool:
+    """Check the stored answer feedback of an answered round."""
+    if state.get("status") != "answered":
+        return True
+    feedback = state.get("feedback")
+    if state["current_index"] >= len(state["question_ids"]) or not isinstance(
+        feedback, dict
+    ):
+        return False
+    if not isinstance(feedback.get("is_correct"), bool):
+        return False
+    selected_answers = feedback.get("selected_answers")
+    return isinstance(selected_answers, list) and all(
+        isinstance(answer, str) for answer in selected_answers
+    )
 
 
 def valid_state_for(

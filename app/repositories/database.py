@@ -16,8 +16,6 @@ class Database:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
         self._transaction_connection = ContextVar("mcq_connection", default=None)
-        self._rate_limits = None
-        self._bank_state = None
 
     def initialize(self) -> None:
         """Create the local database and tables on first startup."""
@@ -214,57 +212,6 @@ class Database:
         connection.execute(
             "ALTER TABLE attempts_mode_migration RENAME TO attempts"
         )
-
-    def consume_rate_limit(
-        self,
-        scope: str,
-        identifier: str,
-        *,
-        limit: int,
-        window_seconds: int,
-        now: int | None = None,
-    ) -> bool:
-        """Atomically consume one fixed-window allowance shared by all workers."""
-        return self._rate_limit_repository().consume(
-            scope, identifier, limit=limit, window_seconds=window_seconds, now=now
-        )
-
-    def is_rate_limited(
-        self,
-        scope: str,
-        identifier: str,
-        *,
-        limit: int,
-        now: int | None = None,
-    ) -> bool:
-        """Check an allowance without consuming it."""
-        return self._rate_limit_repository().is_limited(
-            scope, identifier, limit=limit, now=now
-        )
-
-    def _rate_limit_repository(self):
-        """Lazily build the rate-limit repository (avoids an import cycle)."""
-        if self._rate_limits is None:
-            from .rate_limit_repository import RateLimitRepository
-
-            self._rate_limits = RateLimitRepository(self)
-        return self._rate_limits
-
-    def synchronize_question_bank(self, bank_version: str) -> int:
-        """Atomically reset course data once per bank change across workers.
-
-        Older databases infer their bank from saved progress. If they contain
-        learning data but no fingerprint, reset it rather than misattribute it.
-        """
-        return self._bank_state_repository().synchronize(bank_version)
-
-    def _bank_state_repository(self):
-        """Lazily build the bank-state repository (avoids an import cycle)."""
-        if self._bank_state is None:
-            from .question_bank_state_repository import QuestionBankStateRepository
-
-            self._bank_state = QuestionBankStateRepository(self)
-        return self._bank_state
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

@@ -332,11 +332,11 @@ There is no database migration framework. Schema creation is additive, and colum
 
 ### `app/repositories/rate_limit_repository.py`
 
-`RateLimitRepository` owns the `login_rate_limits` table that backs login throttling. It records failed-attempt timestamps and returns the most recent failures within the active window so the auth layer can decide whether a login attempt is allowed. All operations run inside the caller's transaction, so a rejected login and its recorded failure commit or roll back together.
+`RateLimitRepository` owns the `auth_rate_limits` table that backs login and registration throttling. Identifiers are SHA-256 hashed before storage so raw usernames and IP addresses are never persisted. Each `(scope, identifier_hash)` row is a fixed-window counter (`window_started_at`, `expires_at`, `attempt_count`): `consume()` atomically clears expired rows, increments the counter, and reports whether the allowance holds, while `is_limited()` checks without consuming. Consumption runs inside `Database.transaction()`, so a rejected login and its recorded failure commit or roll back together.
 
 ### `app/repositories/question_bank_state_repository.py`
 
-`QuestionBankStateRepository` owns the question-bank synchronization state table. It stores the active question-bank fingerprint and generation counter, and provides the atomic operations used to detect a changed bank, clear all learner course data, and bump the generation that stale workers compare against. `Database` keeps thin compatibility delegates for these two concerns so existing callers keep working, while the implementations live in these dedicated repositories.
+`QuestionBankStateRepository` owns the question-bank synchronization state table. It stores the active question-bank fingerprint and generation counter, and provides the atomic operations used to detect a changed bank, clear all learner course data, and bump the generation that stale workers compare against. `create_app` constructs both dedicated repositories directly: the bank-state repository runs once during startup, and the rate-limit repository is injected into the web blueprint, so `Database` itself only manages connections, transactions, and schema.
 
 ### `app/repositories/question_loader.py`
 
@@ -1252,7 +1252,7 @@ are required. The exact authoring contracts are maintained in
 ## Course replacement and global bank state
 
 `question_bank_state` stores one active SHA-256 fingerprint and a reset generation.
-After full bank validation, `Database.synchronize_question_bank()` uses `BEGIN IMMEDIATE`
+After full bank validation, `QuestionBankStateRepository.synchronize()` uses `BEGIN IMMEDIATE`
 to compare this fingerprint, delete all rows from `attempts`, `wrong_questions`,
 `weak_knowledge_points`, `quiz_progress`, `exam_questions`, and `exam_sessions`, reset the attempt sequence, and update the fingerprint/generation
 atomically. Users are preserved unchanged. Concurrent workers loading the same bank

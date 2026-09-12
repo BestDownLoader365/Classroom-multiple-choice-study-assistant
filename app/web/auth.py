@@ -1,9 +1,9 @@
 """Web-layer authentication, CSRF, and rate-limit helpers.
 
 These helpers are deliberately explicit about their dependencies (the
-Database for rate-limit storage, and the Flask request context) instead of
-capturing them in a large closure, so each can be reasoned about and tested
-in isolation.
+RateLimitRepository for throttling storage, and the Flask request context)
+instead of capturing them in a large closure, so each can be reasoned about
+and tested in isolation.
 """
 
 from collections.abc import Callable
@@ -13,7 +13,7 @@ from typing import Any
 import secrets
 from flask import current_app, g, redirect, request, session, url_for
 
-from app.repositories import Database
+from app.repositories import RateLimitRepository
 
 
 def registration_error(username: str, password: str, confirmation: str) -> str | None:
@@ -41,16 +41,16 @@ def require_account(view: Callable[..., Any]) -> Callable[..., Any]:
     return wrapped
 
 
-def login_ip_allowed(database: Database, address: str | None) -> bool:
-    return not database.is_rate_limited(
+def login_ip_allowed(rate_limits: RateLimitRepository, address: str | None) -> bool:
+    return not rate_limits.is_limited(
         "login-ip",
         address or "unknown",
         limit=int(current_app.config["AUTH_LOGIN_IP_LIMIT"]),
     )
 
 
-def login_account_allowed(database: Database, username: str) -> bool:
-    return not database.is_rate_limited(
+def login_account_allowed(rate_limits: RateLimitRepository, username: str) -> bool:
+    return not rate_limits.is_limited(
         "login-account",
         username.casefold() or "<empty>",
         limit=int(current_app.config["AUTH_LOGIN_ACCOUNT_LIMIT"]),
@@ -58,16 +58,16 @@ def login_account_allowed(database: Database, username: str) -> bool:
 
 
 def record_login_failure(
-    database: Database, username: str, address: str | None
+    rate_limits: RateLimitRepository, username: str, address: str | None
 ) -> None:
     window = int(current_app.config["AUTH_LOGIN_WINDOW_SECONDS"])
-    database.consume_rate_limit(
+    rate_limits.consume(
         "login-account",
         username.casefold() or "<empty>",
         limit=int(current_app.config["AUTH_LOGIN_ACCOUNT_LIMIT"]),
         window_seconds=window,
     )
-    database.consume_rate_limit(
+    rate_limits.consume(
         "login-ip",
         address or "unknown",
         limit=int(current_app.config["AUTH_LOGIN_IP_LIMIT"]),
@@ -75,8 +75,8 @@ def record_login_failure(
     )
 
 
-def registration_allowed(database: Database, address: str | None) -> bool:
-    return database.consume_rate_limit(
+def registration_allowed(rate_limits: RateLimitRepository, address: str | None) -> bool:
+    return rate_limits.consume(
         "register-ip",
         address or "unknown",
         limit=int(current_app.config["AUTH_REGISTER_IP_LIMIT"]),

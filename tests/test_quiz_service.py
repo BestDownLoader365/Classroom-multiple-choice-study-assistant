@@ -13,6 +13,14 @@ from app.services import GradingService, QuizService, WrongQuestionService
 LEARNER_ID = "11111111-1111-4111-8111-111111111111"
 
 
+def review_question_ids(quiz, learner_id, **filters):
+    """Return the IDs a review round would serve, in order."""
+    return [
+        item.question_id
+        for item in quiz.start_review(learner_id, **filters).items
+    ]
+
+
 def fairness_questions(count=6):
     return [
         Question(
@@ -52,7 +60,7 @@ def build_services(tmp_path, sample_questions, shuffler=lambda values: None):
 def test_normal_mode_contains_all_questions(tmp_path, sample_questions):
     quiz, _, _ = build_services(tmp_path, sample_questions)
 
-    assert quiz.start(QuizMode.NORMAL, LEARNER_ID) == ["q1", "q2", "q3"]
+    assert list(quiz.start_normal().question_ids) == ["q1", "q2", "q3"]
 
 
 def test_normal_mode_shuffles_question_ids(tmp_path, sample_questions):
@@ -64,14 +72,14 @@ def test_normal_mode_shuffles_question_ids(tmp_path, sample_questions):
 
     quiz, _, _ = build_services(tmp_path, sample_questions, reverse)
 
-    assert quiz.start(QuizMode.NORMAL, LEARNER_ID) == ["q3", "q2", "q1"]
+    assert list(quiz.start_normal().question_ids) == ["q3", "q2", "q1"]
     assert calls == [["q1", "q2", "q3"]]
 
 
 def test_normal_mode_honors_question_limit(tmp_path, sample_questions):
     quiz, _, _ = build_services(tmp_path, sample_questions)
 
-    assert quiz.start(QuizMode.NORMAL, LEARNER_ID, limit=2) == ["q1", "q2"]
+    assert list(quiz.start_normal(2).question_ids) == ["q1", "q2"]
 
 
 def test_normal_fairness_covers_cycle_before_repeating(tmp_path):
@@ -157,11 +165,8 @@ def test_normal_mode_filters_by_chapter_before_applying_limit(
 ):
     quiz, _, _ = build_services(tmp_path, sample_questions)
 
-    assert quiz.start(
-        QuizMode.NORMAL,
-        LEARNER_ID,
-        limit=10,
-        chapter_ids={"chapter-b"},
+    assert list(
+        quiz.start_normal(10, chapter_ids={"chapter-b"}).question_ids
     ) == ["q2"]
 
 
@@ -175,10 +180,8 @@ def test_question_is_included_when_any_of_its_chapters_is_selected(
         tmp_path, [multi_chapter_question, *sample_questions[1:]]
     )
 
-    assert quiz.start(
-        QuizMode.NORMAL,
-        LEARNER_ID,
-        chapter_ids={"chapter-b"},
+    assert list(
+        quiz.start_normal(chapter_ids={"chapter-b"}).question_ids
     ) == ["q1", "q2"]
 
 
@@ -187,9 +190,7 @@ def test_all_chapters_remains_the_unfiltered_question_bank(
 ):
     quiz, _, _ = build_services(tmp_path, sample_questions)
 
-    assert quiz.start(
-        QuizMode.NORMAL, LEARNER_ID, chapter_ids=None
-    ) == ["q1", "q2", "q3"]
+    assert list(quiz.start_normal().question_ids) == ["q1", "q2", "q3"]
 
 
 def test_option_order_is_stable_for_one_occurrence_and_changes_across_appearances(
@@ -221,9 +222,9 @@ def test_review_contains_only_uncorrected_wrong_questions(tmp_path, sample_quest
     wrong_service.record_attempt(
         LEARNER_ID, "q2", QuizMode.REVIEW, ("a", "c"), True
     )
-    assert repository.get_by_id(LEARNER_ID, "q2").mastered is True
+    assert repository.get_by_id(LEARNER_ID, "q2").corrected is True
 
-    assert quiz.start(QuizMode.REVIEW, LEARNER_ID) == ["q1"]
+    assert review_question_ids(quiz, LEARNER_ID) == ["q1"]
 
 
 def test_review_mode_shuffles_question_ids(tmp_path, sample_questions):
@@ -236,7 +237,7 @@ def test_review_mode_shuffles_question_ids(tmp_path, sample_questions):
         LEARNER_ID, "q3", QuizMode.NORMAL, ("no",), False
     )
 
-    assert quiz.start(QuizMode.REVIEW, LEARNER_ID) == ["q1", "q3"]
+    assert review_question_ids(quiz, LEARNER_ID) == ["q1", "q3"]
 
 
 def test_review_mode_can_continue_within_one_chapter(tmp_path, sample_questions):
@@ -244,11 +245,9 @@ def test_review_mode_can_continue_within_one_chapter(tmp_path, sample_questions)
     wrong_service.record_attempt(LEARNER_ID, "q1", QuizMode.NORMAL, ("1",), False)
     wrong_service.record_attempt(LEARNER_ID, "q2", QuizMode.NORMAL, ("b",), False)
 
-    assert quiz.start(
-        QuizMode.REVIEW,
-        LEARNER_ID,
-        chapter_ids={"chapter-b"},
-    ) == ["q2"]
+    assert review_question_ids(quiz, LEARNER_ID, chapter_ids={"chapter-b"}) == [
+        "q2"
+    ]
 
 
 def test_stale_question_id_is_skipped_with_warning(
@@ -263,7 +262,7 @@ def test_stale_question_id_is_skipped_with_warning(
     )
 
     with caplog.at_level(logging.WARNING):
-        ids = quiz.start(QuizMode.REVIEW, LEARNER_ID)
+        ids = review_question_ids(quiz, LEARNER_ID)
 
     assert ids == ["q1"]
     assert 'Wrong question "missing" no longer exists' in caplog.text

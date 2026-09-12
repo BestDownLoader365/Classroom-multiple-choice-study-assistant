@@ -16,8 +16,10 @@ from app.repositories import (
     GlossaryLoader,
     GlossaryRepository,
     ProgressRepository,
+    QuestionBankStateRepository,
     QuestionLoader,
     QuestionRepository,
+    RateLimitRepository,
     UserRepository,
     WeakKnowledgePointRepository,
     WrongQuestionRepository,
@@ -115,7 +117,11 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
 
     database = Database(Path(app.config["DATABASE"]).resolve())
     database.initialize()
-    bank_generation = database.synchronize_question_bank(question_bank_version)
+    question_bank_state_repository = QuestionBankStateRepository(database)
+    bank_generation = question_bank_state_repository.synchronize(
+        question_bank_version
+    )
+    rate_limit_repository = RateLimitRepository(database)
     progress_repository = ProgressRepository(database)
     user_repository = UserRepository(database)
     attempt_repository = AttemptRepository(database)
@@ -204,6 +210,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             user_repository=user_repository,
             quiz_service=quiz_service,
             progress_repository=progress_repository,
+            rate_limit_repository=rate_limit_repository,
             wrong_question_service=wrong_question_service,
             weak_knowledge_point_service=weak_knowledge_point_service,
             exam_service=exam_service,

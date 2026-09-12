@@ -263,33 +263,6 @@ class QuizService:
             )
         return ReviewSelectionResult(shortages=tuple(shortages))
 
-    def start(
-        self,
-        mode: QuizMode,
-        learner_id: str,
-        limit: int | None = None,
-        *,
-        chapter_ids: set[str] | None = None,
-        source_ids: set[str] | None = None,
-    ) -> list[str]:
-        """Compatibility wrapper; routes use the explicit policy methods."""
-        if mode is QuizMode.NORMAL:
-            return list(
-                self.start_normal(
-                    limit,
-                    chapter_ids=chapter_ids,
-                    source_ids=source_ids,
-                ).question_ids
-            )
-        return [
-            item.question_id
-            for item in self.start_review(
-                learner_id,
-                chapter_ids=chapter_ids,
-                source_ids=source_ids,
-            ).items
-        ]
-
     def order_options(
         self, question: Question, seed: str, occurrence: int = 0
     ) -> list[Option]:

@@ -19,20 +19,19 @@ from flask import (
 )
 from werkzeug.exceptions import HTTPException
 
-from app.models import ExamSession, ExamStatus, QuizMode
+from app.models import Chapter, ExamSession, ExamStatus, Question, QuizMode
 from app.repositories import (
     GlossaryRepository,
     QuestionRepository,
     ProgressRepository,
+    RateLimitRepository,
     UserRepository,
     UsernameAlreadyExistsError,
 )
 from app.services import (
-    ORIGINAL_CORRECTION,
-    TRANSFER_VERIFICATION,
+    AnswerResult,
     AnswerValidationError,
     ExamConfigError,
-    ExamExpiredError,
     ExamNotFoundError,
     ExamService,
     ExamStateError,
@@ -41,20 +40,11 @@ from app.services import (
     WeakKnowledgePointService,
     WrongQuestionService,
 )
-from app.services import progress_state as _progress_state
 from app.services import local_time as _local_time
+from app.services import progress_state as _progress_state
 from app.services import srs_service as _srs
-
-_is_valid_progress_state = _progress_state.is_valid_progress_state
-_quiz_limit = _progress_state.quiz_limit
-_session_key = _progress_state.session_key
 from app.web import auth as _web_auth
 from app.web import view_helpers as _view
-
-_csrf_token = _web_auth.csrf_token
-_validate_csrf = _web_auth.validate_csrf
-_registration_error = _web_auth.registration_error
-_option_label = _view.option_label
 
 
 def create_web_blueprint(
@@ -65,6 +55,7 @@ def create_web_blueprint(
     wrong_question_service: WrongQuestionService,
     question_bank_version: str,
     progress_repository: ProgressRepository,
+    rate_limit_repository: RateLimitRepository,
     weak_knowledge_point_service: WeakKnowledgePointService,
     exam_service: ExamService,
     statistics_service: StatisticsService,
@@ -75,12 +66,17 @@ def create_web_blueprint(
     blueprint = Blueprint("web", __name__)
     public_endpoints = {"web.login", "web.register"}
     glossary_data = glossary_repository.to_dict()
-    database = progress_repository.database
 
-    _ip_login_allowed = partial(_web_auth.login_ip_allowed, database)
-    _account_login_allowed = partial(_web_auth.login_account_allowed, database)
-    _record_login_failure = partial(_web_auth.record_login_failure, database)
-    _registration_allowed = partial(_web_auth.registration_allowed, database)
+    _ip_login_allowed = partial(_web_auth.login_ip_allowed, rate_limit_repository)
+    _account_login_allowed = partial(
+        _web_auth.login_account_allowed, rate_limit_repository
+    )
+    _record_login_failure = partial(
+        _web_auth.record_login_failure, rate_limit_repository
+    )
+    _registration_allowed = partial(
+        _web_auth.registration_allowed, rate_limit_repository
+    )
 
     @blueprint.app_context_processor
     def inject_global_page_data() -> dict[str, Any]:
@@ -88,8 +84,8 @@ def create_web_blueprint(
             "bank_title": question_repository.title,
             "bank_title_zh": question_repository.title_zh,
             "glossary_data": glossary_data,
-            "option_label": _option_label,
-            "csrf_token": _csrf_token,
+            "option_label": _view.option_label,
+            "csrf_token": _web_auth.csrf_token,
             "format_duration": _view.format_duration,
             "format_datetime": partial(
                 _view.format_datetime, zone=display_timezone
@@ -104,7 +100,7 @@ def create_web_blueprint(
             if request.content_length and request.content_length > 64 * 1024:
                 abort(413)
             if current_app.config["ENABLE_CSRF"]:
-                _validate_csrf()
+                _web_auth.validate_csrf()
         if request.endpoint in public_endpoints:
             return None
         user_id = session.get("user_id")
@@ -137,7 +133,7 @@ def create_web_blueprint(
                 changed = False
                 for mode in _progress_state.PRACTICE_MODES:
                     stored = progress_repository.get(g.learner_id, mode)
-                    legacy = session.pop(_session_key(mode), None)
+                    legacy = session.pop(_progress_state.session_key(mode), None)
                     if stored is None:
                         state = (
                             legacy
@@ -149,16 +145,16 @@ def create_web_blueprint(
                         if version != question_bank_version:
                             changed = changed or state is not None
                             state = None
-                    if not _is_valid_progress_state(state, mode):
+                    if not _progress_state.is_valid_progress_state(state, mode):
                         state = None
-                    g.quiz_progress[_session_key(mode)] = state
+                    g.quiz_progress[_progress_state.session_key(mode)] = state
                 session.pop("quiz_progress", None)
                 session.pop("question_bank_version", None)
                 if changed:
                     flash("检测到题库更新，未完成的练习进度已重置。", "info")
                 response = view(*args, **kwargs)
                 for mode in _progress_state.PRACTICE_MODES:
-                    state = g.quiz_progress.get(_session_key(mode))
+                    state = g.quiz_progress.get(_progress_state.session_key(mode))
                     stored = progress_repository.get(g.learner_id, mode)
                     if (stored is not None or state is not None) and stored != (
                         question_bank_version, state
@@ -206,7 +202,7 @@ def create_web_blueprint(
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "")
             confirmation = request.form.get("password_confirmation", "")
-            error = _registration_error(username, password, confirmation)
+            error = _web_auth.registration_error(username, password, confirmation)
             if not _registration_allowed(request.remote_addr):
                 abort(429, description="请求过于频繁，请稍后再试。")
             if error:
@@ -281,8 +277,8 @@ def create_web_blueprint(
     @shared_progress
     def start_quiz() -> Any:
         raw_size = request.form.get("quiz_size", "20")
-        limit = _quiz_limit(raw_size)
-        chapter_ids = _catalogue_filter(
+        limit = _progress_state.quiz_limit(raw_size)
+        chapter_ids = _view.catalogue_filter(
             request.form.getlist("chapter_ids"),
             {chapter.id for chapter in question_repository.get_chapters()},
             "章节",
@@ -294,7 +290,7 @@ def create_web_blueprint(
             chapter_ids=chapter_ids,
         )
         if not question_ids:
-            g.quiz_progress.pop(_session_key(QuizMode.NORMAL), None)
+            g.quiz_progress.pop(_progress_state.session_key(QuizMode.NORMAL), None)
             flash("所选章节暂时没有可练习题目。", "info")
             return redirect(url_for("web.quiz_setup"))
         return redirect(url_for("web.quiz"))
@@ -319,12 +315,12 @@ def create_web_blueprint(
     def mistakes() -> str:
         selected_source = request.args.get("source", "").strip()
         selected_chapter = request.args.get("chapter", "").strip()
-        source_ids = _single_catalogue_filter(
+        source_ids = _view.single_catalogue_filter(
             selected_source,
             {source.id for source in question_repository.get_sources()},
             "课件",
         )
-        chapter_ids = _single_catalogue_filter(
+        chapter_ids = _view.single_catalogue_filter(
             selected_chapter,
             {chapter.id for chapter in question_repository.get_chapters()},
             "章节",
@@ -379,7 +375,7 @@ def create_web_blueprint(
     def reset_mistakes() -> Any:
         deleted_count = wrong_question_service.reset(g.learner_id)
         progress_repository.save(g.learner_id, QuizMode.REVIEW, question_bank_version, None)
-        g.quiz_progress.pop(_session_key(QuizMode.REVIEW), None)
+        g.quiz_progress.pop(_progress_state.session_key(QuizMode.REVIEW), None)
         if deleted_count:
             flash(f"已将 {deleted_count} 道错题重置为 0。", "success")
         else:
@@ -389,12 +385,12 @@ def create_web_blueprint(
     @blueprint.post("/review/start")
     @shared_progress
     def start_review() -> Any:
-        source_ids = _single_catalogue_filter(
+        source_ids = _view.single_catalogue_filter(
             request.form.get("source_id", "").strip(),
             {source.id for source in question_repository.get_sources()},
             "课件",
         )
-        chapter_ids = _single_catalogue_filter(
+        chapter_ids = _view.single_catalogue_filter(
             request.form.get("chapter_id", "").strip(),
             {chapter.id for chapter in question_repository.get_chapters()},
             "章节",
@@ -403,12 +399,12 @@ def create_web_blueprint(
             QuizMode.REVIEW, chapter_ids=chapter_ids, source_ids=source_ids
         )
         if not question_ids:
-            state = g.quiz_progress.get(_session_key(QuizMode.REVIEW))
+            state = g.quiz_progress.get(_progress_state.session_key(QuizMode.REVIEW))
             if state and state.get("review_shortages"):
                 return redirect(url_for("web.review"))
             else:
                 flash("当前筛选范围内没有待纠正或待强化内容。", "info")
-                g.quiz_progress.pop(_session_key(QuizMode.REVIEW), None)
+                g.quiz_progress.pop(_progress_state.session_key(QuizMode.REVIEW), None)
                 return redirect(
                     url_for(
                         "web.mistakes",
@@ -504,10 +500,7 @@ def create_web_blueprint(
                 exam_session, _srs.utc_now()
             ),
             source=question_repository.get_source(question.source_id),
-            chapters=[
-                question_repository.get_chapter(chapter_id)
-                for chapter_id in question.chapter_ids
-            ],
+            chapters=_chapters_of(question),
         )
 
     @blueprint.post("/exam/<exam_id>/answer")
@@ -529,9 +522,6 @@ def create_web_blueprint(
                 position,
                 request.form.getlist("answers"),
             )
-        except ExamExpiredError as exc:
-            flash(str(exc), "info")
-            return redirect(url_for("web.exam_report", exam_id=exam_id))
         except ExamStateError as exc:
             flash(str(exc), "info")
             return redirect(url_for("web.exam_report", exam_id=exam_id))
@@ -581,10 +571,7 @@ def create_web_blueprint(
                     item.question, report.session.option_seed, item.position
                 ),
                 "source": question_repository.get_source(item.question.source_id),
-                "chapters": [
-                    question_repository.get_chapter(chapter_id)
-                    for chapter_id in item.question.chapter_ids
-                ],
+                "chapters": _chapters_of(item.question),
             }
             for item in report.wrong_items
         ]
@@ -615,7 +602,7 @@ def create_web_blueprint(
         chapter_ids: set[str] | None = None,
         source_ids: set[str] | None = None,
     ) -> list[str]:
-        previous = g.quiz_progress.get(_session_key(mode))
+        previous = g.quiz_progress.get(_progress_state.session_key(mode))
         review_items: list[dict[str, str | None]] = []
         shortages: list[dict[str, object]] = []
         if mode is QuizMode.NORMAL:
@@ -677,7 +664,7 @@ def create_web_blueprint(
                     "review_shortages": shortages,
                 }
             )
-        g.quiz_progress[_session_key(mode)] = state
+        g.quiz_progress[_progress_state.session_key(mode)] = state
         return question_ids
 
     def _render_quiz(mode: QuizMode) -> Any:
@@ -719,14 +706,7 @@ def create_web_blueprint(
             next_endpoint=endpoints["next"],
             review_item=review_item,
             source=(question_repository.get_source(question.source_id) if question else None),
-            chapters=(
-                [
-                    question_repository.get_chapter(chapter_id)
-                    for chapter_id in question.chapter_ids
-                ]
-                if question
-                else []
-            ),
+            chapters=_chapters_of(question) if question else [],
         )
 
     def _answer(mode: QuizMode) -> Any:
@@ -780,25 +760,7 @@ def create_web_blueprint(
             "selected_answers": list(result.selected_answers),
         }
         if mode is QuizMode.REVIEW:
-            updates = []
-            for update in result.learning_update.knowledge_updates:
-                chapter = question_repository.get_chapter(update.point.chapter_id)
-                updates.append(
-                    {
-                        "chapter_id": update.point.chapter_id,
-                        "chapter_title": (
-                            chapter.title if chapter else update.point.chapter_id
-                        ),
-                        "verified_count": len(
-                            update.point.verified_question_ids
-                        ),
-                        "verification_target": (
-                            weak_knowledge_point_service.verification_target
-                        ),
-                        "active": update.point.active,
-                        "newly_completed": update.newly_completed,
-                    }
-                )
+            updates = _knowledge_update_feedback(result)
             feedback.update(
                 {
                     "review_role": review_item["role"],
@@ -816,7 +778,7 @@ def create_web_blueprint(
                 update["newly_completed"] for update in updates
             )
         state["feedback"] = feedback
-        g.quiz_progress[_session_key(mode)] = state
+        g.quiz_progress[_progress_state.session_key(mode)] = state
         return redirect(url_for(endpoint))
 
     def _next(mode: QuizMode) -> Any:
@@ -854,7 +816,7 @@ def create_web_blueprint(
         state["status"] = "pending"
         state["answer_token"] = secrets.token_urlsafe(24)
         state.pop("feedback", None)
-        g.quiz_progress[_session_key(mode)] = state
+        g.quiz_progress[_progress_state.session_key(mode)] = state
         return redirect(url_for(endpoint))
 
     def _state_for(mode: QuizMode) -> dict[str, Any] | None:
@@ -867,6 +829,34 @@ def create_web_blueprint(
     def _curriculum() -> list[dict[str, Any]]:
         """Build one dynamic catalogue for selection and filtering templates."""
         return _view.build_curriculum(question_repository)
+
+    def _chapters_of(question: Question) -> list[Chapter | None]:
+        """Return the chapter records one question belongs to, in bank order."""
+        return [
+            question_repository.get_chapter(chapter_id)
+            for chapter_id in question.chapter_ids
+        ]
+
+    def _knowledge_update_feedback(result: AnswerResult) -> list[dict[str, Any]]:
+        """Render chapter reinforcement updates for the review feedback card."""
+        updates = []
+        for update in result.learning_update.knowledge_updates:
+            chapter = question_repository.get_chapter(update.point.chapter_id)
+            updates.append(
+                {
+                    "chapter_id": update.point.chapter_id,
+                    "chapter_title": (
+                        chapter.title if chapter else update.point.chapter_id
+                    ),
+                    "verified_count": len(update.point.verified_question_ids),
+                    "verification_target": (
+                        weak_knowledge_point_service.verification_target
+                    ),
+                    "active": update.point.active,
+                    "newly_completed": update.newly_completed,
+                }
+            )
+        return updates
 
     @blueprint.app_errorhandler(HTTPException)
     def friendly_http_error(error: HTTPException) -> tuple[str, int]:
@@ -903,8 +893,5 @@ def create_web_blueprint(
             "answer": "web.answer_review",
             "next": "web.next_review",
         }
-
-    _catalogue_filter = _view.catalogue_filter
-    _single_catalogue_filter = _view.single_catalogue_filter
 
     return blueprint

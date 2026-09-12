@@ -186,29 +186,6 @@ class WrongQuestionService:
                 )
         return items
 
-    def get_other_items(self, learner_id: str) -> list[MistakeItem]:
-        """Return other learners' valid records for read-only display."""
-        items: list[MistakeItem] = []
-        for record in self.wrong_question_repository.get_all():
-            if record.learner_id == learner_id:
-                continue
-            question = self.question_repository.get_by_id(record.question_id)
-            if question is None:
-                LOGGER.warning(
-                    'Wrong question "%s" no longer exists in questions.json.',
-                    record.question_id,
-                )
-                continue
-            items.append(MistakeItem(record=record, question=question))
-        return items
-
-    def get_uncorrected_question_ids(self, learner_id: str) -> list[str]:
-        """Return only valid, currently uncorrected question IDs."""
-        return [
-            item.question.id
-            for item in self.get_items(learner_id, corrected=False)
-        ]
-
     def get_filtered_uncorrected_question_ids(
         self,
         learner_id: str,
@@ -279,12 +256,6 @@ class WrongQuestionService:
                 now=now,
             )
         ]
-
-    def get_record(
-        self, learner_id: str, question_id: str
-    ) -> WrongQuestion | None:
-        """Return current review progress for immediate learner feedback."""
-        return self.wrong_question_repository.get_by_id(learner_id, question_id)
 
     def get_stats(self, learner_id: str) -> dict[str, int]:
         """Return pending/corrected counts, excluding stale database rows."""
