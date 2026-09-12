@@ -37,13 +37,20 @@ LOGGER = logging.getLogger(__name__)
 # Configurable exam shapes. Question counts are validated against the live
 # bank size; time limits are stored in seconds (``None`` means untimed).
 EXAM_QUESTION_COUNT_OPTIONS: tuple[int, ...] = (10, 20, 30, 50)
-EXAM_TIME_LIMIT_OPTIONS: tuple[int | None, ...] = (None, 600, 1200, 1800, 3600)
+EXAM_TIME_LIMIT_OPTIONS: tuple[int | None, ...] = (
+    600, 1200, 1800, 2400, 3000, 3600, 4200, 4800, 5400, None,
+)
 EXAM_TIME_LIMIT_LABELS: dict[int | None, str] = {
-    None: "不限时",
     600: "10 分钟",
     1200: "20 分钟",
     1800: "30 分钟",
+    2400: "40 分钟",
+    3000: "50 分钟",
     3600: "60 分钟",
+    4200: "70 分钟",
+    4800: "80 分钟",
+    5400: "90 分钟",
+    None: "不限时",
 }
 EXAM_HISTORY_LIMIT = 20
 

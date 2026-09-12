@@ -161,11 +161,12 @@ button.resource-row { appearance: none; border: 0; border-bottom: 1px solid var(
 .page-heading h1 { font-size: clamp(3rem, 6vw, 5rem); }
 .page-heading p:last-child { max-width: 620px; margin-bottom: 0; }
 .heading-actions { display: flex; max-width: 410px; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.summary-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-block: 1px solid var(--line); }
-.summary-card { display: flex; padding: 20px 0; align-items: baseline; justify-content: space-between; gap: 20px; }
+.summary-row { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border-block: 1px solid var(--line); }
+.summary-card { display: flex; padding: 20px 0; align-items: baseline; justify-content: flex-start; gap: 12px; }
 .summary-card + .summary-card { margin-left: clamp(20px, 5vw, 64px); padding-left: clamp(20px, 5vw, 64px); border-left: 1px solid var(--line); }
 .summary-card span { color: var(--muted); font-size: 0.76rem; font-weight: 650; }
 .summary-card strong { font-family: var(--font-display); font-size: 2.1rem; font-weight: 400; font-variant-numeric: tabular-nums; }
+.summary-card.is-due strong { color: var(--accent); }
 
 .chapter-picker { display: grid; margin: 0; padding: 0; border: 0; gap: 34px; }
 .chapter-option { position: relative; display: block; cursor: pointer; }
@@ -493,7 +494,7 @@ body.show-bilingual .translation-zh { display: block; }
 .exam-config .section-label { margin-bottom: 0; }
 .exam-option-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .exam-option-grid .chapter-option > span { min-height: 64px; }
-.exam-controls { align-items: center; }
+.exam-controls { grid-template-columns: minmax(200px, .9fr) minmax(220px, 1.1fr) auto; align-items: center; }
 .exam-note { margin: 0; color: var(--ink-soft); font-size: .84rem; line-height: 1.6; }
 .exam-resume { padding-bottom: 8px; border-bottom: 2px solid var(--ink); }
 .exam-timer { font-variant-numeric: tabular-nums; }

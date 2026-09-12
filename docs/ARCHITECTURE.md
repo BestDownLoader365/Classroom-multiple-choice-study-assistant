@@ -649,7 +649,7 @@ Review adds only a small text role in the existing question-type metadata ("错�
 
 ### `app/templates/mistakes.html`
 
-Renders only the current account's mistake records, including source/chapter/page context, latest wrong answer, wrong count, and corrected status. Correct answers and explanations are server-rendered after correction. The summary row adds a "今日待复习" card with the currently due SRS count, which also counts toward whether the start-review action is enabled. Above the existing mistake table, a second section built from the same `section-heading`, `table-card`, `mistake-table`, status, and metadata primitives summarizes each weak chapter, pending corrections, distinct 0/2 progress, completion, and any insufficient-question warning. GET filters support source, chapter, or both through the shared custom picker. A filtered review retains the same scope. Reset clears that learner's wrong and weak rows, cancels Review, and preserves attempts and Normal progress.
+Renders only the current account's mistake records, including source/chapter/page context, latest wrong answer, wrong count, and corrected status. Correct answers and explanations are server-rendered after correction. The summary row lays out its stat cards count-agnostically in one evenly divided line (the same component serves the glossary two-card stats) and adds a "今日待复习" card with the currently due SRS count — its numeral turns accent whenever reviews are due — which also counts toward whether the start-review action is enabled. Above the existing mistake table, a second section built from the same `section-heading`, `table-card`, `mistake-table`, status, and metadata primitives summarizes each weak chapter, pending corrections, distinct 0/2 progress, completion, and any insufficient-question warning. GET filters support source, chapter, or both through the shared custom picker. A filtered review retains the same scope. Reset clears that learner's wrong and weak rows, cancels Review, and preserves attempts and Normal progress.
 
 ### `app/templates/dashboard.html`
 
@@ -657,7 +657,7 @@ Renders the signed-in learner's metrics strip (totals, accuracy, 7/30-day activi
 
 ### `app/templates/exam_setup.html`
 
-Collects the mock-exam configuration (question count and time limit from fixed allow-lists rendered as selectable rows), surfaces the resumable in-progress exam, and lists recent exam history with score, accuracy, duration, status, and report links. The start action is disabled when the bank is smaller than every allowed exam size.
+Collects the mock-exam configuration — question count from a fixed allow-list rendered as selectable rows, and a time limit chosen through the shared custom dropdown picker inside the setup controls bar (10–90 minutes in 10-minute steps, or untimed as the default) — surfaces the resumable in-progress exam, and lists recent exam history with score, accuracy, duration, status, and report links. The start action is disabled when the bank is smaller than every allowed exam size.
 
 ### `app/templates/exam.html`
 

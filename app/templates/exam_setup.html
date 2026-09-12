@@ -48,25 +48,30 @@
                 {% endfor %}
             </div>
         </fieldset>
-        <fieldset class="exam-config">
-            <legend class="sr-only">时间限制</legend>
-            <p class="section-label">时间限制</p>
-            <div class="chapter-grid exam-option-grid">
-                {% for seconds, label in time_options %}
-                <label class="chapter-option">
-                    <input type="radio" name="time_limit" value="{{ seconds if seconds is not none else 'none' }}" {% if loop.index == 1 %}checked{% endif %}>
-                    <span>
-                        <strong>{{ label }}</strong>
-                        <small>{% if seconds %}到时自动交卷{% else %}自己掌控节奏{% endif %}</small>
-                    </span>
-                </label>
-                {% endfor %}
-            </div>
-        </fieldset>
         <div class="setup-controls exam-controls">
             <div class="field-group">
                 <span class="picker-label">说明</span>
-                <p class="exam-note">创建后题目集合即固定；服务端记录开考时间与时限，关闭页面不会丢失进度。</p>
+                <p class="exam-note">创建后题目集合即固定；服务端记录开考时间与时限，到时自动交卷，关闭页面不会丢失进度。</p>
+            </div>
+            <div class="field-group">
+                <span class="picker-label" id="exam-time-label">时间限制</span>
+                <div class="quiz-size-picker" data-select-picker="exam-time" data-picker>
+                    <input type="hidden" id="exam-time" name="time_limit" value="none" data-picker-value>
+                    <button class="size-picker-trigger" type="button"
+                            aria-haspopup="listbox" aria-expanded="false"
+                            aria-controls="exam-time-menu"
+                            aria-labelledby="exam-time-label exam-time-current">
+                        <span id="exam-time-current" data-select-current>不限时</span>
+                    </button>
+                    <div class="size-picker-menu" id="exam-time-menu" role="listbox"
+                         aria-labelledby="exam-time-label" data-select-menu aria-hidden="true" inert>
+                        {% for seconds, label in time_options %}
+                        <button class="size-picker-option" type="button" role="option" data-picker-option
+                                data-value="{{ seconds if seconds is not none else 'none' }}"
+                                {% if seconds is none %}aria-selected="true"{% endif %}>{{ label }}</button>
+                        {% endfor %}
+                    </div>
+                </div>
             </div>
             {% if count_options %}
             <button class="button button-primary" type="submit">开始模拟考试</button>

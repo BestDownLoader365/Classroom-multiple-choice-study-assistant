@@ -97,7 +97,7 @@
             <span>已纠正错题</span>
             <strong>{{ stats.corrected }}</strong>
         </div>
-        <div class="summary-card">
+        <div class="summary-card{% if srs_due_count %} is-due{% endif %}">
             <span>今日待复习</span>
             <strong>{{ srs_due_count }}</strong>
         </div>

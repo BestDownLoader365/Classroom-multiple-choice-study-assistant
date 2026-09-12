@@ -122,6 +122,16 @@ def test_create_rejects_unsupported_or_oversized_configuration(exam_context):
     assert service.question_count_options(225) == (10, 20, 30, 50)
 
 
+def test_create_accepts_ninety_minutes_and_rejects_beyond(exam_context):
+    service, _, _, _ = exam_context
+
+    session = create(service, count=10, limit=5400)
+
+    assert session.time_limit_seconds == 5400
+    with pytest.raises(ExamConfigError):
+        create(service, count=10, limit=6000)
+
+
 def test_answers_persist_and_can_be_changed_or_cleared(exam_context):
     service, _, _, _ = exam_context
     session = create(service, count=10)
