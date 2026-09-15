@@ -10,6 +10,11 @@ from .exam_service import (
     ExamService,
     ExamStateError,
 )
+from .global_statistics_service import (
+    ChapterDifficulty,
+    GlobalOverviewData,
+    GlobalStatisticsService,
+)
 from .grading_service import AnswerValidationError, GradingService
 from .quiz_service import (
     ORIGINAL_CORRECTION,
@@ -44,6 +49,7 @@ from .wrong_question_service import LearningUpdate, MistakeItem, WrongQuestionSe
 __all__ = [
     "AnswerResult",
     "AnswerValidationError",
+    "ChapterDifficulty",
     "ChapterMastery",
     "DashboardData",
     "DayActivity",
@@ -55,6 +61,8 @@ __all__ = [
     "ExamReport",
     "ExamService",
     "ExamStateError",
+    "GlobalOverviewData",
+    "GlobalStatisticsService",
     "GradingService",
     "InvalidTimezoneError",
     "KnowledgePointUpdate",

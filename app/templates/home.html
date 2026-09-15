@@ -114,7 +114,14 @@
             <a class="resource-row" href="{{ url_for('web.dashboard') }}">
                 <span class="resource-row-copy">
                     <strong>学习数据</strong>
-                    <span>累计答题、正确率、章节掌握度与最近学习趋势。</span>
+                    <span>我的累计答题、正确率、章节掌握度与最近学习趋势。</span>
+                </span>
+                <span class="resource-row-arrow" aria-hidden="true">→</span>
+            </a>
+            <a class="resource-row" href="{{ url_for('web.stats') }}">
+                <span class="resource-row-copy">
+                    <strong>全员统计</strong>
+                    <span>汇总所有账号的答题数据与章节难度，仅供参考。</span>
                 </span>
                 <span class="resource-row-arrow" aria-hidden="true">→</span>
             </a>

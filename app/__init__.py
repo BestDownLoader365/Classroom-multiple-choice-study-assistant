@@ -27,6 +27,7 @@ from app.repositories import (
 from app.routes import create_web_blueprint
 from app.services import (
     ExamService,
+    GlobalStatisticsService,
     GradingService,
     QuizService,
     StatisticsService,
@@ -60,6 +61,7 @@ class AppServices:
     exam_repository: ExamRepository
     exam_service: ExamService
     statistics_service: StatisticsService
+    global_statistics_service: GlobalStatisticsService
 
 
 def create_app(test_config: dict[str, Any] | None = None) -> Flask:
@@ -160,6 +162,12 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         wrong_question_service=wrong_question_service,
         display_tz=display_timezone,
     )
+    global_statistics_service = GlobalStatisticsService(
+        attempt_repository=attempt_repository,
+        user_repository=user_repository,
+        question_repository=question_repository,
+        display_tz=display_timezone,
+    )
 
     services = AppServices(
         question_repository=question_repository,
@@ -176,6 +184,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         exam_repository=exam_repository,
         exam_service=exam_service,
         statistics_service=statistics_service,
+        global_statistics_service=global_statistics_service,
     )
     app.extensions["mcq_services"] = services
 
@@ -215,6 +224,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             weak_knowledge_point_service=weak_knowledge_point_service,
             exam_service=exam_service,
             statistics_service=statistics_service,
+            global_statistics_service=global_statistics_service,
             display_timezone=display_timezone,
             question_bank_version=question_bank_version,
             bank_generation=bank_generation,

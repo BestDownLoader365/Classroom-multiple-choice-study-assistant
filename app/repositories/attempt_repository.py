@@ -78,18 +78,35 @@ class AttemptRepository:
                 """,
                 (learner_id,),
             ).fetchall()
-        return [
-            Attempt(
-                id=int(row["id"]),
-                learner_id=row["learner_id"],
-                question_id=row["question_id"],
-                mode=QuizMode(row["mode"]),
-                selected_answers=tuple(json.loads(row["selected_answers"])),
-                is_correct=bool(row["is_correct"]),
-                answered_at=row["answered_at"],
-            )
-            for row in rows
-        ]
+        return [self._to_model(row) for row in rows]
+
+    def list_all(self) -> list[Attempt]:
+        """Return every account's retained attempts, oldest first.
+
+        The per-learner retention bound also bounds the whole table
+        (learners × questions × ``MAX_ATTEMPTS_PER_QUESTION``), so the
+        cross-account statistics service can aggregate in plain Python.
+        """
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM attempts
+                ORDER BY answered_at, id
+                """,
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
+    @staticmethod
+    def _to_model(row) -> Attempt:
+        return Attempt(
+            id=int(row["id"]),
+            learner_id=row["learner_id"],
+            question_id=row["question_id"],
+            mode=QuizMode(row["mode"]),
+            selected_answers=tuple(json.loads(row["selected_answers"])),
+            is_correct=bool(row["is_correct"]),
+            answered_at=row["answered_at"],
+        )
 
     def get_latest_incorrect_answers(
         self, learner_id: str

@@ -131,6 +131,7 @@ MCQ_Template/
 │   │   ├── srs_service.py
 │   │   ├── exam_service.py
 │   │   ├── statistics_service.py
+│   │   ├── global_statistics_service.py
 │   │   ├── wrong_question_service.py
 │   │   └── weak_knowledge_point_service.py
 │   ├── web/
@@ -147,6 +148,7 @@ MCQ_Template/
 │   │   ├── glossary.html
 │   │   ├── home.html
 │   │   ├── dashboard.html
+│   │   ├── stats.html
 │   │   ├── quiz.html
 │   │   ├── quiz_setup.html
 │   │   ├── exam.html
@@ -181,9 +183,11 @@ MCQ_Template/
     ├── test_srs_web.py
     ├── test_security.py
     ├── test_statistics_service.py
+    ├── test_global_statistics_service.py
     ├── test_exam_service.py
     ├── test_exam_web.py
     ├── test_dashboard_web.py
+    ├── test_stats_web.py
     ├── test_progress_sync.py
     ├── test_progress_state.py
     ├── test_web.py
@@ -260,7 +264,7 @@ This module is the composition root. Its `create_app()` function performs all ap
 5. Load and validate `glossary.json` with `GlossaryLoader`, then build the immutable `GlossaryRepository`. The display timezone is resolved from `DISPLAY_TIMEZONE` once and injected into the statistics service and blueprint.
 6. Initialize the current SQLite schema and atomically synchronize the global question-bank fingerprint. A changed bank deletes all attempts, wrong questions, weak knowledge points, quiz progress, and exam records for every account, preserving users.
 7. Create the user, progress, attempt, exam, wrong-question, and weak-knowledge-point repositories.
-8. Create the grading, weak-knowledge-point, wrong-question, quiz, exam, and statistics services. Missing weak rows are backfilled from existing live wrong-question IDs with safe 0/2 progress.
+8. Create the grading, weak-knowledge-point, wrong-question, quiz, exam, statistics, and global statistics services. Missing weak rows are backfilled from existing live wrong-question IDs with safe 0/2 progress.
 9. Expose the assembled repositories and services through `app.extensions["mcq_services"]` for tests and diagnostics.
 10. Register the application-level `GET /health` readiness route.
 11. Build and register the authenticated web blueprint.
@@ -378,7 +382,7 @@ defensive JSON-ready serialization for templates.
 
 ### `app/repositories/user_repository.py`
 
-Creates and authenticates local users. User IDs are UUID strings, usernames are unique without case sensitivity, and passwords are stored as Werkzeug password hashes rather than plaintext.
+Creates and authenticates local users. User IDs are UUID strings, usernames are unique without case sensitivity, and passwords are stored as Werkzeug password hashes rather than plaintext. `list_all()` returns every account ordered by username for the cross-account statistics service.
 
 ### `app/repositories/progress_repository.py`
 
@@ -386,7 +390,7 @@ Stores one JSON round state and question-bank fingerprint per `(learner_id, mode
 
 ### `app/repositories/attempt_repository.py`
 
-Inserts one row for every graded answer, then retains only the ten most recent rows for that `(learner_id, question_id)` pair in the same transaction. Application startup also prunes older databases to the same limit. The selected option IDs are serialized as JSON so both single and multiple selections can use the same column. `list_for_learner()` returns one learner's retained window in chronological order for the statistics service.
+Inserts one row for every graded answer, then retains only the ten most recent rows for that `(learner_id, question_id)` pair in the same transaction. Application startup also prunes older databases to the same limit. The selected option IDs are serialized as JSON so both single and multiple selections can use the same column. `list_for_learner()` returns one learner's retained window in chronological order for the statistics service; `list_all()` returns every account's window in the same order for the global statistics service — still bounded by learners × questions × the retention limit.
 
 ### `app/repositories/exam_repository.py`
 
@@ -524,7 +528,11 @@ Resolves and converts the display timezone. Storage and all comparisons stay in 
 
 ### `app/services/statistics_service.py`
 
-`StatisticsService` aggregates the dashboard from one learner's retained attempt window plus the existing wrong-question state machine. It reports total/correct counts and accuracy, 7- and 30-day activity counts (inclusive day cutoffs on UTC timestamps), pending/corrected mistake counts with due SRS reviews, per-chapter mastery (attempts, accuracy, coverage against the live bank, and a threshold-based status: not started, weak below 60%, progressing below 80%, good below 90%, mastered at 90%+, with a low-sample flag below 3 attempts), and a 7-day per-day trend that fills empty days with zeros and buckets attempts by display-timezone calendar day. All bands are module constants and every function accepts an injectable `now`; the zone defaults to UTC and `create_app` injects the resolved display zone.
+`StatisticsService` aggregates the dashboard from one learner's retained attempt window plus the existing wrong-question state machine. It reports total/correct counts and accuracy, 7- and 30-day activity counts (inclusive day cutoffs on UTC timestamps), pending/corrected mistake counts with due SRS reviews, per-chapter mastery (attempts, accuracy, coverage against the live bank, and a threshold-based status: not started, weak below 60%, progressing below 80%, good below 90%, mastered at 90%+, with a low-sample flag below 3 attempts), and a 7-day per-day trend that fills empty days with zeros and buckets attempts by display-timezone calendar day. All bands are module constants and every function accepts an injectable `now`; the zone defaults to UTC and `create_app` injects the resolved display zone. The window cutoff (`count_since`) and day-bucketing (`daily_trend`) rules live at module level so the global statistics service shares them exactly.
+
+### `app/services/global_statistics_service.py`
+
+`GlobalStatisticsService` is the reference-only counterpart of `StatisticsService`: it aggregates the retained attempt window across every registered account and never reports single-account detail. It feeds the `/stats` page with registered/active account counts (active means at least one retained attempt), group totals and accuracy, the same 7/30-day activity windows, the same 7-day zero-filled trend, and a per-chapter difficulty board — attempts, accuracy, distinct answering accounts, and a difficulty band (unattempted, hard below 60%, medium below 80%, easy at 80%+, reusing the personal mastery thresholds) sorted hardest first with unattempted chapters last in curriculum order. Per-learner concepts (pending mistakes, SRS due counts) are excluded by design. Window, trend, and low-sample rules are imported from `statistics_service`, and `now`/display-zone injection keeps every rule unit-testable.
 
 ## 9. HTTP and Session Layer
 
@@ -552,6 +560,7 @@ This module creates the Flask blueprint and defines all browser endpoints.
 | POST | `/review/answer` | Validate and grade the current review answer |
 | POST | `/review/next` | Advance the review queue |
 | GET | `/dashboard` | Show per-learner totals, chapter mastery, and recent activity |
+| GET | `/stats` | Show cross-account totals, chapter difficulty, and group activity; reference-only, no single-account detail |
 | GET | `/exam` | Show mock-exam configuration, the resumable exam, and history |
 | POST | `/exam/start` | Validate the configuration and create a fixed question set |
 | GET | `/exam/<exam_id>` | Render one exam question without feedback; auto-submits when expired |
@@ -627,7 +636,7 @@ Composed as a single-column editorial task board: a quiet nameplate masthead, on
 - The masthead keeps the bank title at nameplate scale with its English italic subtitle and a mono bank-size metadata line (`题库 · N 题`), so the title informs context without owning the viewport.
 - The task band (`.task-band`) opens with the system's 2px ink top rule and makes the primary task the page's largest serif heading: an in-progress normal practice renders its mono position (`第 X / Y 题 · 还剩 Z 题`) with the 4px completed-work progress indicator (`current - 1` of `total`), while a fresh learner sees the start copy and bank size. The action column pairs one prominent two-line primary CTA (`.button-large` + `.button-copy`; the secondary line carries the resume position or the 10/20/50 practice sizes) with a ghost restart action guarded by `data-confirm-restart`.
 - The agenda (`.home-agenda`) is the single home for every unfinished obligation and renders only when at least one exists: a "继续模拟考试" row for an active exam, a "继续错题巩固" row (its progress text folds in the due SRS count when present) with a confirm-guarded ghost restart form beside it, or a due-SRS submit row ("待复习 X 题") posting to `POST /review/start`. With nothing actionable the whole section is omitted — there is no static placeholder row.
-- The directory (`.directory-grid`) presents exam setup, dashboard, mistakes (carrying the pending/corrected counts — the only place those metrics appear), and glossary as `.resource-row` entries in a two-column ruled grid that collapses to one column on small screens.
+- The directory (`.directory-grid`) presents exam setup, the personal dashboard, the cross-account stats page (marked 仅供参考), mistakes (carrying the pending/corrected counts — the only place those metrics appear), and glossary as `.resource-row` entries in a two-column ruled grid that collapses to one column on small screens.
 
 ### `app/templates/quiz_setup.html`
 
@@ -657,6 +666,10 @@ Renders only the current account's mistake records, including source/chapter/pag
 
 Renders the signed-in learner's metrics strip (totals, accuracy, 7/30-day activity, pending/corrected mistakes with due SRS count), a zero-filled seven-day bar chart of daily attempts and accuracy, and the chapter mastery table with coverage and threshold-based status labels. A learner without attempts sees a calm empty state with one recovery action while the chapter table still lists every chapter as not started.
 
+### `app/templates/stats.html`
+
+Renders the cross-account counterpart of the dashboard under a 全体学习数据 · 仅供参考 heading: a metrics strip (registered/active accounts, group totals and accuracy, 7/30-day group activity), the same zero-filled seven-day trend chart, and the chapter difficulty board — per-chapter group attempts, accuracy bar, distinct answering accounts, and difficulty labels reusing the `.status` palette, sorted hardest first. No username or single-account metric ever renders; the page links back to the personal dashboard for contrast. With no attempts at all it shows the same calm empty-state pattern while the difficulty board still lists every chapter as unattempted.
+
 ### `app/templates/exam_setup.html`
 
 Collects the mock-exam configuration — question count from a fixed allow-list rendered as selectable rows, and a time limit chosen through the shared custom dropdown picker inside the setup controls bar (10–90 minutes in 10-minute steps, or untimed as the default) — surfaces the resumable in-progress exam, and lists recent exam history with score, accuracy, duration, status, and report links. The start action is disabled when the bank is smaller than every allowed exam size.
@@ -681,7 +694,7 @@ Provides a consistent recovery page for friendly HTTP errors.
 
 Contains the full visual system and responsive behavior. The learning upgrade adds only local spacing/title/note rules for `.knowledge-summary`; colors, fonts, borders, cards, buttons, focus rings and breakpoints are reused. The SRS home entry is an `.agenda-row` (a link, or a submit button with the same appearance-reset grammar) inside `.agenda-list`; both mistake tables inherit the existing `max-width: 640px` table-to-card conversion, so no separate mobile UI or horizontal dependency is introduced. Normal quiz has no intentional visual change.
 
-The dashboard and mock-exam pages follow the same rule: `.metric-strip`, `.trend-chart`, `.mastery-bar`, `.data-table`, `.exam-nav`, and `.exam-submit-panel` are built from the existing tokens (paper/sheet surfaces, ink rules, accent progress, mono metadata, square corners, no shadows), and `.data-table` reuses the same 640px table-to-card conversion as the mistake tables. Exam status labels reuse the `.status` text-and-dot pattern so state is never conveyed by color alone.
+The dashboard, global stats, and mock-exam pages follow the same rule: `.metric-strip`, `.trend-chart`, `.mastery-bar`, `.data-table`, `.exam-nav`, and `.exam-submit-panel` are built from the existing tokens (paper/sheet surfaces, ink rules, accent progress, mono metadata, square corners, no shadows), and `.data-table` reuses the same 640px table-to-card conversion as the mistake tables. The stats page adds no CSS of its own — its difficulty labels reuse the `.status-*` text colors with text, never color alone. Exam status labels reuse the `.status` text-and-dot pattern so state is never conveyed by color alone.
 
 The presentation invariant is that review reinforcement reuses the existing quiz/mistakes structures, CSS primitives, feedback patterns, bilingual/glossary behavior, keyboard focus, and 820px/640px responsive behavior. Role and progress differences are written as text and never conveyed by color alone.
 

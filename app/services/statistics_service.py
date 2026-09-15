@@ -113,6 +113,42 @@ class DashboardData:
         return max((day.attempts for day in self.trend), default=0)
 
 
+def count_since(attempts: list[Attempt], cutoff: datetime) -> int:
+    """Count attempts answered at or after ``cutoff``."""
+    return sum(
+        srs.parse_timestamp(attempt.answered_at) >= cutoff
+        for attempt in attempts
+    )
+
+
+def daily_trend(
+    attempts: list[Attempt], now: datetime, display_tz: tzinfo
+) -> tuple[DayActivity, ...]:
+    """Return one entry per display-timezone calendar day, filling zeros."""
+    today = display_day(now, display_tz)
+    by_day: dict[str, list[Attempt]] = {}
+    window_start = today - timedelta(days=TREND_DAYS - 1)
+    for attempt in attempts:
+        day = display_day(
+            srs.parse_timestamp(attempt.answered_at), display_tz
+        )
+        if day < window_start or day > today:
+            continue
+        by_day.setdefault(day.isoformat(), []).append(attempt)
+    trend: list[DayActivity] = []
+    for offset in range(TREND_DAYS):
+        day = window_start + timedelta(days=offset)
+        day_attempts = by_day.get(day.isoformat(), [])
+        trend.append(
+            DayActivity(
+                day=day.isoformat(),
+                attempts=len(day_attempts),
+                correct=sum(item.is_correct for item in day_attempts),
+            )
+        )
+    return tuple(trend)
+
+
 class StatisticsService:
     """Compute per-learner learning statistics from existing stores."""
 
@@ -158,10 +194,7 @@ class StatisticsService:
 
     @staticmethod
     def _count_since(attempts: list[Attempt], cutoff: datetime) -> int:
-        return sum(
-            srs.parse_timestamp(attempt.answered_at) >= cutoff
-            for attempt in attempts
-        )
+        return count_since(attempts, cutoff)
 
     def _chapter_mastery(
         self, attempts: list[Attempt]
@@ -229,26 +262,4 @@ class StatisticsService:
     def _daily_trend(
         self, attempts: list[Attempt], now: datetime
     ) -> tuple[DayActivity, ...]:
-        """Return one entry per display-timezone calendar day, filling zeros."""
-        today = display_day(now, self.display_tz)
-        by_day: dict[str, list[Attempt]] = {}
-        window_start = today - timedelta(days=TREND_DAYS - 1)
-        for attempt in attempts:
-            day = display_day(
-                srs.parse_timestamp(attempt.answered_at), self.display_tz
-            )
-            if day < window_start or day > today:
-                continue
-            by_day.setdefault(day.isoformat(), []).append(attempt)
-        trend: list[DayActivity] = []
-        for offset in range(TREND_DAYS):
-            day = window_start + timedelta(days=offset)
-            day_attempts = by_day.get(day.isoformat(), [])
-            trend.append(
-                DayActivity(
-                    day=day.isoformat(),
-                    attempts=len(day_attempts),
-                    correct=sum(item.is_correct for item in day_attempts),
-                )
-            )
-        return tuple(trend)
+        return daily_trend(attempts, now, self.display_tz)

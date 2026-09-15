@@ -54,6 +54,14 @@ class UserRepository:
             return None
         return self._to_model(row)
 
+    def list_all(self) -> list[User]:
+        """Return every registered account, ordered by username."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM users ORDER BY username COLLATE NOCASE",
+            ).fetchall()
+        return [self._to_model(row) for row in rows]
+
     def get_by_id(self, user_id: str) -> User | None:
         with self.database.connect() as connection:
             row = connection.execute(

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}全员统计 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="content-stack">
+    <div class="page-heading">
+        <div>
+            <p class="section-label">全体学习数据 · 仅供参考</p>
+            <h1>全员统计</h1>
+            <p>这里汇总所有账号的答题记录（正常练习、错题巩固与模拟考试；每道题每个账号保留最近 10 次作答），只展示群体整体情况，不涉及任何单个账号的明细。</p>
+        </div>
+        <div class="heading-actions">
+            <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+            <a class="button button-secondary" href="{{ url_for('web.dashboard') }}">我的学习数据</a>
+        </div>
+    </div>
+
+    {% if not overview.has_attempts %}
+    <div class="empty-state">
+        <h2>暂无全员答题记录</h2>
+        <p>任意账号完成几轮正常练习或一场模拟考试后，这里会显示全员的累计答题数、正确率和章节难度。</p>
+        <div class="inline-actions empty-actions">
+            <a class="button button-primary" href="{{ url_for('web.quiz_setup') }}">开始正常练习</a>
+        </div>
+    </div>
+    {% else %}
+    <div class="metric-strip" aria-label="全员学习指标">
+        <div><strong>{{ overview.account_count }}</strong><span>注册账号</span></div>
+        <div><strong>{{ overview.active_account_count }}</strong><span>有作答的账号</span></div>
+        <div><strong>{{ overview.total_attempts }}</strong><span>全员累计答题</span></div>
+        <div><strong>{{ "%.0f" | format(overview.accuracy) }}%</strong><span>全员总正确率（{{ overview.correct_attempts }} 次答对）</span></div>
+        <div><strong>{{ overview.attempts_last_7_days }}</strong><span>最近 {{ overview.recent_window_days }} 天答题</span></div>
+        <div><strong>{{ overview.attempts_last_30_days }}</strong><span>最近 {{ overview.month_window_days }} 天答题</span></div>
+    </div>
+
+    <section class="dashboard-section" aria-labelledby="trend-heading">
+        <div class="section-heading compact-heading">
+            <div>
+                <p class="section-label">最近 {{ overview.trend_window_days }} 天</p>
+                <h2 id="trend-heading">全员学习趋势</h2>
+            </div>
+        </div>
+        <div class="trend-chart">
+            {% for day in overview.trend %}
+            <div class="trend-day{% if not day.attempts %} trend-day-empty{% endif %}">
+                <span class="trend-count">{{ day.attempts }}</span>
+                <span class="trend-bar" style="height: {{ ((day.attempts / overview.trend_max * 100) | round(0, 'floor') | int) if overview.trend_max else 0 }}%"></span>
+                <span class="trend-label">{{ day.day[5:] }}</span>
+                <span class="trend-accuracy">{% if day.accuracy is not none %}{{ "%.0f" | format(day.accuracy) }}%{% else %}—{% endif %}</span>
+            </div>
+            {% endfor %}
+        </div>
+        <p class="trend-note">柱形为每天全员答题数，下方为当天全员正确率；日期按本地时区（{{ display_tz_label }}）统计。</p>
+    </section>
+    {% endif %}
+
+    <section class="dashboard-section" aria-labelledby="difficulty-heading">
+        <div class="section-heading compact-heading">
+            <div>
+                <p class="section-label">按章节</p>
+                <h2 id="difficulty-heading">章节难度榜</h2>
+            </div>
+        </div>
+        <div class="table-card">
+            <div class="table-wrap">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>章节</th>
+                            <th class="num">全员作答（对 / 总）</th>
+                            <th>全员正确率</th>
+                            <th class="num">作答人数</th>
+                            <th>难度</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in overview.chapters %}
+                        <tr>
+                            <td data-label="章节">
+                                {{ row.chapter.title }}
+                                <span class="chapter-source">{{ row.source.lecture or row.source.title }}</span>
+                            </td>
+                            <td class="num" data-label="全员作答">
+                                {% if row.attempts %}{{ row.correct }} / {{ row.attempts }}{% else %}—{% endif %}
+                            </td>
+                            <td data-label="全员正确率">
+                                {% if row.accuracy is not none %}
+                                <span class="mastery-cell">
+                                    <span class="mastery-value">{{ "%.0f" | format(row.accuracy) }}%</span>
+                                    <span class="mastery-bar"><span style="width: {{ row.accuracy | round(0, 'floor') | int }}%"></span></span>
+                                </span>
+                                {% else %}—{% endif %}
+                            </td>
+                            <td class="num" data-label="作答人数">{% if row.attempts %}{{ row.learner_count }}{% else %}—{% endif %}</td>
+                            <td data-label="难度">
+                                {% if row.difficulty == "unattempted" %}
+                                <span class="status status-not-started">无人作答</span>
+                                {% elif row.difficulty == "hard" %}
+                                <span class="status status-weak">较难</span>
+                                {% elif row.difficulty == "medium" %}
+                                <span class="status status-progressing">中等</span>
+                                {% else %}
+                                <span class="status status-good">较易</span>
+                                {% endif %}
+                                {% if row.low_sample %}<span class="sample-note">数据较少</span>{% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <p class="trend-note">按全员正确率从低到高排序，正确率相同则作答多的在前；全员正确率低于 60% 为较难，60–79% 中等，80% 及以上为较易；作答少于 3 次的章节标记为“数据较少”。</p>
+    </section>
+</section>
+{% endblock %}

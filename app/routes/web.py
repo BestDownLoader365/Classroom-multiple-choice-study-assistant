@@ -35,6 +35,7 @@ from app.services import (
     ExamNotFoundError,
     ExamService,
     ExamStateError,
+    GlobalStatisticsService,
     QuizService,
     StatisticsService,
     WeakKnowledgePointService,
@@ -59,6 +60,7 @@ def create_web_blueprint(
     weak_knowledge_point_service: WeakKnowledgePointService,
     exam_service: ExamService,
     statistics_service: StatisticsService,
+    global_statistics_service: GlobalStatisticsService,
     display_timezone: tzinfo,
     bank_generation: int = 0,
 ) -> Blueprint:
@@ -251,6 +253,19 @@ def create_web_blueprint(
         return render_template(
             "dashboard.html",
             dashboard=statistics_service.build_dashboard(g.learner_id),
+        )
+
+    @blueprint.get("/stats")
+    def stats() -> str:
+        """Show learning statistics aggregated across every account.
+
+        Reference-only counterpart of the personal dashboard: the page
+        renders group totals and chapter difficulty, never single-account
+        details, so it needs no per-learner progress handling.
+        """
+        return render_template(
+            "stats.html",
+            overview=global_statistics_service.build_overview(),
         )
 
     @blueprint.get("/quiz/setup")
