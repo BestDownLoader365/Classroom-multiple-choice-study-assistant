@@ -647,6 +647,8 @@ Renders normal practice and review with one shared template. It handles:
 
 Review adds only a small text role in the existing question-type metadata ("错题纠正" / "间隔复习" / "同知识点强化") and semantic sentences inside the existing feedback block. It does not add another question card, navigation system, modal, or client-side state.
 
+The two-column answer summary renders each answer paragraph on one template line. `.answer-summary p` uses `white-space: pre-line` so bank-authored `\n` breaks survive; that also means any newline leaked into those `<p>` tags by multi-line Jinja blocks would surface as empty lines pushing the answer text down and misaligning the columns.
+
 ### `app/templates/mistakes.html`
 
 Renders only the current account's mistake records, including source/chapter/page context, latest wrong answer, wrong count, and corrected status. Correct answers and explanations are server-rendered after correction. The summary row lays out its stat cards count-agnostically in one evenly divided line (the same component serves the glossary two-card stats) and adds a "今日待复习" card with the currently due SRS count — its numeral turns accent whenever reviews are due — which also counts toward whether the start-review action is enabled. Above the existing mistake table, a second section built from the same `section-heading`, `table-card`, `mistake-table`, status, and metadata primitives summarizes each weak chapter, pending corrections, distinct 0/2 progress, completion, and any insufficient-question warning. GET filters support source, chapter, or both through the shared custom picker. A filtered review retains the same scope. Reset clears that learner's wrong and weak rows, cancels Review, and preserves attempts and Normal progress.
@@ -665,7 +667,7 @@ Presents one exam question per page with the shared question-card primitives but
 
 ### `app/templates/exam_report.html`
 
-Shows the immutable score (`correct / total`), accuracy, elapsed time, and submission status, a per-chapter breakdown in curriculum order, and every wrong or unanswered question with the shared answered-options markup, correct answer, and explanations. Glossary highlighting keeps working in all rendered question content.
+Shows the immutable score (`correct / total`), accuracy, elapsed time, and submission status, a per-chapter breakdown in curriculum order, and every wrong or unanswered question with the shared answered-options markup, correct answer, and explanations. Glossary highlighting keeps working in all rendered question content. Its answer summary follows the same single-line paragraph rule as the quiz feedback block.
 
 ### `app/templates/glossary.html`
 

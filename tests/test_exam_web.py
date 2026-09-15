@@ -160,6 +160,12 @@ def test_submit_produces_report_attempts_and_mistakes(tmp_path):
     assert "20%" in report.text  # 2 correct of 10
     assert "Chapter A" in report.text and "Chapter B" in report.text
     assert "Because" in report.text  # explanations of wrong questions
+    # The answer-summary paragraphs must render without template newlines:
+    # white-space: pre-line would turn them into blank lines above the answer.
+    assert not re.search(r"<p data-glossary-highlight>\s", report.text)
+    assert "<p data-glossary-highlight>Alpha</p>" in report.text
+    assert "<p data-glossary-highlight>Beta</p>" in report.text
+    assert "<p data-glossary-highlight>未作答</p>" in report.text
 
     session = service.get_session(user_id, exam_id)
     assert session.status is ExamStatus.SUBMITTED

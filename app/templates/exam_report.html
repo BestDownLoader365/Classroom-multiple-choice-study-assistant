@@ -134,15 +134,9 @@
             </div>
             <div class="answer-summary">
                 <div>
-                    <strong>你的答案</strong>
-                    <p data-glossary-highlight>
                     {% set selected_options = detail.ordered_options | selectattr('id', 'in', detail.item.selected_answers) | list %}
-                    {% if selected_options %}
-                        {{ selected_options | map(attribute='text') | join('、') }}
-                    {% else %}
-                        未作答
-                    {% endif %}
-                    </p>
+                    <strong>你的答案</strong>
+                    <p data-glossary-highlight>{% if selected_options %}{{ selected_options | map(attribute='text') | join('、') }}{% else %}未作答{% endif %}</p>
                 </div>
                 <div>
                     <strong>正确答案</strong>

@@ -1,4 +1,5 @@
 import copy
+import re
 from contextlib import contextmanager
 
 from app import create_app
@@ -531,6 +532,10 @@ def test_feedback_distinguishes_missed_and_wrong_options(tmp_path, valid_payload
     assert "漏选" in response.text
     assert "误选" in response.text
     assert "英文解析" in response.text
+    # The answer-summary paragraphs must render without template newlines:
+    # white-space: pre-line would turn them into blank lines above the answer.
+    assert not re.search(r"<p data-glossary-highlight>\s", response.text)
+    assert "<p data-glossary-highlight>A and C.</p>" in response.text
 
 
 def test_review_corrects_original_then_uses_transfer_question(tmp_path, valid_payload):
