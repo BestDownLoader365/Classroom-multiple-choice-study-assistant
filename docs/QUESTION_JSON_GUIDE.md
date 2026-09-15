@@ -245,6 +245,22 @@ JSON 文件必须使用 UTF-8 编码。标准 JSON 不允许注释、尾随逗�
 - 单选：`Which statement best explains ...?`
 - 多选：`Which statements are correct? Select all that apply.`
 
+### 6.4 多行文本与换行
+
+`text`、`text_zh`、`options[].text`、`options[].text_zh`、`explanation` 和 `explanation_zh` 都支持用 `\n` 表示换行。界面通过 CSS `white-space: pre-line` 渲染这些字段：`\n` 会显示为实际换行，而连续空格和 Tab 仍会被折叠，不影响正常排版。
+
+适合换行的典型场景是罗马数字分点题干：
+
+```json
+"text": "Consider statements I–III about yield:\nI. Yield is the proportion of functional devices.\nII. Reliability is the ability to perform over time.\nIII. Which option is correct?"
+```
+
+注意：
+
+- JSON 字符串内不能直接书写真实换行，必须写成转义序列 `\n`（见第 3 节的 JSON 格式要求）。
+- 换行只用于确实有分点、分行结构的文本，不要用它制造段间距或做排版微调。
+- 同一道题的英文与中文文本应保持一致的换行结构，避免双语对照错位。
+
 ## 7. `options`：选项对象
 
 | 字段 | 要求 | 类型 | 规则 |

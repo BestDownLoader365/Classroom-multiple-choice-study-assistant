@@ -266,8 +266,8 @@ td:first-child { width: 64%; min-width: 320px; color: var(--ink); font-family: v
 .option-index, .answer-marker { display: grid; flex: 0 0 28px; width: 28px; height: 28px; border: 1px solid var(--line-strong); place-items: center; color: var(--muted); font-family: var(--font-data); font-size: 0.67rem; font-weight: 700; }
 .option-index { cursor: pointer; }
 .option-text { flex: 1; min-width: 0; font-family: var(--font-display); font-size: 1rem; }
-.question-en { display: block; }
-.translation-zh { display: none; margin-top: 7px; color: var(--ink-soft); font-family: var(--font-ui); font-size: 0.88em; line-height: 1.6; }
+.question-en { display: block; white-space: pre-line; }
+.translation-zh { display: none; margin-top: 7px; color: var(--ink-soft); font-family: var(--font-ui); font-size: 0.88em; line-height: 1.6; white-space: pre-line; }
 body.show-bilingual .translation-zh { display: block; }
 .question-translation { font-size: 0.54em; font-weight: 400; letter-spacing: 0; }
 .submit-answer { width: 100%; }
@@ -294,7 +294,7 @@ body.show-bilingual .translation-zh { display: block; }
 .answer-summary > div { padding: 15px 17px 15px 0; }
 .answer-summary > div + div { padding-left: 17px; border-left: 1px solid var(--line); }
 .answer-summary strong, .explanation strong { color: var(--muted); font-family: var(--font-data); font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase; }
-.answer-summary p, .explanation p { margin: 7px 0 0; font-family: var(--font-display); line-height: 1.6; }
+.answer-summary p, .explanation p { margin: 7px 0 0; font-family: var(--font-display); line-height: 1.6; white-space: pre-line; }
 .explanation { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
 .translation-explanation { padding-top: 14px; border-top: 1px solid var(--line); }
 .review-feedback { margin-bottom: 20px; padding: 15px 0; border-block: 1px solid var(--line); }

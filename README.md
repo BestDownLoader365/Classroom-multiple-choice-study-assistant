@@ -150,6 +150,8 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 中文字段 `title_zh`、`text_zh` 和 `explanation_zh` 用于双语辅助显示。题目仍以英文原文为准；这些中文字段可以省略，省略后页面不会显示相应翻译。
 
+题干、选项和解析文本支持用 `\n` 换行（例如罗马数字分点题干），界面会以实际换行渲染，详见 [`docs/QUESTION_JSON_GUIDE.md`](docs/QUESTION_JSON_GUIDE.md) 第 6.4 节。
+
 ## 将专业词汇系统用于其他课程
 
 专业词汇是独立、通用的数据子系统。`questions.json` 定义要练习的题目，根目录的 `glossary.json` 定义当前课程需要识别和学习的词汇；浏览器不会直接请求该文件，应用会在启动时完成校验并通过模板安全下发。完整字段和匹配规则见 [`docs/GLOSSARY_JSON_GUIDE.md`](docs/GLOSSARY_JSON_GUIDE.md)。
