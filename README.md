@@ -150,7 +150,7 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 中文字段 `title_zh`、`text_zh` 和 `explanation_zh` 用于双语辅助显示。题目仍以英文原文为准；这些中文字段可以省略，省略后页面不会显示相应翻译。
 
-题干、选项和解析文本支持用 `\n` 换行（例如罗马数字分点题干），界面会以实际换行渲染，详见 [`docs/QUESTION_JSON_GUIDE.md`](docs/QUESTION_JSON_GUIDE.md) 第 6.4 节。
+题干、选项和解析文本支持用 `\n` 换行；罗马数字分点题干（`I.`、`II.`、`III.` 开头的行）中的陈述行会以较小字号显示，详见 [`docs/QUESTION_JSON_GUIDE.md`](docs/QUESTION_JSON_GUIDE.md) 第 6.4 节。
 
 ## 将专业词汇系统用于其他课程
 

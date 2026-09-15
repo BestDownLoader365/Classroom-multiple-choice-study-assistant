@@ -85,6 +85,7 @@ def create_web_blueprint(
             "bank_title_zh": question_repository.title_zh,
             "glossary_data": glossary_data,
             "option_label": _view.option_label,
+            "format_stem": _view.format_stem,
             "csrf_token": _web_auth.csrf_token,
             "format_duration": _view.format_duration,
             "format_datetime": partial(

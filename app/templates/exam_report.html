@@ -103,9 +103,9 @@
                 <span class="question-position">{{ detail.item.question.id }}</span>
             </div>
             <h3 class="question-text report-question-text">
-                <span class="question-en" data-glossary-highlight>{{ detail.item.question.text }}</span>
+                <span class="question-en" data-glossary-highlight>{{ format_stem(detail.item.question.text) }}</span>
                 {% if detail.item.question.text_zh %}
-                <span class="translation-zh question-translation">{{ detail.item.question.text_zh }}</span>
+                <span class="translation-zh question-translation">{{ format_stem(detail.item.question.text_zh) }}</span>
                 {% endif %}
             </h3>
             <div class="options options-answered" aria-label="答案对照">

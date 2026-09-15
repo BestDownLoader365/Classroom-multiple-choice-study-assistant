@@ -6,10 +6,12 @@ filters are pure; ``build_curriculum`` only reads from the question
 repository it is given.
 """
 
+import re
 from datetime import tzinfo
 from typing import Any
 
 from flask import abort
+from markupsafe import Markup, escape
 
 from app.repositories import QuestionRepository
 from app.services import srs_service as _srs
@@ -44,6 +46,29 @@ def option_label(index: int) -> str:
         value, remainder = divmod(value - 1, 26)
         label = chr(ord("A") + remainder) + label
     return label
+
+
+_ROMAN_STATEMENT_LINE = re.compile(r"^(X{1,3}|IX|IV|V?I{0,3})\.\s")
+
+
+def format_stem(text: str | None) -> Markup:
+    """Render a question stem with smaller roman-numeral statement lines.
+
+    Lines such as ``I. ...`` or ``II. ...`` are wrapped in a
+    ``stem-statement`` span so CSS can shrink them relative to the intro
+    and closing lines. Every line is escaped before wrapping, and the
+    newline separators are preserved for the ``pre-line`` white-space
+    rendering, so the returned markup is safe to render directly.
+    """
+    lines = []
+    for line in str(text or "").split("\n"):
+        if _ROMAN_STATEMENT_LINE.match(line):
+            lines.append(
+                Markup('<span class="stem-statement">{}</span>').format(escape(line))
+            )
+        else:
+            lines.append(escape(line))
+    return Markup("\n").join(lines)
 
 
 def build_curriculum(question_repository: QuestionRepository) -> list[dict[str, Any]]:

@@ -38,9 +38,9 @@
             <span class="question-position">题目 {{ position + 1 }}</span>
         </div>
         <h1 class="question-text">
-            <span class="question-en" data-glossary-highlight>{{ question.text }}</span>
+            <span class="question-en" data-glossary-highlight>{{ format_stem(question.text) }}</span>
             {% if question.text_zh %}
-            <span class="translation-zh question-translation">{{ question.text_zh }}</span>
+            <span class="translation-zh question-translation">{{ format_stem(question.text_zh) }}</span>
             {% endif %}
         </h1>
 
