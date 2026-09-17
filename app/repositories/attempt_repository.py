@@ -61,6 +61,48 @@ class AttemptRepository:
             row = connection.execute("SELECT COUNT(*) AS total FROM attempts").fetchone()
         return int(row["total"])
 
+    def delete_for_questions(self, question_ids) -> int:
+        """Delete every learner's attempts for the given questions.
+
+        Used when a question's grading identity changes: its stored answers
+        no longer have a reliable verdict.  Deleted questions keep their
+        history instead, so this is never called for them.
+        """
+        ids = [str(question_id) for question_id in question_ids]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                f"DELETE FROM attempts WHERE question_id IN ({placeholders})",
+                ids,
+            )
+        return cursor.rowcount
+
+    def get_latest_attempt_for(
+        self, learner_id: str, question_id: str, mode: QuizMode
+    ) -> Attempt | None:
+        """Return one learner's most recent attempt for a question in a mode."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM attempts
+                WHERE learner_id = ? AND question_id = ? AND mode = ?
+                ORDER BY answered_at DESC, id DESC
+                LIMIT 1
+                """,
+                (learner_id, question_id, mode.value),
+            ).fetchone()
+        return self._to_model(row) if row else None
+
+    def distinct_question_ids(self) -> set[str]:
+        """Return every question ID referenced by any stored attempt."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT question_id FROM attempts"
+            ).fetchall()
+        return {row["question_id"] for row in rows}
+
     def list_for_learner(self, learner_id: str) -> list[Attempt]:
         """Return one learner's retained attempts, oldest first.
 

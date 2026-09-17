@@ -202,6 +202,41 @@ class WeakKnowledgePointService:
     def reset(self, learner_id: str) -> int:
         return self.repository.delete_all_for_learner(learner_id)
 
+    def reconcile_all(self, unusable_question_ids: set[str]) -> int:
+        """Persistently strip unusable question IDs from every verification.
+
+        Read paths already skip stale IDs in memory; this startup-time sweep
+        makes the cleanup durable so deleted or grading-changed questions can
+        never inflate a chapter's 0/2 → 2/2 progress forever.  Chapters that
+        no longer exist in the bank are deliberately left untouched (their
+        rows stay for a possible later return and are skipped when read).
+        Returns the number of rows rewritten.
+        """
+        changed = 0
+        for point in self.repository.get_all():
+            if self.question_repository.get_chapter(point.chapter_id) is None:
+                continue
+            valid_ids = (
+                self._live_question_ids(point.chapter_id) - unusable_question_ids
+            )
+            verified = tuple(
+                question_id
+                for question_id in point.verified_question_ids
+                if question_id in valid_ids
+            )
+            active = point.active or len(verified) < self.verification_target
+            if verified == point.verified_question_ids and active == point.active:
+                continue
+            self.repository.save_verification(
+                point.learner_id,
+                point.chapter_id,
+                verified,
+                active,
+                point.updated_at,
+            )
+            changed += 1
+        return changed
+
     def _filtered_points(
         self,
         learner_id: str,

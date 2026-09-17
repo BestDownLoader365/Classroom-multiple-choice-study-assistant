@@ -167,9 +167,19 @@ class StatisticsService:
     def build_dashboard(
         self, learner_id: str, *, now: datetime | None = None
     ) -> DashboardData:
-        """Collect every dashboard metric for one learner at ``now``."""
+        """Collect every dashboard metric for one learner at ``now``.
+
+        Attempts whose question has left the bank stay stored but no longer
+        count toward any number, so ordinary bank maintenance never distorts
+        the figures.
+        """
         moment = now or srs.utc_now()
-        attempts = self.attempt_repository.list_for_learner(learner_id)
+        live_ids = self.question_repository.ids()
+        attempts = [
+            attempt
+            for attempt in self.attempt_repository.list_for_learner(learner_id)
+            if attempt.question_id in live_ids
+        ]
         total = len(attempts)
         correct = sum(attempt.is_correct for attempt in attempts)
         week_cutoff = moment - timedelta(days=RECENT_WINDOW_DAYS)

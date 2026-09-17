@@ -33,6 +33,13 @@ from .local_time import (
     timezone_label,
     to_display,
 )
+from .progress_state import reconcile_state
+from .question_bank_sync_service import (
+    BankDiff,
+    QuestionBankSyncService,
+    diff_questions,
+)
+from .question_fingerprint import content_fingerprint, grading_fingerprint
 from .statistics_service import (
     ChapterMastery,
     DashboardData,
@@ -49,6 +56,7 @@ from .wrong_question_service import LearningUpdate, MistakeItem, WrongQuestionSe
 __all__ = [
     "AnswerResult",
     "AnswerValidationError",
+    "BankDiff",
     "ChapterDifficulty",
     "ChapterMastery",
     "DashboardData",
@@ -70,6 +78,7 @@ __all__ = [
     "MistakeItem",
     "NormalSelectionResult",
     "ORIGINAL_CORRECTION",
+    "QuestionBankSyncService",
     "QuizService",
     "ReviewItem",
     "ReviewSelectionResult",
@@ -79,7 +88,11 @@ __all__ = [
     "WeakKnowledgePointService",
     "WeakKnowledgeSummary",
     "WrongQuestionService",
+    "content_fingerprint",
+    "diff_questions",
     "display_day",
+    "grading_fingerprint",
+    "reconcile_state",
     "resolve_display_timezone",
     "timezone_label",
     "to_display",

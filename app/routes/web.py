@@ -116,6 +116,17 @@ def create_web_blueprint(
         g.learner_id = user.id
         return None
 
+    def _latest_correctness(learner_id: str, mode: QuizMode):
+        """Bind the legacy counter fallback for progress reconciliation."""
+
+        def lookup(question_id: str) -> bool | None:
+            attempt = wrong_question_service.attempt_repository.get_latest_attempt_for(
+                learner_id, question_id, mode
+            )
+            return attempt.is_correct if attempt is not None else None
+
+        return lookup
+
     def shared_progress(view):
         @wraps(view)
         def wrapped(*args, **kwargs):
@@ -123,17 +134,18 @@ def create_web_blueprint(
             # SQLite coordinates concurrent requests even across Gunicorn workers.
             with progress_repository.database.transaction() as connection:
                 active_bank = connection.execute(
-                    "SELECT bank_version, generation FROM question_bank_state WHERE id = 1"
+                    "SELECT generation FROM question_bank_state WHERE id = 1"
                 ).fetchone()
-                if (active_bank["bank_version"], active_bank["generation"]) != (
-                    question_bank_version, bank_generation
-                ):
+                # The generation only advances on structural bank changes; a
+                # worker started from an older question set must never write
+                # through.  Cosmetic bank edits keep the generation, so they
+                # neither block sibling workers nor disturb learners.
+                active_generation = (
+                    active_bank["generation"] if active_bank is not None else 0
+                )
+                if active_generation != bank_generation:
                     abort(503, description="题库已更新，请重启服务后刷新页面。")
-                if bank_generation and session.get("bank_generation") != bank_generation:
-                    flash("检测到题库更新，所有课程学习记录已清空，账号已保留。", "info")
-                session["bank_generation"] = bank_generation
                 g.quiz_progress = {}
-                changed = False
                 for mode in _progress_state.PRACTICE_MODES:
                     stored = progress_repository.get(g.learner_id, mode)
                     legacy = session.pop(_progress_state.session_key(mode), None)
@@ -144,17 +156,25 @@ def create_web_blueprint(
                             else None
                         )
                     else:
-                        version, state = stored
-                        if version != question_bank_version:
-                            changed = changed or state is not None
-                            state = None
+                        _, state = stored
                     if not _progress_state.is_valid_progress_state(state, mode):
                         state = None
+                    elif state is not None:
+                        # Defensive sweep: startup reconciliation already
+                        # removed unusable questions, so this normally no-ops.
+                        state, _reconciled = _progress_state.reconcile_state(
+                            state,
+                            mode,
+                            is_usable=question_repository.has,
+                            lookup_correct=_latest_correctness(g.learner_id, mode),
+                            is_live_chapter=lambda chapter_id: (
+                                question_repository.get_chapter(chapter_id)
+                                is not None
+                            ),
+                        )
                     g.quiz_progress[_progress_state.session_key(mode)] = state
                 session.pop("quiz_progress", None)
                 session.pop("question_bank_version", None)
-                if changed:
-                    flash("检测到题库更新，未完成的练习进度已重置。", "info")
                 response = view(*args, **kwargs)
                 for mode in _progress_state.PRACTICE_MODES:
                     state = g.quiz_progress.get(_progress_state.session_key(mode))
@@ -495,11 +515,18 @@ def create_web_blueprint(
         if exam_service.finalize_if_expired(exam_session):
             flash("考试时间已结束，系统已自动交卷。", "info")
             return redirect(url_for("web.exam_report", exam_id=exam_id))
+        if exam_service.reconcile_session(exam_session):
+            # Slots were dropped silently; the exam may even have finished.
+            exam_session = exam_service.get_session(g.learner_id, exam_id)
+            if exam_session.status.finished:
+                return redirect(url_for("web.exam_report", exam_id=exam_id))
         position = _exam_position(request.args.get("q"), exam_session)
         slots = exam_service.get_questions(exam_session)
         slot = slots[position]
         question = question_repository.get_by_id(slot.question_id)
         if question is None:
+            # Unreachable: reconciliation above guarantees every slot's
+            # question exists with an unchanged grading identity.
             abort(410, description="题库已经更新，当前题目不再存在。")
         return render_template(
             "exam.html",
@@ -527,6 +554,11 @@ def create_web_blueprint(
             exam_session = exam_service.get_session(g.learner_id, exam_id)
         except ExamNotFoundError:
             abort(404)
+        if exam_service.reconcile_session(exam_session):
+            # Slots shifted or the exam finished, so the posted position no
+            # longer refers to the same question; drop this submission and
+            # let the form reload at the reconciled layout.
+            return redirect(url_for("web.exam", exam_id=exam_id))
         try:
             position = int(request.form.get("position", "-1"))
         except ValueError:
@@ -545,6 +577,8 @@ def create_web_blueprint(
             abort(400, description=str(exc))
         except AnswerValidationError:
             abort(400, description="提交的答案不属于当前题目，请重新作答。")
+        except ExamNotFoundError:
+            abort(404)
         goto = request.form.get("goto", "next")
         if goto == "prev":
             target = max(0, position - 1)
@@ -651,6 +685,7 @@ def create_web_blueprint(
         state = {
             "mode": mode.value,
             "question_ids": question_ids,
+            "question_results": [None] * len(question_ids),
             "current_index": 0,
             "correct_count": 0,
             "incorrect_count": 0,
@@ -699,7 +734,14 @@ def create_web_blueprint(
         if not is_complete:
             question = question_repository.get_by_id(question_ids[current_index])
             if question is None:
-                abort(410, description="题库已经更新，当前题目不再存在。")
+                # Defensive: reconciliation removes unusable questions from
+                # every round, so a missing question can only come from a
+                # state written before startup reconciliation ran.
+                state, _reconciled = _progress_state.reconcile_state(
+                    state, mode, is_usable=question_repository.has
+                )
+                g.quiz_progress[_progress_state.session_key(mode)] = state
+                return redirect(url_for(_mode_endpoints(mode)["page"]))
             ordered_options = quiz_service.order_options(
                 question, state["option_seed"], current_index
             )
@@ -767,6 +809,14 @@ def create_web_blueprint(
             )
         except AnswerValidationError:
             abort(400, description="提交的答案不属于当前题目，请重新作答。")
+        except LookupError:
+            # Defensive: reconciliation should have removed this question
+            # from the queue already; drop it silently and carry on.
+            state, _reconciled = _progress_state.reconcile_state(
+                state, mode, is_usable=question_repository.has
+            )
+            g.quiz_progress[_progress_state.session_key(mode)] = state
+            return redirect(url_for(endpoint))
 
         state["status"] = "answered"
         counter = "correct_count" if result.is_correct else "incorrect_count"
@@ -793,6 +843,17 @@ def create_web_blueprint(
             state["knowledge_completed_count"] += sum(
                 update["newly_completed"] for update in updates
             )
+        entry = {"correct": bool(result.is_correct)}
+        if mode is QuizMode.REVIEW:
+            entry["corrected"] = bool(result.learning_update.corrected_now)
+            entry["knowledge"] = sum(
+                update["newly_completed"] for update in updates
+            )
+        results = state.get("question_results")
+        if not isinstance(results, list) or len(results) != len(question_ids):
+            results = [None] * len(question_ids)
+        results[state["current_index"]] = entry
+        state["question_results"] = results
         state["feedback"] = feedback
         g.quiz_progress[_progress_state.session_key(mode)] = state
         return redirect(url_for(endpoint))
@@ -828,6 +889,8 @@ def create_web_blueprint(
             for item in selection.items:
                 state["question_ids"].append(item.question_id)
                 state["review_items"].append(item.to_dict())
+                if isinstance(state.get("question_results"), list):
+                    state["question_results"].append(None)
             state["review_shortages"] = list(selection.shortages)
         state["status"] = "pending"
         state["answer_token"] = secrets.token_urlsafe(24)

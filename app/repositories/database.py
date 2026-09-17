@@ -107,13 +107,33 @@ class Database:
                     selected_answers TEXT,
                     is_correct INTEGER CHECK (is_correct IN (0, 1)),
                     answered_at TEXT,
+                    grading_fingerprint TEXT,
                     PRIMARY KEY (exam_id, position),
                     UNIQUE (exam_id, question_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS question_bank_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    bank_version TEXT NOT NULL,
+                    generation INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS question_registry (
+                    question_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK (status IN ('active', 'retired')),
+                    question_type TEXT NOT NULL,
+                    option_ids TEXT NOT NULL,
+                    correct_answers TEXT NOT NULL,
+                    content_fingerprint TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    retired_at TEXT
                 );
                 """
             )
             self._migrate_wrong_question_srs_columns(connection)
             self._migrate_attempt_mode_constraint(connection)
+            self._migrate_exam_question_fingerprint(connection)
             connection.execute(
                 """
                 DELETE FROM attempts
@@ -212,6 +232,22 @@ class Database:
         connection.execute(
             "ALTER TABLE attempts_mode_migration RENAME TO attempts"
         )
+
+    @staticmethod
+    def _migrate_exam_question_fingerprint(connection: sqlite3.Connection) -> None:
+        """Add the grading-fingerprint column to pre-tracking exam slots.
+
+        Existing slots keep ``NULL``: their exams predate grading-identity
+        tracking, so historical reports render them as recorded.
+        """
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(exam_questions)")
+        }
+        if "grading_fingerprint" not in columns:
+            connection.execute(
+                "ALTER TABLE exam_questions ADD COLUMN grading_fingerprint TEXT"
+            )
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

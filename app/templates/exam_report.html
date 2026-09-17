@@ -25,7 +25,7 @@
     <div class="report-summary">
         <p class="report-score">{{ report.correct_count }} <span class="report-score-total">/ {{ report.question_count }}</span></p>
         <div class="metric-strip report-metrics" aria-label="本场考试指标">
-            <div><strong>{{ "%.0f" | format(report.accuracy) }}%</strong><span>正确率</span></div>
+            <div><strong>{% if report.accuracy is not none %}{{ "%.0f" | format(report.accuracy) }}%{% else %}—{% endif %}</strong><span>正确率</span></div>
             <div><strong>{{ report.correct_count }}</strong><span>答对</span></div>
             <div><strong>{{ report.wrong_count }}</strong><span>答错{% if report.unanswered_count %}（含 {{ report.unanswered_count }} 题未作答）{% endif %}</span></div>
             <div><strong>{{ format_duration(report.elapsed_seconds) }}</strong><span>用时</span></div>

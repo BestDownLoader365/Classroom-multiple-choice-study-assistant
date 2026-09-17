@@ -6,6 +6,8 @@ HTTP layer does not have to. They are deliberately free of Flask imports so
 they can be unit-tested in isolation.
 """
 
+import secrets
+from collections.abc import Callable
 from typing import Any
 
 from app.models import QuizMode
@@ -130,6 +132,146 @@ def valid_state_for(
         progress.pop(key, None)
         return None
     return state
+
+
+def reconcile_state(
+    state: dict[str, Any],
+    mode: QuizMode,
+    *,
+    is_usable: Callable[[str], bool],
+    lookup_correct: Callable[[str], bool | None] | None = None,
+    is_live_chapter: Callable[[str], bool] | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Remove unusable question IDs from an unfinished round, keeping the rest.
+
+    ``is_usable`` decides whether a queued question can still be answered
+    (it exists in the loaded bank and its grading identity is unchanged).
+    Removed questions keep their already recorded attempts; only the round
+    bookkeeping is adjusted.  ``lookup_correct`` supplies a removed answered
+    question's verdict for legacy states without ``question_results`` so the
+    round counters can be decremented precisely.  ``is_live_chapter`` prunes
+    stale review-shortage entries.  Returns ``(new_state, changed)``; the new
+    state is ``None`` when the round has nothing left worth resuming.
+    """
+    question_ids = state["question_ids"]
+    shortages = state.get("review_shortages", [])
+    live_shortages = (
+        [
+            shortage
+            for shortage in shortages
+            if not isinstance(shortage, dict)
+            or is_live_chapter(shortage.get("chapter_id", ""))
+        ]
+        if is_live_chapter is not None and isinstance(shortages, list)
+        else shortages
+    )
+    if all(is_usable(question_id) for question_id in question_ids):
+        if live_shortages == shortages:
+            return state, False
+
+    keep = [
+        index
+        for index, question_id in enumerate(question_ids)
+        if is_usable(question_id)
+    ]
+    kept = set(keep)
+    removed = [
+        index for index in range(len(question_ids)) if index not in kept
+    ]
+    current_index = state["current_index"]
+    new_state = dict(state)
+    new_state["question_ids"] = [question_ids[index] for index in keep]
+    if live_shortages != shortages:
+        new_state["review_shortages"] = live_shortages
+
+    results = state.get("question_results")
+    if not isinstance(results, list) or len(results) != len(question_ids):
+        results = None
+    if mode is QuizMode.REVIEW:
+        review_items = state["review_items"]
+        new_state["review_items"] = [review_items[index] for index in keep]
+    if results is not None:
+        new_state["question_results"] = [results[index] for index in keep]
+
+    def _entry_outcome(index: int) -> tuple[bool, bool, int] | None:
+        """Return (correct, corrected, knowledge_completed) for one answered slot."""
+        if results is not None and isinstance(results[index], dict):
+            entry = results[index]
+            return (
+                bool(entry.get("correct")),
+                bool(entry.get("corrected")),
+                int(entry.get("knowledge", 0) or 0),
+            )
+        if index == current_index and isinstance(state.get("feedback"), dict):
+            feedback = state["feedback"]
+            knowledge = 0
+            for update in feedback.get("knowledge_updates", []):
+                if isinstance(update, dict):
+                    knowledge += int(bool(update.get("newly_completed")))
+            return (
+                bool(feedback.get("is_correct")),
+                bool(feedback.get("corrected_now")),
+                knowledge,
+            )
+        if lookup_correct is not None:
+            correct = lookup_correct(question_ids[index])
+            if correct is not None:
+                return (bool(correct), False, 0)
+        return None
+
+    answered_removed = [
+        index for index in removed if index < current_index
+    ]
+    current_removed = (
+        state["status"] == "answered"
+        and current_index < len(question_ids)
+        and not is_usable(question_ids[current_index])
+    )
+    if current_removed:
+        answered_removed = answered_removed + [current_index]
+
+    correct_delta = incorrect_delta = corrected_delta = knowledge_delta = 0
+    for index in answered_removed:
+        outcome = _entry_outcome(index)
+        if outcome is None:
+            continue
+        correct, corrected, knowledge = outcome
+        correct_delta += int(correct)
+        incorrect_delta += int(not correct)
+        corrected_delta += int(corrected)
+        knowledge_delta += knowledge
+
+    new_state["correct_count"] = max(0, state["correct_count"] - correct_delta)
+    new_state["incorrect_count"] = max(
+        0, state["incorrect_count"] - incorrect_delta
+    )
+    if mode is QuizMode.REVIEW:
+        new_state["corrected_count"] = max(
+            0, state["corrected_count"] - corrected_delta
+        )
+        new_state["knowledge_completed_count"] = max(
+            0, state["knowledge_completed_count"] - knowledge_delta
+        )
+    new_state["current_index"] = sum(1 for index in keep if index < current_index)
+    new_state["initial_question_count"] = max(
+        0, state["initial_question_count"] - len(removed)
+    )
+    fairness = state.get("fairness_remaining_ids")
+    if isinstance(fairness, list):
+        new_state["fairness_remaining_ids"] = [
+            question_id for question_id in fairness if is_usable(question_id)
+        ]
+
+    if current_removed:
+        new_state["status"] = "pending"
+        new_state["answer_token"] = secrets.token_urlsafe(24)
+        new_state.pop("feedback", None)
+
+    if not new_state["question_ids"] and not (
+        new_state["correct_count"] + new_state["incorrect_count"]
+    ):
+        return None, True
+    return new_state, True
 
 
 def active_summary(

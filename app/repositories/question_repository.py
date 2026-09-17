@@ -41,6 +41,14 @@ class QuestionRepository:
         """Return one question, if it exists."""
         return self._by_id.get(question_id)
 
+    def has(self, question_id: str) -> bool:
+        """Return whether the question exists in the loaded bank."""
+        return question_id in self._by_id
+
+    def ids(self) -> frozenset[str]:
+        """Return the set of every loaded question ID."""
+        return frozenset(self._by_id)
+
     def get_by_ids(self, question_ids: Iterable[str]) -> list[Question]:
         """Return existing questions in the requested order."""
         return [

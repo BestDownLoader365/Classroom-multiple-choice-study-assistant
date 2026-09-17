@@ -115,6 +115,7 @@ MCQ_Template/
 │   │   ├── glossary_loader.py
 │   │   ├── glossary_repository.py
 │   │   ├── question_loader.py
+│   │   ├── question_registry_repository.py
 │   │   ├── question_repository.py
 │   │   ├── user_repository.py
 │   │   ├── progress_repository.py
@@ -128,6 +129,8 @@ MCQ_Template/
 │   │   ├── local_time.py
 │   │   ├── progress_state.py
 │   │   ├── quiz_service.py
+│   │   ├── question_bank_sync_service.py
+│   │   ├── question_fingerprint.py
 │   │   ├── srs_service.py
 │   │   ├── exam_service.py
 │   │   ├── statistics_service.py
@@ -162,7 +165,7 @@ MCQ_Template/
 │           └── glossary.js
 ├── scripts/
 │   ├── audit_glossary.py
-│   ├── migrate_question_metadata.py
+│   ├── check_question_bank.py
 │   ├── start_production.sh
 │   └── stop_production.sh
 └── tests/
@@ -173,6 +176,7 @@ MCQ_Template/
     ├── test_glossary_web.py
     ├── test_repositories.py
     ├── test_question_loader.py
+    ├── test_question_bank_sync.py
     ├── test_question_metadata_migration.py
     ├── test_grading_service.py
     ├── test_local_time.py
@@ -243,6 +247,14 @@ Validates a glossary with `GlossaryLoader`, compares canonical terms and aliases
 learner-facing question-bank text, reports orphan entries, and emits conservative
 manual-review candidates. It is read-only and does not generate or modify glossary data.
 
+#### `scripts/check_question_bank.py`
+
+Pre-deploy gate for `questions.json`: validates the file with `QuestionLoader`, then
+dry-runs the registry diff against a read-only copy of the live database and prints
+exactly what startup reconciliation would do (new, content-only, grading-changed,
+deleted, resurrected). It exits non-zero when a retired question ID is being reused
+for a different question, so the mistake is caught before a restart.
+
 #### `instance/mcq.db`
 
 The SQLite database created automatically on first startup. It contains accounts and learner activity, but not question text.
@@ -262,12 +274,13 @@ This module is the composition root. Its `create_app()` function performs all ap
 3. Load and validate `questions.json` with `QuestionLoader`.
 4. Build the in-memory `QuestionRepository`.
 5. Load and validate `glossary.json` with `GlossaryLoader`, then build the immutable `GlossaryRepository`. The display timezone is resolved from `DISPLAY_TIMEZONE` once and injected into the statistics service and blueprint.
-6. Initialize the current SQLite schema and atomically synchronize the global question-bank fingerprint. A changed bank deletes all attempts, wrong questions, weak knowledge points, quiz progress, and exam records for every account, preserving users.
+6. Initialize the current SQLite schema (including `question_registry` and the per-slot exam grading fingerprints).
 7. Create the user, progress, attempt, exam, wrong-question, and weak-knowledge-point repositories.
-8. Create the grading, weak-knowledge-point, wrong-question, quiz, exam, statistics, and global statistics services. Missing weak rows are backfilled from existing live wrong-question IDs with safe 0/2 progress.
-9. Expose the assembled repositories and services through `app.extensions["mcq_services"]` for tests and diagnostics.
-10. Register the application-level `GET /health` readiness route.
-11. Build and register the authenticated web blueprint.
+8. Create the grading, weak-knowledge-point, wrong-question, quiz, and exam services, then run `QuestionBankSyncService.synchronize()`: the freshly loaded bank is diffed against the persistent per-question registry by stable `question.id`, and only genuinely affected data is reconciled — content edits keep everything, grading-identity changes clear exactly that question's attempts and correction state, and deleted questions keep their attempts but silently lose their correction/SRS state, weak-point references, progress-queue entries, and unfinished-exam slots. The bank generation only advances on structural changes (new, grading-changed, deleted, or resurrected questions), never on cosmetic edits. Missing weak rows are then backfilled from the surviving live wrong-question IDs with safe 0/2 progress.
+9. Create the statistics and global statistics services.
+10. Expose the assembled repositories and services through `app.extensions["mcq_services"]` for tests and diagnostics.
+11. Register the application-level `GET /health` readiness route.
+12. Build and register the authenticated web blueprint.
 
 Dependencies are created once and explicitly passed to the objects that need them. Route functions therefore do not construct databases or services during individual requests.
 
@@ -330,7 +343,7 @@ Repositories are responsible for loading or persisting data. They do not decide 
 - rolls back failed operations;
 - always closes the connection.
 
-There is no database migration framework. Schema creation is additive, and column additions use guarded, idempotent `ALTER TABLE` statements: `Database.initialize()` checks `PRAGMA table_info(...)` before adding the `wrong_questions.srs_level` and `next_review_at` columns to databases that predate spaced repetition. Legacy rows keep `srs_level = 0` and `next_review_at = NULL`, so they are never scheduled until corrected again. `weak_knowledge_points` is created with `CREATE TABLE IF NOT EXISTS`, so an unchanged old database starts without a manual command. The separate bank synchronization step clears all learner course data, including weak points, when the bank changes.
+There is no database migration framework. Schema creation is additive, and column additions use guarded, idempotent `ALTER TABLE` statements: `Database.initialize()` checks `PRAGMA table_info(...)` before adding the `wrong_questions.srs_level` and `next_review_at` columns to databases that predate spaced repetition, and the `exam_questions.grading_fingerprint` column to databases that predate grading-identity tracking. Legacy rows keep `srs_level = 0` and `next_review_at = NULL`, so they are never scheduled until corrected again; legacy exam slots keep a `NULL` fingerprint and render as recorded. `weak_knowledge_points` and `question_registry` are created with `CREATE TABLE IF NOT EXISTS`, so an unchanged old database starts without a manual command. Bank changes never clear learner data wholesale anymore; see the per-question reconciliation section at the end of this document.
 
 `Database.transaction()` uses `BEGIN IMMEDIATE` and a context-local connection so progress token checks, answer attempts, correction/weak-point updates and progress changes commit or roll back together. SQLite serializes these transactions across threads and Gunicorn workers. Repository operations inside the transaction reuse its connection.
 
@@ -340,11 +353,15 @@ There is no database migration framework. Schema creation is additive, and colum
 
 ### `app/repositories/question_bank_state_repository.py`
 
-`QuestionBankStateRepository` owns the question-bank synchronization state table. It stores the active question-bank fingerprint and generation counter, and provides the atomic operations used to detect a changed bank, clear all learner course data, and bump the generation that stale workers compare against. `create_app` constructs both dedicated repositories directly: the bank-state repository runs once during startup, and the rate-limit repository is injected into the web blueprint, so `Database` itself only manages connections, transactions, and schema.
+`QuestionBankStateRepository` owns the single `question_bank_state` row: the last loaded raw bank fingerprint (diagnostics and legacy-cookie gating only) plus the structural bank generation counter that stale workers compare against. It never touches learner data; per-question reconciliation lives in `QuestionBankSyncService`. `create_app` constructs both dedicated repositories directly: the bank-state repository runs once during startup, and the rate-limit repository is injected into the web blueprint, so `Database` itself only manages connections, transactions, and schema.
+
+### `app/repositories/question_registry_repository.py`
+
+`QuestionRegistryRepository` owns the permanent `question_registry` table — one row per question ID ever loaded, holding its grading identity (`question_type`, the option-ID set, the correct-answer set), a content fingerprint, and a lifecycle status. Rows are never deleted: a question that leaves the bank is only marked `retired`, leaving a tombstone that prevents the ID from being silently recycled for a human-different question later. Reappearing retired IDs are resurrected when the grading identity matches exactly, and rejected with a startup error otherwise.
 
 ### `app/repositories/question_loader.py`
 
-`QuestionLoader` reads raw JSON bytes, calculates a SHA-256 source fingerprint, validates the full document, and converts it into immutable `Question` and `Option` objects.
+`QuestionLoader` reads raw JSON bytes, calculates a SHA-256 source fingerprint (recorded for diagnostics and legacy-cookie gating; it no longer drives any data reset), validates the full document, and converts it into immutable `Question` and `Option` objects. Per-question content and grading fingerprints are computed later from the normalized model, so JSON whitespace or field order can never register as a change.
 
 Validation includes:
 
@@ -516,7 +533,15 @@ Every function accepts `now` explicitly, which keeps scheduling deterministic un
 
 ### `app/services/progress_state.py`
 
-Pure, HTTP-independent helpers that validate and describe the per-mode quiz progress state dictionaries. It centralizes the progress `session_key()` names, the `quiz_limit()` parsing for the selected practice size, the `is_valid_progress_state()` structural validation used to accept or clear a stored round, `valid_state_for()` which drops invalid entries, and `active_summary()` which builds the resume banner data for an unfinished round. `PRACTICE_MODES` names the two modes that own a resumable round; mock exams keep their own persisted state and are deliberately excluded. Keeping these rules here lets the route layer and tests share one definition of what a valid round looks like without touching Flask.
+Pure, HTTP-independent helpers that validate and describe the per-mode quiz progress state dictionaries. It centralizes the progress `session_key()` names, the `quiz_limit()` parsing for the selected practice size, the `is_valid_progress_state()` structural validation used to accept or clear a stored round, `valid_state_for()` which drops invalid entries, and `active_summary()` which builds the resume banner data for an unfinished round. `reconcile_state()` removes unusable question IDs from an unfinished round in lockstep across the queue, review items, and per-question results, decrementing the round counters so a bank edit never strands a round. `PRACTICE_MODES` names the two modes that own a resumable round; mock exams keep their own persisted state and are deliberately excluded. Keeping these rules here lets the route layer and tests share one definition of what a valid round looks like without touching Flask.
+
+### `app/services/question_fingerprint.py`
+
+Pure fingerprint helpers over the normalized `Question` model. `grading_fingerprint()` hashes exactly the grading identity (type, option-ID set, correct-answer set); `content_fingerprint()` hashes every validated content field. Both canonicalize before hashing, so JSON formatting can never register as a change, and neither ever replaces `question.id` as identity.
+
+### `app/services/question_bank_sync_service.py`
+
+`QuestionBankSyncService` runs once per worker startup inside a single `BEGIN IMMEDIATE` transaction. It bootstraps an empty registry from the deployed bank (adopting IDs that only exist in learner history as retired tombstones), classifies the diff (`diff_questions()` is a pure function shared with the pre-deploy check script), fails fast when a retired ID is reused for a grading-different question, and applies the per-question consequences: targeted attempt/correction deletion for grading changes, silent correction/SRS removal plus weak-point, progress-round, and unfinished-exam reconciliation for unusable questions, and a generation bump only for structural changes. Everything is idempotent, so a second worker's run is a no-op.
 
 ### `app/services/exam_service.py`
 
@@ -577,7 +602,7 @@ Two small modules keep cross-cutting HTTP concerns out of the route functions:
 - `app/web/auth.py` holds the authentication, CSRF, and login rate-limit helpers. It resolves `session["user_id"]` to a real user for the blueprint's account requirement, issues and checks the CSRF token carried by mutating forms, and consults `RateLimitRepository` to throttle repeated failed logins.
 - `app/web/view_helpers.py` holds the template and catalogue helpers that assemble the course/chapter selection lists and other view models shared by the practice and review screens, plus the display-timezone-aware timestamp/duration formatters injected into every template.
 
-The authentication hook resolves `session["user_id"]` to a real user. Missing or invalid accounts are redirected to `/login`. Protected views then run inside the `shared_progress` wrapper: it loads both practice modes from SQLite, validates their question-bank fingerprint, runs the view, and persists changed states in one transaction. A changed question bank clears all course data at startup and shows a message. The wrapper checks both the active fingerprint and generation inside its transaction; stale workers return 503 before writing. Legacy cookie import is disabled permanently after the first course reset.
+The authentication hook resolves `session["user_id"]` to a real user. Missing or invalid accounts are redirected to `/login`. Protected views then run inside the `shared_progress` wrapper: it loads both practice modes from SQLite, defensively drops question IDs that are no longer answerable, runs the view, and persists changed states in one transaction. Bank maintenance is silent — no flash or banner. The wrapper checks the structural bank generation inside its transaction; a worker started from an older question set returns 503 before writing, while cosmetic edits keep the generation and never block sibling workers. Legacy cookie import is disabled permanently after the first structural change.
 
 The routes use the Post/Redirect/Get pattern after answer submissions. This prevents a normal browser refresh from resubmitting the form.
 
@@ -605,7 +630,7 @@ Each state dictionary contains fields such as:
 | `review_shortages` | Finite completion metadata when a chapter has too few distinct live questions |
 | `feedback` | Temporary result data for the answered question |
 
-The signed session cookie retains authentication and flash messages only. On an already authenticated device, valid legacy cookie progress can be imported when no server row exists for that mode and the cookie’s question-bank fingerprint matches the loaded bank; existing server state always wins. A null state is retained after reset or invalidation to prevent stale devices from restoring cleared progress. Answer and next forms carry the current answer token, preventing stale devices from answering or advancing a later question. Authenticated responses use `Cache-Control: no-store`.
+The signed session cookie retains authentication and flash messages only. On an already authenticated device, valid legacy cookie progress can be imported when no server row exists for that mode, the cookie's question-bank fingerprint matches the loaded bank, and the bank generation has never moved; existing server state always wins. A null state is retained after reset or invalidation to prevent stale devices from restoring cleared progress. Answer and next forms carry the current answer token, preventing stale devices from answering or advancing a later question. Authenticated responses use `Cache-Control: no-store`.
 
 Old Normal progress remains valid without fairness fields; the next new Normal round initializes them defensively. Old unfinished Review progress without `review_items` cannot preserve occurrence roles safely, so validation clears only that Review row to a null tombstone. Wrong questions, weak points, attempts, Normal progress and users remain intact.
 
@@ -737,7 +762,7 @@ The server repeats important validation, so client-side JavaScript is not treate
 | Column | Purpose |
 |---|---|
 | `learner_id` / `mode` | Composite primary key, one round per account and practice mode |
-| `bank_version` | Question-bank fingerprint used to invalidate obsolete rounds |
+| `bank_version` | Last bank fingerprint that wrote the row; informational only — rounds survive cosmetic bank edits and are reconciled per question instead |
 | `state` | JSON round state, or SQL NULL for cleared progress |
 
 ### `attempts`
@@ -796,6 +821,7 @@ The composite primary key `(learner_id, question_id)` guarantees one current cor
 | `selected_answers` | JSON array of the saved selection, `NULL` until answered |
 | `is_correct` | Graded outcome, `NULL` until submission |
 | `answered_at` | UTC ISO timestamp of the latest save, `NULL` when cleared |
+| `grading_fingerprint` | The question's grading identity at creation; detects drifted slots in historical reports, `NULL` for pre-tracking exams |
 
 The question set is fixed at creation and never re-drawn, so refreshes, reopens, and cross-device resumes all see identical slots. Submission flips `status` with a conditional `UPDATE ... WHERE status = 'in_progress'`, which makes repeated submits no-ops before any attempt or mistake side effects run.
 
@@ -810,6 +836,27 @@ The question set is fixed at creation and never re-drawn, so refreshes, reopens,
 | `updated_at` | Most recent state change |
 
 Every query and write is learner-scoped. Question content and chapter titles remain in the live `QuestionRepository`; only stable IDs are persisted.
+
+### `question_registry`
+
+| Column | Purpose |
+|---|---|
+| `question_id` | Permanent question identity (primary key) |
+| `status` | `active` while in the bank, `retired` after deletion; rows are never removed |
+| `question_type` | Grading identity: `single` or `multiple` at last sight |
+| `option_ids` | Grading identity: JSON array of the sorted option IDs |
+| `correct_answers` | Grading identity: JSON array of the sorted correct option IDs |
+| `content_fingerprint` | SHA-256 over every validated content field of the normalized model |
+| `first_seen_at` / `last_seen_at` | UTC ISO timestamps of first sight and latest registry change |
+| `retired_at` | Deletion timestamp, `NULL` while active |
+
+### `question_bank_state`
+
+| Column | Purpose |
+|---|---|
+| `id` | Singleton guard (`CHECK (id = 1)`) |
+| `bank_version` | Raw-bytes SHA-256 of the last loaded `questions.json`; diagnostic and legacy-cookie gating only |
+| `generation` | Structural bank generation; bumped only when the question set or a grading identity changes |
 
 ## 12. Question-Bank Contract
 
@@ -855,9 +902,9 @@ A minimal bilingual question looks like this:
 
 The `text_zh` and `explanation_zh` fields are optional. English remains the authoritative question content. Option IDs, rather than display positions such as A or B, define the answer.
 
-Question IDs should remain stable after learners have generated history. Any file-byte change now resets all learner course data at startup, including when IDs are reused. Switching back does not restore prior data. Missing-ID filtering remains defensive behavior. In a catalogued bank, `chapter_ids` must be a non-empty array of unique chapter IDs belonging to the question's `source_id`; the legacy singular `chapter_id` remains accepted for backward compatibility.
+Question IDs are permanent identities and must remain stable; ordinary bank maintenance (wording, translations, explanations, option text or order, added wrong options, section/pages, formatting) is reconciled per question at startup and never clears learner history. Changing a question's type, its correct-answer set, or removing/renaming an existing option ID changes its grading identity and clears exactly that question's attempts and correction state. Deleting a question keeps its attempts and silently drops its correction/SRS state and review references; the retired ID stays reserved forever, so re-adding the same question restores it, while reusing the ID for a different question fails startup. In a catalogued bank, `chapter_ids` must be a non-empty array of unique chapter IDs belonging to the question's `source_id`; the legacy singular `chapter_id` remains accepted for backward compatibility.
 
-The bundled bank catalogue is maintained by `scripts/migrate_question_metadata.py`. The repository contained no prior question-generation script, so this migration is the reproducible post-generation step for citation-bearing banks. New generators should emit schema v2 metadata directly.
+The bundled bank catalogue is maintained as schema v2 metadata directly; new generators should emit `source_id`, `chapter_ids`, `section`, and `pages` from the start.
 
 ## 13. End-to-End Request Examples
 
@@ -962,6 +1009,7 @@ The tests use temporary question/glossary files and temporary SQLite databases, 
 | `tests/test_bundled_glossary.py` | Bundled glossary validity, coverage, scale, aliases, and categories |
 | `tests/test_repositories.py` | SQLite repositories, JSON weak-point persistence, and account-scoped queries |
 | `tests/test_question_loader.py` | JSON parsing, validation, and bilingual fields |
+| `tests/test_question_bank_sync.py` | Per-question reconciliation: content edits preserve everything, grading changes clear one question, deletions keep attempts but drop state, weak-point/progress/exam reconciliation, resurrection and retired-ID reuse, bootstrap and concurrent startup |
 | `tests/test_question_metadata_migration.py` | Repeatable conversion of legacy source citations into schema-v2 metadata |
 | `tests/test_grading_service.py` | Exact single/multiple grading and invalid options |
 | `tests/test_quiz_service.py` | Limits, coverage cycles/boundaries/scope/all, stable option shuffle, review selection |
@@ -1008,7 +1056,7 @@ At startup:
 1. Flask configuration is created.
 2. `questions.json` is read and fully validated.
 3. `glossary.json` is read and fully validated.
-4. `instance/mcq.db` and the current tables are created if absent, then the question-bank fingerprint is synchronized.
+4. `instance/mcq.db` and the current tables are created if absent, then the question bank is reconciled per question against the persistent registry.
 5. Repositories and services are assembled.
 6. Routes are registered.
 7. The Werkzeug development server listens on `http://127.0.0.1:5000` with debug enabled and the reloader disabled.
@@ -1055,6 +1103,7 @@ Developers should preserve these rules when extending the application:
 20. Keep glossary labels globally unambiguous; keep glossary content outside SQLite and the question-bank fingerprint.
 21. An uncorrected wrong question never carries an SRS due timestamp; a failed review always returns to the correction flow before being rescheduled at level 0.
 22. Keep SRS timestamps as UTC ISO strings, evaluate "due" with `next_review_at <= now` (inclusive), and keep the interval ladder in `srs_service.SRS_INTERVAL_DAYS` rather than scattering numbers across layers.
+23. A `question.id` is a permanent identity: never change it for content edits, never recycle a retired ID for a different question, and never judge question identity from text.
 
 ## 17. Common Extension Points
 
@@ -1066,7 +1115,7 @@ Developers should preserve these rules when extending the application:
 - Extend Normal selection: keep it limited to live eligible IDs plus `fairness_scope`/`fairness_remaining_ids`; do not inject review signals.
 - Extend Review selection: add role-bearing candidate rules through weak/correction services; do not touch the Normal bag.
 - Add a new learning mode: extend `QuizMode`, define its queue and persistence rules, add an independent mode in the progress table, and update the database mode constraint if attempts use the new mode.
-- Replace the question bank: validate the new file and restart all workers. Any byte change clears every account's course data, preserving only accounts and internal bank metadata.
+- Replace the question bank: validate the new file with `scripts/check_question_bank.py` and restart all workers. Ordinary maintenance is reconciled per question without clearing learner data; only grading-identity changes and deletions affect exactly the involved questions.
 
 ## 18. Local Production Deployment
 
@@ -1266,20 +1315,44 @@ are required. The exact authoring contracts are maintained in
 
 ## Course replacement and global bank state
 
-`question_bank_state` stores one active SHA-256 fingerprint and a reset generation.
-After full bank validation, `QuestionBankStateRepository.synchronize()` uses `BEGIN IMMEDIATE`
-to compare this fingerprint, delete all rows from `attempts`, `wrong_questions`,
-`weak_knowledge_points`, `quiz_progress`, `exam_questions`, and `exam_sessions`, reset the attempt sequence, and update the fingerprint/generation
-atomically. Users are preserved unchanged. Concurrent workers loading the same bank
-observe the new fingerprint and do not reset again. Invalid banks fail before clearing.
-Even whitespace-only edits trigger replacement; files are loaded at startup, so restart
-all workers after replacement. An old worker cannot write after a new generation activates.
+`question_registry` stores one permanent row per question ID with its grading
+identity (type, option-ID set, correct-answer set) and a content fingerprint.
+At startup, `QuestionBankSyncService.synchronize()` uses `BEGIN IMMEDIATE` to
+diff the freshly loaded bank against this registry by stable `question.id` and
+applies only what actually changed, atomically:
 
-The fingerprint is the SHA-256 of the raw `questions.json` bytes only.
-`glossary.json` bytes are deliberately excluded, so glossary maintenance never
-causes a course reset.
+- **content-only changes** (wording, translations, explanations, option text
+  or order, added wrong options, section/pages, JSON formatting) keep every
+  learner record and do not move the generation;
+- **grading-identity changes** (type, correct-answer set, removed/renamed
+  option IDs) delete exactly that question's `attempts` and `wrong_questions`
+  rows for every account and strip it from weak-point verifications,
+  unfinished rounds, and unfinished exams;
+- **deleted questions** keep their `attempts` but silently lose their
+  `wrong_questions`/SRS state, weak-point references, progress-queue entries,
+  and unfinished-exam slots (positions resequenced, `question_count` shrunk);
+- **new questions** are registered without touching any history;
+- **retired IDs** are tombstoned forever: re-adding the same question with an
+  identical grading identity resurrects it, while reusing the ID for a
+  different question fails startup before anything is written.
 
-On first upgrade, existing progress fingerprints identify the previous bank. If there
-is history but no progress fingerprint, course data is cleared conservatively. An
-unchanged identifiable bank retains its data. After any reset, legacy browser queues
-cannot be imported, even if a previous bank is restored later.
+Users are preserved unchanged, and no flash, banner, or confirmation is ever
+shown for bank maintenance. Concurrent workers serialize on the same
+transaction: the second worker's diff simply finds nothing to do, so
+reconciliation never runs twice. Invalid banks and retired-ID reuse fail
+before any write. The structural `generation` in `question_bank_state`
+advances only when the question set or a grading identity changes; a worker
+whose generation no longer matches gets a 503 before it can write, while
+cosmetic edits let unchanged workers keep serving.
+
+The raw-bytes SHA-256 of `questions.json` is still recorded in
+`question_bank_state.bank_version`, but only for diagnostics and legacy-cookie
+gating — never as a reset trigger. `glossary.json` bytes remain excluded, so
+glossary maintenance never affects learner data.
+
+On first upgrade from a pre-registry database, the currently deployed bank is
+adopted as the baseline: every existing learner record is preserved, question
+IDs found only in learner tables become retired tombstones and are reconciled
+like deletions, and no data is cleared. `scripts/check_question_bank.py`
+validates a candidate bank and dry-runs this diff read-only before deployment,
+exiting non-zero when a retired ID is being reused.

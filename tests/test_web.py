@@ -765,9 +765,7 @@ def test_account_and_wrong_question_survive_app_restart(tmp_path, valid_payload)
     assert record.wrong_count == 1
 
 
-def test_changed_question_bank_resets_progress_with_message(
-    tmp_path, valid_payload
-):
+def test_changed_question_bank_preserves_progress_silently(tmp_path, valid_payload):
     first_app = make_app(tmp_path, valid_payload)
     first_client = first_app.test_client()
     register(first_client, "learner")
@@ -784,8 +782,10 @@ def test_changed_question_bank_resets_progress_with_message(
 
     home = restarted_client.get("/")
 
-    assert "继续正常练习" not in home.text
-    assert "检测到题库更新" in home.text
+    # A wording edit is content-only: the round resumes in place and no
+    # bank-update banner is ever shown.
+    assert "继续正常练习" in home.text
+    assert "检测到题库更新" not in home.text
 
 
 def test_expired_answer_token_uses_chinese_error_page(tmp_path, valid_payload):

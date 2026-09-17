@@ -15,9 +15,21 @@ class ExamRepository:
         self.database = database
 
     def create(
-        self, session: ExamSession, question_ids: tuple[str, ...]
+        self,
+        session: ExamSession,
+        question_ids: tuple[str, ...],
+        grading_fingerprints: tuple[str | None, ...] | None = None,
     ) -> None:
-        """Persist a new exam together with its fixed, deduplicated slots."""
+        """Persist a new exam together with its fixed, deduplicated slots.
+
+        ``grading_fingerprints`` records each question's grading identity at
+        creation time so later reports can detect slots whose grading rule
+        drifted; omitted fingerprints stay ``NULL`` (legacy behavior).
+        """
+        if grading_fingerprints is None:
+            grading_fingerprints = (None,) * len(question_ids)
+        if len(grading_fingerprints) != len(question_ids):
+            raise ValueError("grading_fingerprints must align with question_ids")
         with self.database.connect() as connection:
             connection.execute(
                 """
@@ -44,13 +56,16 @@ class ExamRepository:
                     session.duration_seconds,
                 ),
             )
-            for position, question_id in enumerate(question_ids):
+            for position, (question_id, fingerprint) in enumerate(
+                zip(question_ids, grading_fingerprints)
+            ):
                 connection.execute(
                     """
-                    INSERT INTO exam_questions (exam_id, position, question_id)
-                    VALUES (?, ?, ?)
+                    INSERT INTO exam_questions (
+                        exam_id, position, question_id, grading_fingerprint
+                    ) VALUES (?, ?, ?, ?)
                     """,
-                    (session.id, position, question_id),
+                    (session.id, position, question_id, fingerprint),
                 )
 
     def get_for_learner(
@@ -121,6 +136,26 @@ class ExamRepository:
             ).fetchall()
         return [self._to_session(row) for row in rows]
 
+    def list_in_progress(self) -> list[ExamSession]:
+        """Return every learner's unfinished exams (startup reconciliation)."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM exam_sessions
+                WHERE status = 'in_progress'
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+        return [self._to_session(row) for row in rows]
+
+    def distinct_question_ids(self) -> set[str]:
+        """Return every question ID referenced by any exam slot."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT question_id FROM exam_questions"
+            ).fetchall()
+        return {row["question_id"] for row in rows}
+
     def get_questions(self, exam_id: str) -> list[ExamQuestion]:
         """Return the fixed question slots of one exam in exam order."""
         with self.database.connect() as connection:
@@ -184,6 +219,59 @@ class ExamRepository:
                     """,
                     (int(is_correct), exam_id, position),
                 )
+
+    def replace_slots(self, exam_id: str, slots: list[ExamQuestion]) -> None:
+        """Rewrite one exam's slots in order, resequencing positions.
+
+        Used to drop slots whose question left the bank or changed grading.
+        All rows are deleted before reinsertion so the
+        ``UNIQUE (exam_id, question_id)`` constraint cannot collide with a
+        shifted position, and every kept slot's saved answer state survives.
+        """
+        with self.database.connect() as connection:
+            connection.execute(
+                "DELETE FROM exam_questions WHERE exam_id = ?", (exam_id,)
+            )
+            for position, slot in enumerate(slots):
+                connection.execute(
+                    """
+                    INSERT INTO exam_questions (
+                        exam_id, position, question_id, selected_answers,
+                        is_correct, answered_at, grading_fingerprint
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        exam_id,
+                        position,
+                        slot.question_id,
+                        (
+                            json.dumps(slot.selected_answers, ensure_ascii=False)
+                            if slot.selected_answers
+                            else None
+                        ),
+                        (
+                            None
+                            if slot.is_correct is None
+                            else int(slot.is_correct)
+                        ),
+                        slot.answered_at,
+                        slot.grading_fingerprint,
+                    ),
+                )
+
+    def update_layout(
+        self, exam_id: str, *, question_count: int, current_position: int
+    ) -> None:
+        """Store the exam's layout after its slot set changed."""
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE exam_sessions
+                SET question_count = ?, current_position = ?
+                WHERE id = ?
+                """,
+                (question_count, current_position, exam_id),
+            )
 
     def finalize(
         self,
@@ -270,4 +358,5 @@ class ExamRepository:
                 None if row["is_correct"] is None else bool(row["is_correct"])
             ),
             answered_at=row["answered_at"],
+            grading_fingerprint=row["grading_fingerprint"],
         )

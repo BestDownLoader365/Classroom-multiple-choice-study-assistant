@@ -18,6 +18,7 @@ from app.repositories import (
     ProgressRepository,
     QuestionBankStateRepository,
     QuestionLoader,
+    QuestionRegistryRepository,
     QuestionRepository,
     RateLimitRepository,
     UserRepository,
@@ -29,6 +30,7 @@ from app.services import (
     ExamService,
     GlobalStatisticsService,
     GradingService,
+    QuestionBankSyncService,
     QuizService,
     StatisticsService,
     WeakKnowledgePointService,
@@ -62,6 +64,9 @@ class AppServices:
     exam_service: ExamService
     statistics_service: StatisticsService
     global_statistics_service: GlobalStatisticsService
+    question_bank_state_repository: QuestionBankStateRepository
+    question_registry_repository: QuestionRegistryRepository
+    question_bank_sync_service: QuestionBankSyncService
 
 
 def create_app(test_config: dict[str, Any] | None = None) -> Flask:
@@ -120,9 +125,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     database = Database(Path(app.config["DATABASE"]).resolve())
     database.initialize()
     question_bank_state_repository = QuestionBankStateRepository(database)
-    bank_generation = question_bank_state_repository.synchronize(
-        question_bank_version
-    )
+    question_registry_repository = QuestionRegistryRepository(database)
     rate_limit_repository = RateLimitRepository(database)
     progress_repository = ProgressRepository(database)
     user_repository = UserRepository(database)
@@ -136,7 +139,6 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         wrong_question_repository=wrong_question_repository,
         verification_target=int(app.config["KNOWLEDGE_VERIFICATION_TARGET"]),
     )
-    weak_knowledge_point_service.backfill_existing_wrong_questions()
     wrong_question_service = WrongQuestionService(
         attempt_repository=attempt_repository,
         wrong_question_repository=wrong_question_repository,
@@ -156,6 +158,22 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         grading_service=grading_service,
         wrong_question_service=wrong_question_service,
     )
+    # Reconcile the freshly loaded bank against learner data before any
+    # request can be served; only then backfill weak chapters for the
+    # surviving wrong-question rows.
+    question_bank_sync_service = QuestionBankSyncService(
+        database=database,
+        state_repository=question_bank_state_repository,
+        registry_repository=question_registry_repository,
+        question_repository=question_repository,
+        attempt_repository=attempt_repository,
+        wrong_question_repository=wrong_question_repository,
+        weak_knowledge_point_service=weak_knowledge_point_service,
+        progress_repository=progress_repository,
+        exam_service=exam_service,
+    )
+    bank_generation = question_bank_sync_service.synchronize(question_bank_version)
+    weak_knowledge_point_service.backfill_existing_wrong_questions()
     statistics_service = StatisticsService(
         attempt_repository=attempt_repository,
         question_repository=question_repository,
@@ -185,6 +203,9 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         exam_service=exam_service,
         statistics_service=statistics_service,
         global_statistics_service=global_statistics_service,
+        question_bank_state_repository=question_bank_state_repository,
+        question_registry_repository=question_registry_repository,
+        question_bank_sync_service=question_bank_sync_service,
     )
     app.extensions["mcq_services"] = services
 

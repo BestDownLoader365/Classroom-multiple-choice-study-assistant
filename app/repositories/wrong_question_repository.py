@@ -162,6 +162,32 @@ class WrongQuestionRepository:
             )
         return cursor.rowcount
 
+    def delete_for_questions(self, question_ids) -> int:
+        """Delete every learner's correction/SRS state for the given questions.
+
+        Used when a question leaves the bank or its grading identity changes:
+        the record cannot be answered meaningfully anymore, so it is dropped
+        silently for every account at once.
+        """
+        ids = [str(question_id) for question_id in question_ids]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                f"DELETE FROM wrong_questions WHERE question_id IN ({placeholders})",
+                ids,
+            )
+        return cursor.rowcount
+
+    def distinct_question_ids(self) -> set[str]:
+        """Return every question ID referenced by any wrong-question row."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT question_id FROM wrong_questions"
+            ).fetchall()
+        return {row["question_id"] for row in rows}
+
     @staticmethod
     def _to_model(row: sqlite3.Row) -> WrongQuestion:
         return WrongQuestion(

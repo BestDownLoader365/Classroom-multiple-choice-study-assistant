@@ -30,6 +30,7 @@ from app.repositories import ExamRepository, QuestionRepository
 
 from . import srs_service as srs
 from .grading_service import GradingService
+from .question_fingerprint import grading_fingerprint
 from .wrong_question_service import WrongQuestionService
 
 LOGGER = logging.getLogger(__name__)
@@ -190,6 +191,13 @@ class ExamService:
             else None
         )
         question_ids = tuple(self.sampler(list(available_ids), question_count))
+        questions_by_id = {
+            question.id: question for question in self.question_repository.get_all()
+        }
+        fingerprints = tuple(
+            grading_fingerprint(questions_by_id[question_id])
+            for question_id in question_ids
+        )
         session = ExamSession(
             id=uuid.uuid4().hex,
             learner_id=learner_id,
@@ -201,7 +209,7 @@ class ExamService:
             started_at=started_at,
             deadline_at=deadline_at,
         )
-        self.exam_repository.create(session, question_ids)
+        self.exam_repository.create(session, question_ids, fingerprints)
         return session
 
     def get_session(
@@ -249,6 +257,76 @@ class ExamService:
     def get_questions(self, session: ExamSession) -> list[ExamQuestion]:
         """Return the exam's fixed question slots in exam order."""
         return self.exam_repository.get_questions(session.id)
+
+    def reconcile_session(
+        self,
+        session: ExamSession,
+        *,
+        unusable_ids: set[str] | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Silently drop slots whose question left the bank or changed grading.
+
+        An unfinished exam simply continues with the remaining slots: the
+        positions are resequenced, ``question_count`` shrinks and the saved
+        position is clamped.  ``unusable_ids`` is the authoritative set during
+        startup reconciliation; without it, a slot is unusable when its
+        question is gone or its stored grading fingerprint drifted.  An exam
+        left with no slots at all is finalized quietly with a zero score.
+        Returns whether anything changed.
+        """
+        if session.status is not ExamStatus.IN_PROGRESS:
+            return False
+        slots = self.exam_repository.get_questions(session.id)
+
+        def _usable(slot: ExamQuestion) -> bool:
+            if unusable_ids is not None:
+                return slot.question_id not in unusable_ids
+            question = self.question_repository.get_by_id(slot.question_id)
+            if question is None:
+                return False
+            return (
+                slot.grading_fingerprint is None
+                or slot.grading_fingerprint == grading_fingerprint(question)
+            )
+
+        live = [slot for slot in slots if _usable(slot)]
+        if len(live) == len(slots):
+            return False
+        moment = now or srs.utc_now()
+        self.exam_repository.replace_slots(session.id, live)
+        if live:
+            self.exam_repository.update_layout(
+                session.id,
+                question_count=len(live),
+                current_position=min(session.current_position, len(live) - 1),
+            )
+            return True
+        self.exam_repository.update_layout(
+            session.id, question_count=0, current_position=0
+        )
+        elapsed = int((moment - srs.parse_timestamp(session.started_at)).total_seconds())
+        if session.time_limit_seconds is not None:
+            elapsed = min(elapsed, session.time_limit_seconds)
+        self.exam_repository.finalize(
+            session.id,
+            status=ExamStatus.SUBMITTED,
+            submitted_at=moment.isoformat(),
+            correct_count=0,
+            duration_seconds=max(0, elapsed),
+        )
+        return True
+
+    def reconcile_all_in_progress(
+        self, unusable_ids: set[str], *, now: datetime | None = None
+    ) -> int:
+        """Reconcile every unfinished exam against a changed question bank."""
+        reconciled = 0
+        for session in self.exam_repository.list_in_progress():
+            reconciled += int(
+                self.reconcile_session(session, unusable_ids=unusable_ids, now=now)
+            )
+        return reconciled
 
     @staticmethod
     def is_expired(session: ExamSession, now: datetime) -> bool:
@@ -325,6 +403,11 @@ class ExamService:
         session = self.get_session(learner_id, exam_id)
         if session.status.finished:
             return session
+        # Drop slots whose question left the bank or changed grading before
+        # grading, so saved selections are never validated against a rule
+        # they were not made under.
+        self.reconcile_session(session, now=moment)
+        session = self.get_session(learner_id, exam_id)
         final_status = (
             ExamStatus.EXPIRED
             if self.is_expired(session, moment)
@@ -380,17 +463,36 @@ class ExamService:
         return self.get_session(learner_id, exam_id)
 
     def get_report(self, learner_id: str, exam_id: str) -> ExamReport:
-        """Build the immutable score report of a finished exam."""
+        """Build the immutable score report of a finished exam.
+
+        Slots whose question has since been deleted — or whose grading
+        identity drifted from the fingerprint recorded at exam creation — are
+        left out of the breakdown, and the displayed score is recomputed over
+        the remaining valid slots so the totals always agree.  Stored values
+        are never rewritten.
+        """
         session = self.get_session(learner_id, exam_id)
         if not session.status.finished:
             raise ExamStateError("本场考试尚未交卷，还没有成绩报告。")
         slots = self.exam_repository.get_questions(exam_id)
         items: list[ExamQuestionReport] = []
+        excluded = False
         for slot in slots:
             question = self.question_repository.get_by_id(slot.question_id)
             if question is None:
+                excluded = True
                 LOGGER.warning(
                     'Exam question "%s" no longer exists in questions.json.',
+                    slot.question_id,
+                )
+                continue
+            if (
+                slot.grading_fingerprint is not None
+                and slot.grading_fingerprint != grading_fingerprint(question)
+            ):
+                excluded = True
+                LOGGER.info(
+                    'Exam question "%s" changed grading since this exam ran.',
                     slot.question_id,
                 )
                 continue
@@ -404,11 +506,10 @@ class ExamService:
                 )
             )
         chapters = self._chapter_breakdown(items)
-        correct_count = (
-            session.correct_count
-            if session.correct_count is not None
-            else sum(item.is_correct for item in items)
-        )
+        if excluded or session.correct_count is None:
+            correct_count = sum(item.is_correct for item in items)
+        else:
+            correct_count = session.correct_count
         return ExamReport(
             session=session,
             items=tuple(items),

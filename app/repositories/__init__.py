@@ -8,6 +8,7 @@ from .glossary_repository import GlossaryRepository
 from .progress_repository import ProgressRepository
 from .question_bank_state_repository import QuestionBankStateRepository
 from .question_loader import QuestionBankError, QuestionLoader
+from .question_registry_repository import QuestionRegistryRepository
 from .question_repository import QuestionRepository
 from .rate_limit_repository import RateLimitRepository
 from .user_repository import UserRepository, UsernameAlreadyExistsError
@@ -25,6 +26,7 @@ __all__ = [
     "QuestionBankError",
     "QuestionBankStateRepository",
     "QuestionLoader",
+    "QuestionRegistryRepository",
     "QuestionRepository",
     "RateLimitRepository",
     "UserRepository",

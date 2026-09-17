@@ -164,20 +164,27 @@ def test_legacy_cookie_imported_once_without_overwriting_shared_progress(tmp_pat
     assert state(app, user, QuizMode.NORMAL) == restarted
 
 
-def test_new_device_invalidates_both_modes_after_bank_update(tmp_path, valid_payload):
+def test_content_only_bank_update_preserves_all_learning_data(tmp_path, valid_payload):
     app, first, second, user, path = setup_devices(tmp_path, valid_payload, QuizMode.REVIEW)
     first.post('/quiz/start')
     valid_payload['questions'][0]['text'] = 'Updated question'
     restarted = make_app(tmp_path, valid_payload)
     device = restarted.test_client()
     response = device.post('/login', data={'username': 'learner', 'password': 'secret1'}, follow_redirects=True)
-    assert '检测到题库更新' in response.text
-    for mode in QuizMode:
-        assert state(restarted, user, mode) is None
-    assert restarted.extensions['mcq_services'].attempt_repository.count() == 0
+    assert '检测到题库更新' not in response.text
+    services = restarted.extensions['mcq_services']
+    for mode in (QuizMode.NORMAL, QuizMode.REVIEW):
+        assert state(restarted, user, mode) is not None
+    assert services.attempt_repository.count() == 1
+    assert services.wrong_question_repository.get_by_id(user, 'q1') is not None
+    # The generation did not move, so a worker running the pre-edit bank
+    # keeps serving instead of being fenced off with a 503.
+    assert first.post('/quiz/start').status_code == 302
+    again = create_app(dict(restarted.config))
+    assert again.extensions['mcq_services'].attempt_repository.count() == 1
 
 
-def test_bank_change_clears_every_account_and_blocks_old_worker(tmp_path, valid_payload):
+def test_structural_bank_change_reconciles_data_and_blocks_old_worker(tmp_path, valid_payload):
     app, first, second, user, path = setup_devices(tmp_path, valid_payload, QuizMode.REVIEW)
     outsider = app.test_client()
     register(outsider, 'outsider')
@@ -187,13 +194,20 @@ def test_bank_change_clears_every_account_and_blocks_old_worker(tmp_path, valid_
     outsider.post('/quiz/start')
     with services.progress_repository.database.connect() as connection:
         accounts = [tuple(row) for row in connection.execute('SELECT * FROM users ORDER BY id')]
-    valid_payload['questions'][0]['text'] = 'Another course, reused ID'
+    valid_payload['questions'][0]['correct_answers'] = ['1']
     restarted = make_app(tmp_path, valid_payload)
     database = restarted.extensions['mcq_services'].progress_repository.database
     with database.connect() as connection:
         assert [tuple(row) for row in connection.execute('SELECT * FROM users ORDER BY id')] == accounts
-        for table in ('attempts', 'wrong_questions', 'quiz_progress'):
-            assert connection.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
+        # Only the grading-changed question lost its data, for every account.
+        assert connection.execute("SELECT COUNT(*) FROM attempts WHERE question_id = 'q1'").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM wrong_questions").fetchone()[0] == 0
+    # The learner's single-question review round is tombstoned; the
+    # outsider's normal round silently continues without q1.
+    assert state(restarted, user, QuizMode.REVIEW) is None
+    outsider_normal = state(restarted, other_user, QuizMode.NORMAL)
+    assert outsider_normal is not None
+    assert outsider_normal['question_ids'] == ['q2']
     assert first.post('/quiz/start').status_code == 503
     new_client = login(restarted)
     new_client.post('/quiz/start')
@@ -213,19 +227,25 @@ def test_invalid_bank_does_not_clear_learning_data(tmp_path, valid_payload):
     assert state(app, user, QuizMode.REVIEW) is not None
 
 
-def test_bank_reset_disables_legacy_cookie_even_when_switching_back(tmp_path, valid_payload):
+def test_structural_change_disables_legacy_cookie_even_when_switching_back(tmp_path, valid_payload):
     import copy
     app, first, second, user, path = setup_devices(tmp_path, valid_payload, QuizMode.NORMAL)
-    version, old_state = app.extensions['mcq_services'].progress_repository.get(user, QuizMode.NORMAL)
+    repository = app.extensions['mcq_services'].progress_repository
+    version, old_state = repository.get(user, QuizMode.NORMAL)
     changed = copy.deepcopy(valid_payload)
-    changed['title'] = 'Another course'
+    changed['questions'] = changed['questions'][:1]  # q2 leaves the bank
     make_app(tmp_path, changed)
     restored = make_app(tmp_path, valid_payload)
+    # Simulate a pre-upgrade device: no server row, only a cookie queue.
+    with repository.database.connect() as connection:
+        connection.execute('DELETE FROM quiz_progress WHERE learner_id = ?', (user,))
     client = login(restored)
     with client.session_transaction() as cookie:
         cookie['question_bank_version'] = version
         cookie['quiz_progress_normal'] = old_state
     client.get('/')
+    # The generation moved twice (delete, then resurrect), so the ancient
+    # cookie can no longer be imported even though the bank bytes match.
     assert state(restored, user, QuizMode.NORMAL) is None
 
 
@@ -235,8 +255,15 @@ def test_upgrade_without_global_fingerprint(tmp_path, valid_payload, with_progre
     database = app.extensions['mcq_services'].progress_repository.database
     with database.connect() as connection:
         connection.execute('DROP TABLE question_bank_state')
+        connection.execute('DROP TABLE question_registry')
         if not with_progress:
             connection.execute('DELETE FROM quiz_progress')
     restarted = create_app(dict(app.config))
-    assert restarted.extensions['mcq_services'].attempt_repository.count() == (1 if with_progress else 0)
+    restarted_services = restarted.extensions['mcq_services']
+    # The bootstrap adopts the current bank as the baseline and preserves
+    # every existing learner record instead of wiping it.
+    assert restarted_services.attempt_repository.count() == 1
+    assert restarted_services.wrong_question_repository.get_by_id(user, 'q1') is not None
+    assert restarted_services.question_registry_repository.count() == 2
     assert login(restarted).get('/').status_code == 200
+    assert (state(restarted, user, QuizMode.REVIEW) is not None) == with_progress

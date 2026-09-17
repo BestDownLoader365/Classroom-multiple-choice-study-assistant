@@ -21,6 +21,22 @@ class ProgressRepository:
             return None
         return row["bank_version"], json.loads(row["state"]) if row["state"] else None
 
+    def get_all(self) -> list[tuple[str, QuizMode, str, Any]]:
+        """Return every stored progress row for startup reconciliation."""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT learner_id, mode, bank_version, state FROM quiz_progress"
+            ).fetchall()
+        return [
+            (
+                row["learner_id"],
+                QuizMode(row["mode"]),
+                row["bank_version"],
+                json.loads(row["state"]) if row["state"] else None,
+            )
+            for row in rows
+        ]
+
     def save(self, learner_id: str, mode: QuizMode, bank_version: str, state: Any) -> None:
         # A null state is a tombstone: an old device must not restore a reset round.
         with self.database.connect() as connection:

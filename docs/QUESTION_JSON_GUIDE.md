@@ -18,7 +18,7 @@
 
 当前代码不会解释或渲染图片、音频、视频、公式对象、填空题、排序题、主观题等额外题型。即使把 `image`、`difficulty`、`tags` 等未知字段写入 JSON，Loader 也会忽略它们，界面不会自动获得对应功能。
 
-应用启动时会同时校验 `questions.json` 和 `glossary.json`，两个文件都必须有效。只有 `questions.json` 的原始字节参与全局题库指纹：它的任意字节变化都会清空所有账号的课程学习数据；单独修改 `glossary.json` 不会触发清空。
+应用启动时会同时校验 `questions.json` 和 `glossary.json`，两个文件都必须有效。题库维护按 `question.id` 逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该题自身的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py` 预检题库变更的实际影响。
 
 ## 2. 新题库的推荐完整结构
 
@@ -191,14 +191,15 @@ JSON 文件必须使用 UTF-8 编码。标准 JSON 不允许注释、尾随逗�
 | `section` | 可选 | 字符串 | 原始资料中的小节名或内容位置。 |
 | `pages` | 可选 | 正整数数组 | 页码必须大于等于 1 且不能重复；没有页码时可以省略或写 `[]`。 |
 
-### 6.1 题目 ID 必须稳定
+### 6.1 题目 ID 必须稳定且永不复用
 
-用户作答记录和错题记录通过 `question.id` 关联题目。因此：
+用户作答记录和错题记录通过 `question.id` 关联题目。系统启动时会按 ID 逐题对比新旧题库（grading identity = `type` + 已有 option ID 集合 + `correct_answers` 集合）：
 
-- 修正题干、选项措辞或解析时，保留原 question ID。
-- 删除题目后，不要把它的 ID 分配给一道无关的新题。
+- 修正题干、翻译、解析、选项文案、选项顺序、section/pages，或新增一个错误选项时，**保留原 question ID**，该题的全部学习历史自动保留。
+- 修改题型、正确答案集合，或删除/重命名已有 option ID，属于判题规则变化：该题的历史作答和错题状态会被定向清理（不影响其他题），请谨慎操作并确认确有必要。
+- 删除题目后，该 ID 会被永久保留为退役状态，**不能再分配给另一道题**；把退役 ID 复用于判题规则不同的新题会导致应用拒绝启动（预检脚本会提前发现）。
+- 如果误删后想恢复，把原题按原 ID、原判题规则原样加回即可，系统会自动识别为同一道题的回归。
 - 替换为另一门课程并继续使用原数据库时，不要重新从通用的 `q001` 开始复用旧 ID。推荐加入课程命名空间，例如 `calculus-q001`、`history-q001`。
-- 如果确实要复用所有 ID，必须明确清空或迁移旧的学习记录；这属于数据库操作，不是更换 JSON 本身能够解决的问题。
 
 ### 6.2 一题属于多个章节
 
@@ -673,13 +674,7 @@ pytest -q
 
 同一道题不能同时提供 `chapter_id` 和 `chapter_ids`。
 
-如果需要迁移旧题库，可以使用：
-
-```bash
-python scripts/migrate_question_metadata.py old-questions.json --output questions.json
-```
-
-迁移脚本只能帮助整理已有结构化元数据和部分引用信息，不能代替人工审核答案、章节语义、source 归属或页码准确性。
+旧题库的结构化整理只能帮助归并已有元数据和部分引用信息，不能代替人工审核答案、章节语义、source 归属或页码准确性。
 
 ## 14. 发布前检查清单
 
@@ -689,7 +684,7 @@ python scripts/migrate_question_metadata.py old-questions.json --output question
 - [ ] `schema_version` 为 `2`。
 - [ ] 根标题与当前课程一致。
 - [ ] `sources` 和 `chapters` 均非空，所有 ID 唯一。
-- [ ] 所有 question ID 唯一、稳定，并且没有复用其他课程的历史 ID。
+- [ ] 所有 question ID 唯一、稳定，没有复用其他课程的历史 ID，也没有复用本题库中已删除题目的退役 ID。
 - [ ] 每题至少两个 option，且本题内 option ID 唯一。
 - [ ] 每个 `correct_answers` 值都能在本题 options 中找到。
 - [ ] 每道单选题恰好一个正确答案。

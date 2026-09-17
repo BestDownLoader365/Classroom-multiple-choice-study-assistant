@@ -127,9 +127,18 @@ class GlobalStatisticsService:
         self.display_tz = display_tz or timezone.utc
 
     def build_overview(self, *, now: datetime | None = None) -> GlobalOverviewData:
-        """Collect every global metric at ``now``."""
+        """Collect every global metric at ``now``.
+
+        As on the personal dashboard, attempts whose question has left the
+        bank stay stored but no longer count toward any number.
+        """
         moment = now or srs.utc_now()
-        attempts = self.attempt_repository.list_all()
+        live_ids = self.question_repository.ids()
+        attempts = [
+            attempt
+            for attempt in self.attempt_repository.list_all()
+            if attempt.question_id in live_ids
+        ]
         total = len(attempts)
         correct = sum(attempt.is_correct for attempt in attempts)
         week_cutoff = moment - timedelta(days=RECENT_WINDOW_DAYS)

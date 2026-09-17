@@ -173,7 +173,12 @@ class ExamSession:
 
 @dataclass(frozen=True)
 class ExamQuestion:
-    """One fixed question slot inside a mock exam."""
+    """One fixed question slot inside a mock exam.
+
+    ``grading_fingerprint`` records the question's grading identity at exam
+    creation so historical reports can detect slots whose grading rule has
+    since changed.  It is ``None`` for slots created before tracking existed.
+    """
 
     exam_id: str
     position: int
@@ -181,3 +186,34 @@ class ExamQuestion:
     selected_answers: tuple[str, ...] = ()
     is_correct: bool | None = None
     answered_at: str | None = None
+    grading_fingerprint: str | None = None
+
+
+class QuestionRegistryStatus(str, Enum):
+    """Lifecycle states of one tracked question identity."""
+
+    ACTIVE = "active"
+    RETIRED = "retired"
+
+
+@dataclass(frozen=True)
+class QuestionRegistryEntry:
+    """Persistent per-question identity record used for bank reconciliation.
+
+    ``question_type``, ``option_ids`` and ``correct_answers`` together form
+    the grading identity: historical answers stay meaningful exactly while
+    all three stay compatible.  ``content_fingerprint`` covers every other
+    validated field and only distinguishes cosmetic edits from no-ops.
+    A retired row is a tombstone: it is never deleted, so a deleted
+    question's ID can never be silently recycled for a different question.
+    """
+
+    question_id: str
+    status: QuestionRegistryStatus
+    question_type: str
+    option_ids: tuple[str, ...]
+    correct_answers: tuple[str, ...]
+    content_fingerprint: str
+    first_seen_at: str
+    last_seen_at: str
+    retired_at: str | None = None
