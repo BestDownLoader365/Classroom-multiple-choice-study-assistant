@@ -353,7 +353,7 @@ There is no database migration framework. Schema creation is additive, and colum
 
 ### `app/repositories/question_bank_state_repository.py`
 
-`QuestionBankStateRepository` owns the single `question_bank_state` row: the last loaded raw bank fingerprint (diagnostics and legacy-cookie gating only) plus the structural bank generation counter that stale workers compare against. It never touches learner data; per-question reconciliation lives in `QuestionBankSyncService`. `create_app` constructs both dedicated repositories directly: the bank-state repository runs once during startup, and the rate-limit repository is injected into the web blueprint, so `Database` itself only manages connections, transactions, and schema.
+`QuestionBankStateRepository` owns the single `question_bank_state` row: the last loaded raw bank fingerprint (diagnostic only) plus the structural bank generation counter that stale workers compare against. It never touches learner data; per-question reconciliation lives in `QuestionBankSyncService`. `create_app` constructs both dedicated repositories directly: the bank-state repository runs once during startup, and the rate-limit repository is injected into the web blueprint, so `Database` itself only manages connections, transactions, and schema.
 
 ### `app/repositories/question_registry_repository.py`
 
@@ -361,7 +361,7 @@ There is no database migration framework. Schema creation is additive, and colum
 
 ### `app/repositories/question_loader.py`
 
-`QuestionLoader` reads raw JSON bytes, calculates a SHA-256 source fingerprint (recorded for diagnostics and legacy-cookie gating; it no longer drives any data reset), validates the full document, and converts it into immutable `Question` and `Option` objects. Per-question content and grading fingerprints are computed later from the normalized model, so JSON whitespace or field order can never register as a change.
+`QuestionLoader` reads raw JSON bytes, calculates a SHA-256 source fingerprint (recorded for diagnostics only; it never drives any data reset), validates the full document, and converts it into immutable `Question` and `Option` objects. Per-question content and grading fingerprints are computed later from the normalized model, so JSON whitespace or field order can never register as a change.
 
 Validation includes:
 
@@ -403,7 +403,7 @@ Creates and authenticates local users. User IDs are UUID strings, usernames are 
 
 ### `app/repositories/progress_repository.py`
 
-Stores one JSON round state and question-bank fingerprint per `(learner_id, mode)`. `get()` distinguishes a missing row from a persisted null state; `save()` upserts the row. A null state marks cleared progress and must not be replaced by a legacy cookie. The route wrapper owns the transaction covering progress and answer-related repositories.
+Stores one JSON round state and question-bank fingerprint per `(learner_id, mode)`. `get()` distinguishes a missing row from a persisted null state; `save()` upserts the row. A null state marks cleared progress and must never be resurrected from a stale copy. The route wrapper owns the transaction covering progress and answer-related repositories.
 
 ### `app/repositories/attempt_repository.py`
 
@@ -602,7 +602,7 @@ Two small modules keep cross-cutting HTTP concerns out of the route functions:
 - `app/web/auth.py` holds the authentication, CSRF, and login rate-limit helpers. It resolves `session["user_id"]` to a real user for the blueprint's account requirement, issues and checks the CSRF token carried by mutating forms, and consults `RateLimitRepository` to throttle repeated failed logins.
 - `app/web/view_helpers.py` holds the template and catalogue helpers that assemble the course/chapter selection lists and other view models shared by the practice and review screens, plus the display-timezone-aware timestamp/duration formatters injected into every template.
 
-The authentication hook resolves `session["user_id"]` to a real user. Missing or invalid accounts are redirected to `/login`. Protected views then run inside the `shared_progress` wrapper: it loads both practice modes from SQLite, defensively drops question IDs that are no longer answerable, runs the view, and persists changed states in one transaction. Bank maintenance is silent — no flash or banner. The wrapper checks the structural bank generation inside its transaction; a worker started from an older question set returns 503 before writing, while cosmetic edits keep the generation and never block sibling workers. Legacy cookie import is disabled permanently after the first structural change.
+The authentication hook resolves `session["user_id"]` to a real user. Missing or invalid accounts are redirected to `/login`. Protected views then run inside the `shared_progress` wrapper: it loads both practice modes from SQLite, defensively drops question IDs that are no longer answerable, runs the view, and persists changed states in one transaction. Server-side rows are the only source of progress; any ancient cookie copy is purged without being read. Bank maintenance is silent — no flash or banner. The wrapper checks the structural bank generation inside its transaction; a worker started from an older question set returns 503 before writing, while cosmetic edits keep the generation and never block sibling workers.
 
 The routes use the Post/Redirect/Get pattern after answer submissions. This prevents a normal browser refresh from resubmitting the form.
 
@@ -630,7 +630,7 @@ Each state dictionary contains fields such as:
 | `review_shortages` | Finite completion metadata when a chapter has too few distinct live questions |
 | `feedback` | Temporary result data for the answered question |
 
-The signed session cookie retains authentication and flash messages only. On an already authenticated device, valid legacy cookie progress can be imported when no server row exists for that mode, the cookie's question-bank fingerprint matches the loaded bank, and the bank generation has never moved; existing server state always wins. A null state is retained after reset or invalidation to prevent stale devices from restoring cleared progress. Answer and next forms carry the current answer token, preventing stale devices from answering or advancing a later question. Authenticated responses use `Cache-Control: no-store`.
+The signed session cookie retains authentication and flash messages only; server-side rows are the sole source of practice progress and any legacy cookie copy is discarded unread. A null state is retained after reset or invalidation to prevent stale devices from restoring cleared progress. Answer and next forms carry the current answer token, preventing stale devices from answering or advancing a later question. Authenticated responses use `Cache-Control: no-store`.
 
 Old Normal progress remains valid without fairness fields; the next new Normal round initializes them defensively. Old unfinished Review progress without `review_items` cannot preserve occurrence roles safely, so validation clears only that Review row to a null tombstone. Wrong questions, weak points, attempts, Normal progress and users remain intact.
 
@@ -855,7 +855,7 @@ Every query and write is learner-scoped. Question content and chapter titles rem
 | Column | Purpose |
 |---|---|
 | `id` | Singleton guard (`CHECK (id = 1)`) |
-| `bank_version` | Raw-bytes SHA-256 of the last loaded `questions.json`; diagnostic and legacy-cookie gating only |
+| `bank_version` | Raw-bytes SHA-256 of the last loaded `questions.json`; diagnostic only |
 | `generation` | Structural bank generation; bumped only when the question set or a grading identity changes |
 
 ## 12. Question-Bank Contract
@@ -1346,8 +1346,8 @@ whose generation no longer matches gets a 503 before it can write, while
 cosmetic edits let unchanged workers keep serving.
 
 The raw-bytes SHA-256 of `questions.json` is still recorded in
-`question_bank_state.bank_version`, but only for diagnostics and legacy-cookie
-gating — never as a reset trigger. `glossary.json` bytes remain excluded, so
+`question_bank_state.bank_version`, but only for diagnostics — never as a
+reset trigger. `glossary.json` bytes remain excluded, so
 glossary maintenance never affects learner data.
 
 On first upgrade from a pre-registry database, the currently deployed bank is

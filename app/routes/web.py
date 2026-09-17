@@ -148,15 +148,10 @@ def create_web_blueprint(
                 g.quiz_progress = {}
                 for mode in _progress_state.PRACTICE_MODES:
                     stored = progress_repository.get(g.learner_id, mode)
-                    legacy = session.pop(_progress_state.session_key(mode), None)
-                    if stored is None:
-                        state = (
-                            legacy
-                            if bank_generation == 0 and session.get("question_bank_version") == question_bank_version
-                            else None
-                        )
-                    else:
-                        _, state = stored
+                    # Purge any ancient cookie copy without ever reading it:
+                    # server-side state is the only source of progress.
+                    session.pop(_progress_state.session_key(mode), None)
+                    state = stored[1] if stored is not None else None
                     if not _progress_state.is_valid_progress_state(state, mode):
                         state = None
                     elif state is not None:

@@ -144,7 +144,7 @@ def test_progress_save_failure_rolls_back_answer_and_mastery(tmp_path, valid_pay
     assert state(app, user, QuizMode.REVIEW) == original
 
 
-def test_legacy_cookie_imported_once_without_overwriting_shared_progress(tmp_path, valid_payload):
+def test_legacy_cookie_progress_is_never_imported(tmp_path, valid_payload):
     app, first, second, user, path = setup_devices(tmp_path, valid_payload, QuizMode.NORMAL)
     repository = app.extensions['mcq_services'].progress_repository
     version, original = repository.get(user, QuizMode.NORMAL)
@@ -154,14 +154,13 @@ def test_legacy_cookie_imported_once_without_overwriting_shared_progress(tmp_pat
         cookie['question_bank_version'] = version
         cookie['quiz_progress_normal'] = original
     first.get('/quiz')
-    assert state(app, user, QuizMode.NORMAL) == original
-    second.post('/quiz/start')
-    restarted = state(app, user, QuizMode.NORMAL)
+    # The cookie channel is closed: server-side state is the only source of
+    # progress, and the ancient keys are purged without ever being read.
+    assert state(app, user, QuizMode.NORMAL) is None
     with first.session_transaction() as cookie:
-        cookie['question_bank_version'] = version
-        cookie['quiz_progress_normal'] = original
-    first.get('/quiz')
-    assert state(app, user, QuizMode.NORMAL) == restarted
+        assert 'quiz_progress_normal' not in cookie
+        assert 'question_bank_version' not in cookie
+        assert 'quiz_progress' not in cookie
 
 
 def test_content_only_bank_update_preserves_all_learning_data(tmp_path, valid_payload):
@@ -225,28 +224,6 @@ def test_invalid_bank_does_not_clear_learning_data(tmp_path, valid_payload):
         make_app(tmp_path, valid_payload)
     assert app.extensions['mcq_services'].attempt_repository.count() == 1
     assert state(app, user, QuizMode.REVIEW) is not None
-
-
-def test_structural_change_disables_legacy_cookie_even_when_switching_back(tmp_path, valid_payload):
-    import copy
-    app, first, second, user, path = setup_devices(tmp_path, valid_payload, QuizMode.NORMAL)
-    repository = app.extensions['mcq_services'].progress_repository
-    version, old_state = repository.get(user, QuizMode.NORMAL)
-    changed = copy.deepcopy(valid_payload)
-    changed['questions'] = changed['questions'][:1]  # q2 leaves the bank
-    make_app(tmp_path, changed)
-    restored = make_app(tmp_path, valid_payload)
-    # Simulate a pre-upgrade device: no server row, only a cookie queue.
-    with repository.database.connect() as connection:
-        connection.execute('DELETE FROM quiz_progress WHERE learner_id = ?', (user,))
-    client = login(restored)
-    with client.session_transaction() as cookie:
-        cookie['question_bank_version'] = version
-        cookie['quiz_progress_normal'] = old_state
-    client.get('/')
-    # The generation moved twice (delete, then resurrect), so the ancient
-    # cookie can no longer be imported even though the bank bytes match.
-    assert state(restored, user, QuizMode.NORMAL) is None
 
 
 @pytest.mark.parametrize('with_progress', [True, False])

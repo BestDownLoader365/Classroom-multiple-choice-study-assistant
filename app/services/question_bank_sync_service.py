@@ -186,10 +186,10 @@ class QuestionBankSyncService:
     def synchronize(self, bank_version: str) -> int:
         """Reconcile learner data once per bank change; return the generation.
 
-        The raw ``bank_version`` is recorded for diagnostics and legacy-cookie
-        gating only.  The returned generation advances exclusively on
-        structural changes, so cosmetic bank edits never invalidate sibling
-        workers and never touch learner data.
+        The raw ``bank_version`` is recorded for diagnostics only.  The
+        returned generation advances exclusively on structural changes, so
+        cosmetic bank edits never invalidate sibling workers and never touch
+        learner data.
         """
         now = srs.utc_now()
         questions = self.question_repository.get_all()
