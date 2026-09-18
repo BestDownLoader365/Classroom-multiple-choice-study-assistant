@@ -115,7 +115,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS question_bank_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     bank_version TEXT NOT NULL,
-                    generation INTEGER NOT NULL
+                    generation INTEGER NOT NULL,
+                    catalogue_fingerprint TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS question_registry (
@@ -136,6 +137,7 @@ class Database:
             self._migrate_attempt_mode_constraint(connection)
             self._migrate_exam_question_fingerprint(connection)
             self._migrate_registry_placement_fingerprint(connection)
+            self._migrate_bank_state_catalogue_fingerprint(connection)
             connection.execute(
                 """
                 DELETE FROM attempts
@@ -266,6 +268,23 @@ class Database:
         if "placement_fingerprint" not in columns:
             connection.execute(
                 "ALTER TABLE question_registry ADD COLUMN placement_fingerprint TEXT"
+            )
+
+    @staticmethod
+    def _migrate_bank_state_catalogue_fingerprint(connection: sqlite3.Connection) -> None:
+        """Add the catalogue-shape column to a pre-catalogue bank state row.
+
+        Existing rows keep ``NULL``: the catalogue shape was never recorded, so
+        the next startup adopts (backfills) it without bumping the bank
+        generation.  Only later catalogue changes are treated as structural.
+        """
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(question_bank_state)")
+        }
+        if "catalogue_fingerprint" not in columns:
+            connection.execute(
+                "ALTER TABLE question_bank_state ADD COLUMN catalogue_fingerprint TEXT"
             )
 
     @contextmanager

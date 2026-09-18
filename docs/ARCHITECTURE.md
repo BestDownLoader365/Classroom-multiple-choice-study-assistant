@@ -255,13 +255,17 @@ manual-review candidates. It is read-only and does not generate or modify glossa
 Pre-deploy gate for `questions.json`: validates the file with `QuestionLoader`, then
 dry-runs the registry diff against a read-only copy of the live database and prints
 exactly what startup reconciliation would do (new, content-only, placement-changed,
-grading-changed, deleted, resurrected). Exit codes: `0` deployable (including
-allowed-but-destructive cleanups, which always print a warning and never claim the
-deploy is data-loss-free), `1` invalid bank, `2` a retired question ID is reused for a
-different question (startup would refuse to run), and `3` under `--strict` when the
-update would clear learner state. It also lists retired IDs that have no recorded
-grading identity (pre-registry tombstones), which a candidate bank must not rely on
-for identity checks.
+catalogue-changed, presentation-only, grading-changed, deleted, resurrected). Exit
+codes: `0` deployable (including allowed-but-destructive cleanups, which always print
+a warning and never claim the deploy is data-loss-free), `1` invalid bank, `2` a
+retired question ID is reused for a different question (startup would refuse to run),
+and `3` under `--strict` when the update would clear learner state. It also reports
+the two bank-level classifications — `catalogue-changed` (menus/filter validation
+changed, so the coordinated restart is required) and `presentation-only` (bytes
+changed with no fingerprint-visible change: labels or formatting, which is deployable
+without fencing) — and lists retired IDs that have no recorded grading identity
+(pre-registry tombstones), which a candidate bank must not rely on for identity
+checks.
 
 #### `scripts/swap_question_bank.py`
 
@@ -294,7 +298,7 @@ This module is the composition root. Its `create_app()` function performs all ap
 5. Load and validate `glossary.json` with `GlossaryLoader`, then build the immutable `GlossaryRepository`. The display timezone is resolved from `DISPLAY_TIMEZONE` once and injected into the statistics service and blueprint.
 6. Initialize the current SQLite schema (including `question_registry` and the per-slot exam grading fingerprints).
 7. Create the user, progress, attempt, exam, wrong-question, and weak-knowledge-point repositories.
-8. Create the grading, weak-knowledge-point, wrong-question, quiz, and exam services, then run `QuestionBankSyncService.synchronize()`: the freshly loaded bank is diffed against the persistent per-question registry by stable `question.id`, and only genuinely affected data is reconciled — content edits keep everything, grading-identity changes clear exactly that question's attempts and correction state, and deleted questions keep their attempts but silently lose their correction/SRS state, weak-point references, progress-queue entries, and unfinished-exam slots. The bank generation only advances on structural changes (new, grading-changed, deleted, resurrected, or chapter/source-moved questions), never on cosmetic edits. Missing weak rows are then backfilled from the surviving live wrong-question IDs with safe 0/2 progress.
+8. Create the grading, weak-knowledge-point, wrong-question, quiz, and exam services, then run `QuestionBankSyncService.synchronize()`: the freshly loaded bank is diffed against the persistent per-question registry by stable `question.id`, and only genuinely affected data is reconciled — content edits keep everything, grading-identity changes clear exactly that question's attempts and correction state, and deleted questions keep their attempts but silently lose their correction/SRS state, weak-point references, progress-queue entries, and unfinished-exam slots. The bank generation only advances on structural changes (new, grading-changed, deleted, resurrected, chapter/source-moved questions, or a changed catalogue shape), never on cosmetic edits such as source/chapter titles. Missing weak rows are then backfilled from the surviving live wrong-question IDs with safe 0/2 progress.
 9. Create the statistics and global statistics services.
 10. Expose the assembled repositories and services through `app.extensions["mcq_services"]` for tests and diagnostics.
 11. Register the application-level `GET /health` liveness route and the `GET /ready` readiness route.
@@ -555,11 +559,11 @@ Pure, HTTP-independent helpers that validate and describe the per-mode quiz prog
 
 ### `app/services/question_fingerprint.py`
 
-Pure fingerprint helpers over the normalized `Question` model. `grading_fingerprint()` hashes exactly the grading identity (type, option-ID set, correct-answer set); `placement_fingerprint()` hashes the filing identity (`source_id` plus `chapter_ids`), which drives chapter filtering, Review selection and chapter progress; `content_fingerprint()` hashes every validated content field. All canonicalize before hashing, so JSON formatting can never register as a change, and none ever replaces `question.id` as identity.
+Pure fingerprint helpers over the normalized `Question` model. `grading_fingerprint()` hashes exactly the grading identity (type, option-ID set, correct-answer set); `placement_fingerprint()` hashes the filing identity (`source_id` plus `chapter_ids`), which drives chapter filtering, Review selection and chapter progress; `catalogue_fingerprint()` hashes the shape of the whole catalogue (source IDs in order, chapter IDs with their source assignment and order, sorted by `(order, id)`); `content_fingerprint()` hashes every validated content field. All canonicalize before hashing, so JSON formatting can never register as a change, and none ever replaces `question.id` as identity. `catalogue_fingerprint()` deliberately excludes source/chapter *labels*, so a title edit cannot fence workers.
 
 ### `app/services/question_bank_sync_service.py`
 
-`QuestionBankSyncService` runs once per worker startup inside a single `BEGIN IMMEDIATE` transaction. It bootstraps an empty registry from the deployed bank (adopting IDs that only exist in learner history as retired tombstones, and backfilling a placement baseline for rows written before placement tracking), classifies the diff (`diff_questions()` is a pure function shared with the pre-deploy check script), fails fast when a retired ID is reused for a grading-different question, and applies the per-question consequences: targeted attempt/correction deletion for grading changes, silent correction/SRS removal plus weak-point, progress-round, and unfinished-exam reconciliation for unusable questions, and a generation bump only for structural changes (including chapter/source moves, which keep learner records but change what the bank means). Everything is idempotent, so a second worker's run is a no-op.
+`QuestionBankSyncService` runs once per worker startup inside a single `BEGIN IMMEDIATE` transaction. It bootstraps an empty registry from the deployed bank (adopting IDs that only exist in learner history as retired tombstones, and backfilling a placement baseline for rows written before placement tracking), classifies the diff (`diff_questions()` is a pure function shared with the pre-deploy check script), fails fast when a retired ID is reused for a grading-different question, and applies the per-question consequences: targeted attempt/correction deletion for grading changes, silent correction/SRS removal plus weak-point, progress-round, and unfinished-exam reconciliation for unusable questions, and a generation bump for structural changes (including chapter/source moves, which keep learner records but change what the bank means). It also compares the stored `catalogue_fingerprint()` with the loaded catalogue and bumps the generation when the catalogue shape changed, because menus and filter validation are per worker; a database that predates catalogue tracking adopts the current shape as its baseline instead. Everything is idempotent, so a second worker's run is a no-op.
 
 ### `app/services/exam_service.py`
 
@@ -587,8 +591,8 @@ This module creates the Flask blueprint and defines all browser endpoints.
 |---|---|---|
 | GET | `/health` | Liveness: return `{"status":"ok"}` after application assembly succeeds; public and used for layered production checks |
 | GET | `/ready` | Readiness: return `{"status":"ready"}` with 200 only while this worker's bank generation matches the database, otherwise `{"status":"stale","worker_generation":N,"database_generation":M}` with 503 |
-| GET/POST | `/login` | Show the login form or authenticate a user |
-| GET/POST | `/register` | Show the registration form or create a user |
+| GET/POST | `/login` | Show the login form or authenticate a user; a signed-in visitor is redirected to `/` on a healthy worker and to `/glossary` (with the bank-update notice) on a stale one |
+| GET/POST | `/register` | Show the registration form or create a user; the same stale-aware redirect applies after a successful registration |
 | POST | `/logout` | Clear the signed-in session |
 | GET | `/` | Show personal counts and practice controls |
 | GET | `/glossary` | Show the active course glossary with live search and category filtering |
@@ -614,7 +618,7 @@ This module creates the Flask blueprint and defines all browser endpoints.
 
 `/health` and `/ready` are registered directly on the Flask application before the web blueprint. They therefore do not run the blueprint's account requirement and do not expose learner, database, question, or secret data. `/health` answers while the process is merely alive (a stale worker must still be able to serve the login/logout pages); `/ready` is the signal monitoring and the start script should use, because a worker whose bank generation no longer matches the database only answers 503 for learning pages.
 
-The blueprint's second `before_request` hook, `reject_stale_worker`, is the request-level bank-generation fence. It compares the generation this worker loaded at startup with the generation recorded in `question_bank_state` and, on mismatch, logs one warning (`worker=… db=… path=…`) and returns a 503 for every learning page (`/`, `/dashboard`, `/stats`, `/quiz*`, `/review*`, `/mistakes*`, `/exam*`). `POST /logout`, `GET /login`, `GET/POST /register`, and `GET /glossary` are explicitly exempt, so a learner on a shared device can always sign out and read reference material even while the bank is being replaced. The 503 page renders the learner-facing message "题库正在更新，请稍后刷新页面；如果长时间未恢复，请联系管理员。", sets `Retry-After`, and never links back to `/` (the brand and the card instead offer the glossary and a logout form), so it cannot loop.
+The blueprint's second `before_request` hook, `reject_stale_worker`, is the request-level bank-generation fence. It compares the generation this worker loaded at startup with the generation recorded in `question_bank_state` and, on mismatch, logs one warning (`worker=… db=… path=…`) and returns a 503 for every learning page (`/`, `/dashboard`, `/stats`, `/quiz*`, `/review*`, `/mistakes*`, `/exam*`). `POST /logout`, `GET /login`, `GET/POST /register`, and `GET /glossary` are explicitly exempt, so a learner on a shared device can always sign out and read reference material even while the bank is being replaced. Those exempt account pages share `_redirect_after_sign_in()`, which never hands a learner to a page that can only answer 503: on a healthy worker it redirects to `/`, on a stale one to `/glossary` plus the notice "题库正在更新，暂时只能浏览术语表；…". The 503 page itself renders the learner-facing message "题库正在更新，请稍后刷新页面；如果长时间未恢复，请联系管理员。", sets `Retry-After`, and never links back to `/` (the brand and the card instead offer the glossary and a logout form), so it cannot loop.
 
 ### `app/web/` request helpers
 
@@ -878,7 +882,8 @@ Every query and write is learner-scoped. Question content and chapter titles rem
 |---|---|
 | `id` | Singleton guard (`CHECK (id = 1)`) |
 | `bank_version` | Raw-bytes SHA-256 of the last loaded `questions.json`; diagnostic only |
-| `generation` | Structural bank generation; bumped when the question set changes, a grading identity changes, or a question's `chapter_ids`/`source_id` placement changes |
+| `generation` | Structural bank generation; bumped when the question set changes, a grading identity changes, a question's `chapter_ids`/`source_id` placement changes, or the catalogue shape (sources/chapters added, removed, reordered or re-assigned) changes |
+| `catalogue_fingerprint` | Normalized shape of the loaded catalogue (source IDs in order, chapter IDs with source assignment and order); `NULL` for rows written before catalogue tracking, which the next startup adopts as the baseline without a generation bump |
 
 ## 12. Question-Bank Contract
 
@@ -1031,8 +1036,8 @@ The tests use temporary question/glossary files and temporary SQLite databases, 
 | `tests/test_bundled_glossary.py` | Bundled glossary validity, coverage, scale, aliases, and categories |
 | `tests/test_repositories.py` | SQLite repositories, JSON weak-point persistence, and account-scoped queries |
 | `tests/test_question_loader.py` | JSON parsing, validation, and bilingual fields |
-| `tests/test_question_bank_sync.py` | Per-question reconciliation: content edits preserve everything, chapter/source moves bump the generation without clearing data, grading changes clear one question, deletions keep attempts but drop state, weak-point/progress/exam reconciliation, resurrection and retired-ID reuse, bootstrap and concurrent startup, pre-deploy check exit codes |
-| `tests/test_stale_worker.py` | Stale-worker fencing: learning pages 503, logout/login/glossary stay reachable, the 503 page cannot loop, readiness versus liveness, and the single generation-mismatch warning |
+| `tests/test_question_bank_sync.py` | Per-question reconciliation: content edits preserve everything, chapter/source moves and catalogue-shape changes bump the generation without clearing data, catalogue labels deliberately do not (both workers keep serving), catalogue baselines are adopted on upgrade, grading changes clear one question, deletions keep attempts but drop state, weak-point/progress/exam reconciliation, resurrection and retired-ID reuse, bootstrap and concurrent startup, pre-deploy check exit codes and bank-level reports |
+| `tests/test_stale_worker.py` | Stale-worker fencing: learning pages 503, logout/login/glossary stay reachable, login/register never redirect into the 503, the 503 page cannot loop, readiness versus liveness, and the single generation-mismatch warning |
 | `tests/test_question_metadata_migration.py` | Repeatable conversion of legacy source citations into schema-v2 metadata |
 | `tests/test_grading_service.py` | Exact single/multiple grading and invalid options |
 | `tests/test_quiz_service.py` | Limits, coverage cycles/boundaries/scope/all, stable option shuffle, review selection |
@@ -1138,7 +1143,7 @@ Developers should preserve these rules when extending the application:
 - Extend Normal selection: keep it limited to live eligible IDs plus `fairness_scope`/`fairness_remaining_ids`; do not inject review signals.
 - Extend Review selection: add role-bearing candidate rules through weak/correction services; do not touch the Normal bag.
 - Add a new learning mode: extend `QuizMode`, define its queue and persistence rules, add an independent mode in the progress table, and update the database mode constraint if attempts use the new mode.
-- Replace the question bank: publish the candidate with `python scripts/swap_question_bank.py candidate.json` (validate first with `scripts/check_question_bank.py`, never `cp` over the live file) and then restart **all** workers together. Ordinary maintenance is reconciled per question without clearing learner data; grading-identity changes and deletions affect exactly the involved questions, and chapter/source moves bump the generation so slicing workers stop serving until the shared restart.
+- Replace the question bank: publish the candidate with `python scripts/swap_question_bank.py candidate.json` (validate first with `scripts/check_question_bank.py`, never `cp` over the live file) and then restart **all** workers together. Ordinary maintenance is reconciled per question without clearing learner data; grading-identity changes and deletions affect exactly the involved questions, and chapter/source moves or catalogue-shape changes bump the generation so slicing workers stop serving until the shared restart (labels alone do not).
 
 ## 18. Local Production Deployment
 
@@ -1350,7 +1355,8 @@ are required. The exact authoring contracts are maintained in
 
 `question_registry` stores one permanent row per question ID with its grading
 identity (type, option-ID set, correct-answer set), a content fingerprint, and a
-placement fingerprint (`source_id` + `chapter_ids`). At startup,
+placement fingerprint (`source_id` + `chapter_ids`); `question_bank_state` also
+records a catalogue fingerprint (the shape of `sources`/`chapters`). At startup,
 `QuestionBankSyncService.synchronize()` uses `BEGIN IMMEDIATE` to diff the freshly
 loaded bank against this registry by stable `question.id` and applies only what
 actually changed, atomically:
@@ -1363,6 +1369,15 @@ actually changed, atomically:
   and weak-knowledge selection and chapter progress, so the generation advances
   and sibling workers holding the old mapping are fenced off. They are never
   treated as "content only";
+- **catalogue shape changes** (a source or chapter added, removed, reordered or
+  re-assigned in the root catalogue) are **structural** as well, even when no
+  question references them: each worker builds its menus and validates submitted
+  filter values against its own copy, so without the fence the old worker's menu
+  could submit a chapter the new worker rejects with `400 提交的章节筛选不存在`, or
+  the two menus would disagree about which chapters exist;
+- **catalogue label changes** (bank `title`/`title_zh`, `sources[].title/lecture`
+  /`filename`, `chapters[].title`) are *not* structural: they change text only,
+  so workers may show different labels until the next coordinated restart;
 - **grading-identity changes** (type, correct-answer set, removed/renamed
   option IDs) delete exactly that question's `attempts` and `wrong_questions`
   rows for every account and strip it from weak-point verifications,
@@ -1414,13 +1429,17 @@ questions, so cumulative answer counts can drop and accuracy can move; if the
 question is later restored, its historical attempts are counted again. "History
 is preserved" therefore never means "all displayed statistics stay identical".
 
-Chapter metadata is structural in two different ways. A question's
-`chapter_ids`/`source_id` (its placement) is structural and bumps the
-generation, as above. Pure presentation metadata — a chapter `title`, a chapter
-`order`, or a new source/chapter that questions do not reference yet — is not
-part of any fingerprint, so workers may briefly disagree about labels until the
-next coordinated restart; that inconsistency is accepted and only affects
-wording/menu text, never filtering or progress of a question that moved.
+Chapter and catalogue metadata splits into a structural part and a presentation
+part. A question's `chapter_ids`/`source_id` (its placement) and the *shape* of
+the root catalogue (sources/chapters added, removed, reordered or re-assigned)
+are structural and bump the generation, as above. Pure presentation metadata —
+the bank `title`/`title_zh`, `sources[].title`/`lecture`/`filename`, and
+`chapters[].title` — is not part of any fingerprint, so workers may briefly
+disagree about labels until the next coordinated restart; that inconsistency is
+accepted and only affects wording, never which chapters exist, the order they are
+listed in, or a question's filtering/progress. `scripts/check_question_bank.py`
+reports the two cases separately (`catalogue-changed` vs `presentation-only`) so
+maintainers know whether the coordinated restart is required or merely optional.
 
 The raw-bytes SHA-256 of `questions.json` is still recorded in
 `question_bank_state.bank_version`, but only for diagnostics — never as a

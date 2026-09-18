@@ -29,6 +29,13 @@ Clearing learner state is *not* a deployment blocker on its own, so the
 default run still exits ``0`` for it — but it always reports exactly which
 questions lose their attempts/wrong-question/SRS state and never claims the
 deploy is data-loss-free.
+
+The report separates bank-level changes too: ``catalogue-changed`` (sources or
+chapters added, removed, re-ordered or re-assigned) bumps the bank generation
+and therefore needs the coordinated restart, while ``presentation-only``
+(bank/source/chapter labels, ``lecture``/``filename``, JSON formatting — i.e.
+bytes changed with no fingerprint-visible change) does not fence workers, so
+labels may differ between workers until the next restart.
 """
 
 from __future__ import annotations
@@ -44,7 +51,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.models import QuestionRegistryEntry, QuestionRegistryStatus  # noqa: E402
 from app.repositories import QuestionBankError, QuestionLoader  # noqa: E402
-from app.services import diff_questions  # noqa: E402
+from app.services import catalogue_fingerprint, diff_questions  # noqa: E402
 
 
 def _load_registry(database_path: Path) -> dict[str, QuestionRegistryEntry] | None:
@@ -92,6 +99,40 @@ def _placement_of(row: sqlite3.Row) -> str:
     return row["placement_fingerprint"] or ""
 
 
+def _load_state(database_path: Path) -> tuple[str, str | None] | None:
+    """Read ``(bank_version, catalogue_fingerprint)`` from the live database.
+
+    Returns ``None`` when the state row or table is missing.  A missing
+    catalogue fingerprint means the deployed database predates catalogue
+    tracking, so the sync adopts the candidate shape as its baseline instead of
+    reporting a change.
+    """
+    if not database_path.is_file():
+        return None
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        table = connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'question_bank_state'"
+        ).fetchone()
+        if table is None:
+            return None
+        row = connection.execute(
+            "SELECT * FROM question_bank_state WHERE id = 1"
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    catalogue = (
+        (row["catalogue_fingerprint"] or "")
+        if "catalogue_fingerprint" in row.keys()
+        else ""
+    )
+    return row["bank_version"], catalogue or None
+
+
 def _legacy_tombstones(
     registry: dict[str, QuestionRegistryEntry],
 ) -> tuple[str, ...]:
@@ -116,6 +157,11 @@ def _report(title: str, ids: tuple[str, ...]) -> None:
     print(f"{title}: {len(ids)}")
     for question_id in ids:
         print(f"    - {question_id}")
+
+
+def _flag(title: str, value: bool) -> None:
+    """Report one bank-level (not per-question) change classification."""
+    print(f"{title}: {'yes' if value else 'no'}")
 
 
 def _warning(title: str, ids: tuple[str, ...], detail: str) -> None:
@@ -158,8 +204,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    loader = QuestionLoader(args.question_file)
     try:
-        questions = QuestionLoader(args.question_file).load()
+        questions = loader.load()
     except QuestionBankError as exc:
         print(f"题库校验失败：\n{exc}", file=sys.stderr)
         return 1
@@ -175,6 +222,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     diff = diff_questions(questions, registry)
+    stored_state = _load_state(args.db)
+    stored_catalogue = stored_state[1] if stored_state else None
+    candidate_catalogue = catalogue_fingerprint(loader.sources, loader.chapters)
+    # A database without a recorded catalogue shape predates catalogue
+    # tracking: the sync adopts the candidate as the baseline, so no change is
+    # reported here either.
+    catalogue_changed = (
+        stored_catalogue is not None and stored_catalogue != candidate_catalogue
+    )
+    file_changed = (
+        stored_state is not None
+        and loader.source_fingerprint is not None
+        and loader.source_fingerprint != stored_state[0]
+    )
+    # The file changed but nothing any fingerprint covers did: the edit can only
+    # be labels (bank/source/chapter text) or formatting.
+    presentation_only = (
+        file_changed and not diff.has_changes and not catalogue_changed
+    )
+
     _report("新增题目（不清理数据）(new)", diff.new_ids)
     _report("内容修改（历史保留）(content-only)", diff.content_changed_ids)
     _report(
@@ -184,6 +251,15 @@ def main(argv: list[str] | None = None) -> int:
     _report("判题规则变化（仅清理该题历史）(grading-changed)", diff.grading_changed_ids)
     _report("删除题目（attempts 保留，错题/SRS 静默清除）(deleted)", diff.deleted_ids)
     _report("恢复原题 (resurrected)", diff.resurrected_ids)
+    _flag(
+        "目录结构变化（课件/章节增删、顺序或归属，会推进 generation）"
+        "(catalogue-changed)",
+        catalogue_changed,
+    )
+    _flag(
+        "仅文案/格式差异（不影响 generation）(presentation-only)",
+        presentation_only,
+    )
     if diff.violations:
         print(
             "\n错误：以下已退役的 question ID 被复用于判题规则不同的题目：\n    - "
@@ -223,10 +299,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if catalogue_changed:
+        print(
+            "\n目录结构变化（课件/章节的增删、顺序或归属）会推进题库 generation："
+            "部署后请统一重启全部工作进程，旧进程的学习页面会返回 503，"
+            "否则旧进程的章节菜单可能提交出新进程拒绝的筛选值。"
+        )
     if diff.placement_changed_ids:
         print(
             "\n章节/来源调整会推进题库 generation：部署后请统一重启全部工作进程，"
             "旧进程的学习页面会返回 503。"
+        )
+    if presentation_only:
+        print(
+            "\n仅文案/格式差异（题库标题、课件/章节标题、lecture、filename 或 JSON 格式）："
+            "学习数据与 worker 围栏都不受影响；这些展示文案在全部 worker 重启前可能短暂不同，"
+            "不需要为此统一重启。"
         )
     print("\n可以安全部署。")
     return 0

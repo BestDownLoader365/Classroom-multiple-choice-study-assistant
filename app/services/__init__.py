@@ -41,6 +41,7 @@ from .question_bank_sync_service import (
     needs_placement_backfill,
 )
 from .question_fingerprint import (
+    catalogue_fingerprint,
     content_fingerprint,
     grading_fingerprint,
     placement_fingerprint,
@@ -93,6 +94,7 @@ __all__ = [
     "WeakKnowledgePointService",
     "WeakKnowledgeSummary",
     "WrongQuestionService",
+    "catalogue_fingerprint",
     "content_fingerprint",
     "diff_questions",
     "display_day",

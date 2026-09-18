@@ -884,6 +884,97 @@ def test_content_only_edit_keeps_placement_baseline(tmp_path):
     assert generation(final) == generation_before + 1
 
 
+def test_catalogue_label_edits_do_not_bump_generation(tmp_path):
+    """Bank/source/chapter labels are allowed to lag until the next restart."""
+    app = make_app(tmp_path, placement_bank_payload())
+    client, user = prepare(app)
+    svc = services(app)
+    svc.wrong_question_service.record_attempt(user, "q2", QuizMode.NORMAL, ("a",), False)
+    attempts_before = svc.attempt_repository.count()
+
+    renamed = placement_bank_payload()
+    renamed["title"] = "Placement Bank (renamed)"
+    renamed["sources"][0]["title"] = "Physical Design (renamed)"
+    renamed["sources"][0]["lecture"] = "Lecture 7"
+    for chapter in renamed["chapters"]:
+        chapter["title"] = f"{chapter['title']} 副本"
+    renamed["questions"][0]["text"] = "Question 1 (reworded)"
+
+    generation_before = generation(app)
+    restarted = restart(app, renamed)
+
+    assert generation(restarted) == generation_before
+    assert services(restarted).attempt_repository.count() == attempts_before
+    assert services(restarted).question_repository.title == "Placement Bank (renamed)"
+    assert services(restarted).question_repository.get_chapter(
+        "chapter-a"
+    ).title == "Chapter A 副本"
+
+
+@pytest.mark.parametrize(
+    "edit", ["add_chapter", "remove_chapter", "reorder", "rehome"]
+)
+def test_catalogue_structure_changes_bump_generation(tmp_path, edit):
+    """Menus and filter validation are per worker: shape changes must fence."""
+    app = make_app(tmp_path, placement_bank_payload())
+    client, user = prepare(app)
+    svc = services(app)
+    svc.wrong_question_service.record_attempt(user, "q2", QuizMode.NORMAL, ("a",), False)
+    attempts_before = svc.attempt_repository.count()
+
+    changed = placement_bank_payload()
+    if edit == "add_chapter":
+        changed["chapters"].append(
+            {"id": "chapter-d", "source_id": "pd", "title": "Chapter D", "order": 3}
+        )
+    elif edit == "remove_chapter":
+        # "verify-a" is not referenced by any question.
+        changed["chapters"] = [
+            chapter for chapter in changed["chapters"] if chapter["id"] != "verify-a"
+        ]
+    elif edit == "reorder":
+        changed["chapters"][0]["order"] = 9
+    else:  # rehome: move an unreferenced chapter to the other source
+        for chapter in changed["chapters"]:
+            if chapter["id"] == "verify-a":
+                chapter["source_id"] = "pd"
+
+    generation_before = generation(app)
+    restarted = restart(app, changed)
+
+    assert generation(restarted) == generation_before + 1
+    # A catalogue edit never touches learner data.
+    assert services(restarted).attempt_repository.count() == attempts_before
+    assert registry(restarted)["q2"].status.value == "active"
+    # The new shape is the baseline: the next restart is a no-op.
+    assert generation(create_app(dict(restarted.config))) == generation_before + 1
+
+
+def test_catalogue_baseline_is_backfilled_without_bumping_generation(tmp_path):
+    """Pre-catalogue databases adopt the current shape instead of 503-ing."""
+    app = make_app(tmp_path, placement_bank_payload())
+    prepare(app)
+    repository = services(app).question_bank_state_repository
+    database = services(app).progress_repository.database
+    with database.connect() as connection:
+        connection.execute(
+            "UPDATE question_bank_state SET catalogue_fingerprint = NULL"
+        )
+    generation_before = generation(app)
+
+    restarted = create_app(dict(app.config))
+
+    assert generation(restarted) == generation_before
+    assert services(restarted).question_bank_state_repository.get_catalogue_fingerprint()
+    # Later shape changes are detected against the adopted baseline.
+    changed = placement_bank_payload()
+    changed["chapters"].append(
+        {"id": "chapter-d", "source_id": "pd", "title": "Chapter D", "order": 3}
+    )
+    assert generation(restart(restarted, changed)) == generation_before + 1
+    assert repository.get_catalogue_fingerprint()
+
+
 def test_check_question_bank_script_reports_safe_and_blocking_results(
     tmp_path, valid_payload, capsys
 ):
@@ -1015,6 +1106,43 @@ def test_check_question_bank_script_lists_legacy_tombstones(
     assert "可以安全部署" in captured.out
 
 
+def test_check_question_bank_script_reports_catalogue_and_label_changes(
+    tmp_path, capsys
+):
+    from scripts.check_question_bank import main
+
+    app = make_app(tmp_path, placement_bank_payload())
+    question_file = app.config["QUESTION_FILE"]
+    database = tmp_path / "mcq.db"
+
+    # Labels only (bank/chapter titles): deployable, no fencing needed.
+    renamed = placement_bank_payload()
+    renamed["title"] = "Placement Bank (renamed)"
+    renamed["chapters"][0]["title"] = "Chapter A (renamed)"
+    write_json(question_file, renamed)
+    assert main([str(question_file), "--db", str(database)]) == 0
+    out = capsys.readouterr().out
+    assert "(catalogue-changed): no" in out
+    assert "(presentation-only): yes" in out
+    assert "展示文案" in out
+    assert "可以安全部署" in out
+
+    # A new (unreferenced) chapter changes the menu shape: restart reminder,
+    # still deployable, and no learner state is cleared.
+    structural = placement_bank_payload()
+    structural["chapters"].append(
+        {"id": "chapter-d", "source_id": "pd", "title": "Chapter D", "order": 3}
+    )
+    write_json(question_file, structural)
+    assert main([str(question_file), "--db", str(database)]) == 0
+    captured = capsys.readouterr()
+    assert "(catalogue-changed): yes" in captured.out
+    assert "(presentation-only): no" in captured.out
+    assert "统一重启" in captured.out
+    assert "可以安全部署" in captured.out
+    assert "将清理" not in captured.err
+
+
 def test_swap_question_bank_publishes_atomically(tmp_path, valid_payload, capsys):
     from app.repositories import QuestionLoader
     from scripts.swap_question_bank import main
@@ -1040,3 +1168,31 @@ def test_swap_question_bank_publishes_atomically(tmp_path, valid_payload, capsys
     assert main([str(broken), "--target", str(target)]) == 1
     assert main([str(tmp_path / "missing.json"), "--target", str(target)]) == 1
     assert json.loads(target.read_text(encoding="utf-8")) == published
+
+
+def test_label_only_change_keeps_both_workers_serving(tmp_path):
+    """Labels do not fence workers; only the catalogue shape does."""
+    from tests.test_exam_web import exam_payload
+
+    payload = exam_payload()
+    stale = make_app(tmp_path, payload)
+    client = stale.test_client()
+    register(client)
+
+    renamed = copy.deepcopy(payload)
+    for chapter in renamed["chapters"]:
+        chapter["title"] = f"{chapter['title']} (v2)"
+    write_json(stale.config["QUESTION_FILE"], renamed)
+    current = create_app(dict(stale.config))
+
+    assert generation(stale) == 0
+    assert generation(current) == 0
+    # Both workers keep serving the menu; only the labels lag until the restart.
+    stale_page = client.get("/quiz/setup")
+    assert stale_page.status_code == 200
+    assert "Chapter A (v2)" not in stale_page.text
+    fresh = current.test_client()
+    fresh.post("/login", data={"username": "learner", "password": "secret1"})
+    fresh_page = fresh.get("/quiz/setup")
+    assert fresh_page.status_code == 200
+    assert "Chapter A (v2)" in fresh_page.text

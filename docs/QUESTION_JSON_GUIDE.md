@@ -20,7 +20,7 @@
 
 应用启动时会同时校验 `questions.json` 和 `glossary.json`，两个文件都必须有效。题库维护按 `question.id` 逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该题自身的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py` 预检题库变更的实际影响。
 
-“不会影响学习记录”与“不改变题库结构”是两件事。`chapter_ids`（章节归属）和 `source_id` 决定题目出现在哪些章节筛选、哪些 Review 强化目标和哪些章节进度里，因此它们的变化属于**结构性变化**：学习历史仍然保留，但题库 generation 会 +1，运行旧题库的工作进程在学习页面（包括 `/stats`）统一返回 503，直到**所有 worker 一起重启**。纯展示型章节字段（`chapters[].title`、`chapters[].order`，以及尚无题目引用的新 source/chapter）不属于结构性变化，允许新旧 worker 在下次统一重启前短暂显示不同文案。发布题库文件必须原子替换，详见第 11.6 节。
+“不会影响学习记录”与“不改变题库结构”是两件事。`chapter_ids`（章节归属）和 `source_id` 决定题目出现在哪些章节筛选、哪些 Review 强化目标和哪些章节进度里，因此它们的变化属于**结构性变化**：学习历史仍然保留，但题库 generation 会 +1，运行旧题库的工作进程在学习页面（包括 `/stats`）统一返回 503，直到**所有 worker 一起重启**。课件/章节在根目录中的**增删、顺序或归属变化**同样是结构性变化（每个 worker 用自己的目录生成菜单并校验提交的筛选值，新旧菜单不一致会让旧 worker 提交出新 worker 拒绝为 400 的章节）。只有纯展示文案——题库 `title`/`title_zh`、`sources[].title`/`lecture`/`filename`、`chapters[].title` 与 JSON 格式——不推进 generation，允许新旧 worker 在下次统一重启前短暂显示不同文案。发布题库文件必须原子替换，详见第 11.6 节；`check_question_bank.py` 会分别报告 `catalogue-changed` 与 `presentation-only`，便于判断是否需要统一重启。
 
 ## 2. 新题库的推荐完整结构
 
@@ -175,6 +175,8 @@ JSON 文件必须使用 UTF-8 编码。标准 JSON 不允许注释、尾随逗�
 - 避免章节过宽，例如“全部内容”；也避免细到几乎每道题一个章节。
 - ID 表示稳定身份，标题负责显示。以后可以修改标题，但不要因为措辞调整就更换 ID。
 - 不同 source 下即使有同名章节，也必须使用不同的 chapter ID。
+
+注意区分“改标题”和“改结构”：修改 `title` 只是展示文案，不影响学习数据、也不会打断运行中的 worker；而**增删章节、调整 `order` 或改变章节的 `source_id` 归属**会改变每个 worker 的章节菜单与筛选校验，属于结构性变化，必须统一重启全部 worker（预检输出中 `catalogue-changed` 为 `yes`）。
 
 ## 6. `questions`：题目对象
 
@@ -641,6 +643,8 @@ candidate.json
 
 预检脚本的退出码含义：`0` 可部署（可能同时打印“将清理学习状态”的警告），`1` 题库校验失败，`2` 非法复用退役 ID（启动会被阻止），`3` 仅在使用 `--strict` 时出现，表示更新会清理学习状态。**只要输出中出现清理学习状态的警告，脚本就不会打印“可以安全部署”**；请确认可以接受后再部署。
 
+预检还会单独报告两类整体性变化：`catalogue-changed: yes` 表示课件/章节被增删、重排或改变了归属（各 worker 的章节菜单与筛选校验因此不同），必须统一重启；`presentation-only: yes` 表示只有标签文案或 JSON 格式变化（题库标题、课件/章节标题、lecture、filename），学习数据与 worker 围栏都不受影响，这些文案在全部 worker 重启前可能短暂不同，但不需要为它单独安排重启。
+
 不要用 `cp` 直接覆盖正在使用的 `questions.json`，也不要依赖编辑器的原地保存：写入过程中若被截断或分两次落盘，恰好在此期间启动或 reload 的 worker 会读到半截 JSON，并报出看起来像题库语法错误的 `Invalid JSON in question bank at line 1, column N`。`scripts/swap_question_bank.py` 只做三件事：校验候选文件、写入同目录临时文件并 fsync、用 `os.replace()` 原子就位。
 
 任何结构性变化（增删题目、判题规则变化、`chapter_ids`/`source_id` 变化）之后都必须**统一重启全部 worker**；只重启一部分会让未被重启的 worker 在学习页面返回 503（这是防止两套题库同时写学习数据的 fail-fast 设计，不要通过忽略 generation 检查或手工改 `question_bank_state.generation` 绕过）。
@@ -717,6 +721,7 @@ candidate.json
 - [ ] 每题至少一个 chapter，多个 chapter 只用于真正的跨知识点题目。
 - [ ] 每题的 source 和全部 chapters 属于同一资料来源。
 - [ ] `chapter_ids` / `source_id` 的调整已按结构性变化处理（预检、原子替换、统一重启全部 worker、确认 `/ready` 为 200）。
+- [ ] 课件/章节的增删、顺序或归属变化已按结构性变化处理（预检中 `catalogue-changed` 为 `yes` 时必须统一重启）。
 - [ ] `pages` 只含不重复的正整数，并已核对页码口径。
 - [ ] 标准 JSON、项目 Loader、题库测试和完整测试集全部通过。
 - [ ] 配套 `glossary.json` 已按专业术语库指南完成校验和覆盖审计。

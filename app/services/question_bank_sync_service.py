@@ -47,7 +47,11 @@ from app.repositories import (
 from . import srs_service as srs
 from .exam_service import ExamService
 from .progress_state import is_valid_progress_state, reconcile_state
-from .question_fingerprint import content_fingerprint, placement_fingerprint
+from .question_fingerprint import (
+    catalogue_fingerprint,
+    content_fingerprint,
+    placement_fingerprint,
+)
 from .weak_knowledge_point_service import WeakKnowledgePointService
 
 LOGGER = logging.getLogger(__name__)
@@ -239,22 +243,28 @@ class QuestionBankSyncService:
         """Reconcile learner data once per bank change; return the generation.
 
         The raw ``bank_version`` is recorded for diagnostics only.  The
-        returned generation advances exclusively on structural changes (the
-        question set, grading identity, or a question's chapter/source
-        placement), so cosmetic bank edits never invalidate sibling workers
-        and never touch learner data.
+        returned generation advances exclusively on structural changes: the
+        question set, a grading identity, a question's chapter/source
+        placement, or the shape of the course catalogue.  Cosmetic edits —
+        including source/chapter titles — never invalidate sibling workers and
+        never touch learner data.
         """
         now = srs.utc_now()
         questions = self.question_repository.get_all()
+        catalogue = catalogue_fingerprint(
+            self.question_repository.get_sources(),
+            self.question_repository.get_chapters(),
+        )
         with self.database.transaction():
             registry = self.registry_repository.get_all()
             state = self.state_repository.get_state()
+            stored_catalogue = self.state_repository.get_catalogue_fingerprint()
             generation = state[1] if state else 0
             if not registry:
                 orphans = self._bootstrap(questions, now)
                 if orphans:
                     self._reconcile_learner_data(set(orphans), now)
-                self.state_repository.save_state(bank_version, generation)
+                self.state_repository.save_state(bank_version, generation, catalogue)
                 return generation
 
             diff = diff_questions(questions, registry)
@@ -264,6 +274,13 @@ class QuestionBankSyncService:
                     f"questions: {', '.join(diff.violations)}. Retired IDs are "
                     "reserved permanently; assign fresh IDs instead."
                 )
+            # A stored ``None`` means the shape predates catalogue tracking (or
+            # this worker is the first after the upgrade): adopt it as the
+            # baseline instead of bumping the generation for the upgrade.
+            catalogue_baseline = stored_catalogue is None
+            catalogue_changed = (
+                stored_catalogue is not None and stored_catalogue != catalogue
+            )
             backfill = needs_placement_backfill(questions, registry)
             if diff.has_changes or backfill:
                 self._apply(diff, registry, questions, now, backfill_ids=backfill)
@@ -279,15 +296,25 @@ class QuestionBankSyncService:
                     len(diff.resurrected_ids),
                     len(backfill),
                 )
+            if catalogue_changed:
+                # Menus and filter validation are per-worker, so a changed
+                # catalogue shape has to fence sibling workers exactly like a
+                # question-set change, even though no learner data is touched.
+                LOGGER.info(
+                    "Question bank catalogue changed: sources/chapters added, "
+                    "removed, reordered or re-assigned; bumping the generation."
+                )
             if (
                 diff.has_changes
                 or backfill
+                or catalogue_baseline
+                or catalogue_changed
                 or state is None
                 or state[0] != bank_version
             ):
-                if diff.structural:
+                if diff.structural or catalogue_changed:
                     generation += 1
-                self.state_repository.save_state(bank_version, generation)
+                self.state_repository.save_state(bank_version, generation, catalogue)
             return generation
 
     def _bootstrap(
