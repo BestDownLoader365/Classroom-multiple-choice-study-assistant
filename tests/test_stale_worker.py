@@ -148,6 +148,50 @@ def test_stats_page_is_fenced_exactly_like_the_dashboard(tmp_path, valid_payload
     assert client.get("/stats").status_code == 503
 
 
+def test_stale_login_and_register_never_land_on_a_503(tmp_path, valid_payload):
+    """Account pages are exempt from the fence, so they must not jump into it."""
+    stale, client, current, user = stale_pair(tmp_path, valid_payload)
+
+    # Already signed in: /login redirects to a page this worker can serve.
+    response = client.get("/login")
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/glossary")
+    page = client.get("/login", follow_redirects=True)
+    assert "题库正在更新" in page.text
+
+    # A new device can still sign in, and lands on the glossary with the notice.
+    fresh = stale.test_client()
+    signed_in = fresh.post(
+        "/login", data={"username": "learner", "password": "secret1"}
+    )
+    assert signed_in.status_code == 302
+    assert signed_in.headers["Location"].endswith("/glossary")
+    assert "题库正在更新" in fresh.get("/glossary").text
+
+    # Registration behaves the same way.
+    newcomer = stale.test_client()
+    registered = newcomer.post(
+        "/register",
+        data={
+            "username": "newcomer",
+            "password": "secret1",
+            "password_confirmation": "secret1",
+        },
+    )
+    assert registered.status_code == 302
+    assert registered.headers["Location"].endswith("/glossary")
+    assert newcomer.get("/glossary").status_code == 200
+
+    # The healthy worker keeps the original redirects.
+    healthy = current.test_client()
+    signed_in = healthy.post(
+        "/login", data={"username": "learner", "password": "secret1"}
+    )
+    assert signed_in.headers["Location"].endswith("/")
+    assert healthy.get("/login").status_code == 302
+    assert healthy.get("/login").headers["Location"].endswith("/")
+
+
 def test_content_only_update_keeps_the_sibling_worker_serving(
     tmp_path, valid_payload
 ):

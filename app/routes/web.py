@@ -55,6 +55,9 @@ LOGGER = logging.getLogger(__name__)
 # Learner-facing wording for the stale-worker 503.  Restarting the service is
 # an operator action, so the message never asks a learner to do it.
 STALE_BANK_MESSAGE = "题库正在更新，请稍后刷新页面；如果长时间未恢复，请联系管理员。"
+# Shown as a flash when an exempt account page would otherwise hand a learner to
+# a learning page that can only answer 503.
+STALE_BANK_NOTICE = "题库正在更新，暂时只能浏览术语表；如果长时间未恢复，请联系管理员。"
 STALE_BANK_RETRY_AFTER_SECONDS = 5
 
 
@@ -137,10 +140,11 @@ def create_web_blueprint(
         """Fence every learning page off on a worker with a stale bank.
 
         The generation only advances on structural bank changes (question set,
-        grading identity, or a question's chapter/source placement), so a
-        worker started from an older bank must never read or write learner
-        state.  Signing in/out and the glossary stay available: learners must
-        always be able to leave a shared device and read reference material.
+        grading identity, a question's chapter/source placement, or the shape
+        of the course catalogue), so a worker started from an older bank must
+        never read or write learner state.  Signing in/out and the glossary
+        stay available: learners must always be able to leave a shared device
+        and read reference material.
         """
         if request.endpoint in stale_exempt_endpoints:
             return None
@@ -155,6 +159,18 @@ def create_web_blueprint(
             request.path,
         )
         abort(503, description=STALE_BANK_MESSAGE)
+
+    def _redirect_after_sign_in() -> Any:
+        """Send a just-authenticated learner to the best page this worker has.
+
+        The account pages are exempt from the generation fence, so they must
+        not hand the learner to a learning page that can only answer 503: a
+        stale worker explains the situation and offers the glossary instead.
+        """
+        if bank_state_repository.get_generation() == bank_generation:
+            return redirect(url_for("web.home"))
+        flash(STALE_BANK_NOTICE, "info")
+        return redirect(url_for("web.glossary"))
 
     def _latest_correctness(learner_id: str, mode: QuizMode):
         """Bind the legacy counter fallback for progress reconciliation."""
@@ -229,7 +245,7 @@ def create_web_blueprint(
         existing_id = session.get("user_id")
         if request.method == "GET" and isinstance(existing_id, str):
             if user_repository.get_by_id(existing_id) is not None:
-                return redirect(url_for("web.home"))
+                return _redirect_after_sign_in()
         if request.method == "POST":
             username = request.form.get("username", "").strip()
             password = request.form.get("password", "")
@@ -246,7 +262,7 @@ def create_web_blueprint(
                 session["user_id"] = user.id
                 session.permanent = True
                 flash(f"欢迎回来，{user.username}。", "success")
-                return redirect(url_for("web.home"))
+                return _redirect_after_sign_in()
         return render_template("auth.html", page="login")
 
     @blueprint.route("/register", methods=["GET", "POST"])
@@ -270,7 +286,7 @@ def create_web_blueprint(
                     session["user_id"] = user.id
                     session.permanent = True
                     flash("账号创建成功，学习记录将只对你可见。", "success")
-                    return redirect(url_for("web.home"))
+                    return _redirect_after_sign_in()
         return render_template("auth.html", page="register")
 
     @blueprint.post("/logout")
