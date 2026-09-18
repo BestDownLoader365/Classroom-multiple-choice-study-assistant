@@ -211,8 +211,33 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
 
     @app.get("/health")
     def health() -> tuple[dict[str, str], int]:
-        """Report that the fully assembled application is ready to serve."""
+        """Liveness: the process is up and its application is assembled.
+
+        Deliberately independent of the question-bank generation: a stale
+        worker is still alive and, for example, must still let learners sign
+        out.  Use ``/ready`` to find out whether it may serve learning traffic.
+        """
         return {"status": "ok"}, 200
+
+    @app.get("/ready")
+    def ready() -> tuple[dict[str, Any], int]:
+        """Readiness: this worker serves the bank the database considers live.
+
+        A ``stale`` worker answers 503 for every learning page until the whole
+        service is restarted with the new bank, so monitoring must be able to
+        tell it apart from a healthy one.
+        """
+        database_generation = question_bank_state_repository.get_generation()
+        if database_generation == bank_generation:
+            return {"status": "ready"}, 200
+        return (
+            {
+                "status": "stale",
+                "worker_generation": bank_generation,
+                "database_generation": database_generation,
+            },
+            503,
+        )
 
     @app.after_request
     def add_security_headers(response):
@@ -249,6 +274,7 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             display_timezone=display_timezone,
             question_bank_version=question_bank_version,
             bank_generation=bank_generation,
+            bank_state_repository=question_bank_state_repository,
         )
     )
     return app

@@ -1,6 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
+import copy
+
 import pytest
 
 from app import create_app
@@ -224,6 +226,53 @@ def test_invalid_bank_does_not_clear_learning_data(tmp_path, valid_payload):
         make_app(tmp_path, valid_payload)
     assert app.extensions['mcq_services'].attempt_repository.count() == 1
     assert state(app, user, QuizMode.REVIEW) is not None
+
+
+def test_bank_version_only_change_never_rewrites_progress(tmp_path, valid_payload):
+    """Wording-only bank differences must not cause pointless progress writes.
+
+    ``bank_version`` is diagnostic: two workers whose banks differ only in
+    wording would otherwise keep overwriting each other's ``quiz_progress``
+    rows inside the global write lock.
+    """
+    app = make_app(tmp_path, valid_payload)
+    first = app.test_client()
+    register(first)
+    user = learner_id(first)
+    first.post('/quiz/start', data={'quiz_size': 'all'})
+    repository = app.extensions['mcq_services'].progress_repository
+    version_before, state_before = repository.get(user, QuizMode.NORMAL)
+    assert version_before is not None and state_before is not None
+
+    edited = copy.deepcopy(valid_payload)
+    edited['questions'][0]['text'] = 'Pick one option'
+    other = make_app(tmp_path, edited)
+    other_services = other.extensions['mcq_services']
+    assert other_services.question_bank_state_repository.get_generation() == 0
+    second = login(other)
+
+    # Reading a page through the other worker writes nothing: same state, so
+    # the stored (diagnostic) bank version is left alone.
+    assert second.get('/').status_code == 200
+    assert repository.get(user, QuizMode.NORMAL) == (version_before, state_before)
+
+    # A real state change is still saved, and only then is the version touched.
+    current = state(other, user, QuizMode.NORMAL)
+    question = other_services.question_repository.get_by_id(
+        current['question_ids'][current['current_index']]
+    )
+    assert second.post(
+        '/quiz/answer',
+        data={'answer_token': current['answer_token'],
+              'answers': list(question.correct_answers)},
+    ).status_code == 302
+    version_after, state_after = repository.get(user, QuizMode.NORMAL)
+    assert state_after != state_before
+    assert version_after != version_before
+
+    # And the sibling worker does not flip the row back on its next request.
+    assert first.get('/').status_code == 200
+    assert repository.get(user, QuizMode.NORMAL) == (version_after, state_after)
 
 
 @pytest.mark.parametrize('with_progress', [True, False])

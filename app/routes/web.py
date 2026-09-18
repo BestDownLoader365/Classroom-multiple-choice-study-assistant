@@ -1,5 +1,6 @@
 """Web routes for accounts, normal practice, and personal mistake review."""
 
+import logging
 import secrets
 from datetime import tzinfo
 from functools import partial, wraps
@@ -11,6 +12,7 @@ from flask import (
     current_app,
     flash,
     g,
+    make_response,
     redirect,
     render_template,
     request,
@@ -22,6 +24,7 @@ from werkzeug.exceptions import HTTPException
 from app.models import Chapter, ExamSession, ExamStatus, Question, QuizMode
 from app.repositories import (
     GlossaryRepository,
+    QuestionBankStateRepository,
     QuestionRepository,
     ProgressRepository,
     RateLimitRepository,
@@ -47,6 +50,13 @@ from app.services import srs_service as _srs
 from app.web import auth as _web_auth
 from app.web import view_helpers as _view
 
+LOGGER = logging.getLogger(__name__)
+
+# Learner-facing wording for the stale-worker 503.  Restarting the service is
+# an operator action, so the message never asks a learner to do it.
+STALE_BANK_MESSAGE = "题库正在更新，请稍后刷新页面；如果长时间未恢复，请联系管理员。"
+STALE_BANK_RETRY_AFTER_SECONDS = 5
+
 
 def create_web_blueprint(
     question_repository: QuestionRepository,
@@ -62,11 +72,17 @@ def create_web_blueprint(
     statistics_service: StatisticsService,
     global_statistics_service: GlobalStatisticsService,
     display_timezone: tzinfo,
+    bank_state_repository: QuestionBankStateRepository,
     bank_generation: int = 0,
 ) -> Blueprint:
     """Build the learner-facing web blueprint."""
     blueprint = Blueprint("web", __name__)
     public_endpoints = {"web.login", "web.register"}
+    # Endpoints that must keep working on a worker whose question bank has
+    # been superseded: signing in and out, the reference glossary, and the
+    # public account pages.  Everything else is a learning page and is fenced
+    # off by ``reject_stale_worker`` until the whole service is restarted.
+    stale_exempt_endpoints = public_endpoints | {"web.logout", "web.glossary"}
     glossary_data = glossary_repository.to_dict()
 
     _ip_login_allowed = partial(_web_auth.login_ip_allowed, rate_limit_repository)
@@ -116,6 +132,30 @@ def create_web_blueprint(
         g.learner_id = user.id
         return None
 
+    @blueprint.before_request
+    def reject_stale_worker() -> Any:
+        """Fence every learning page off on a worker with a stale bank.
+
+        The generation only advances on structural bank changes (question set,
+        grading identity, or a question's chapter/source placement), so a
+        worker started from an older bank must never read or write learner
+        state.  Signing in/out and the glossary stay available: learners must
+        always be able to leave a shared device and read reference material.
+        """
+        if request.endpoint in stale_exempt_endpoints:
+            return None
+        database_generation = bank_state_repository.get_generation()
+        if database_generation == bank_generation:
+            return None
+        LOGGER.warning(
+            "Question bank generation mismatch: worker=%s db=%s path=%s "
+            "(worker is stale; restart the whole service)",
+            bank_generation,
+            database_generation,
+            request.path,
+        )
+        abort(503, description=STALE_BANK_MESSAGE)
+
     def _latest_correctness(learner_id: str, mode: QuizMode):
         """Bind the legacy counter fallback for progress reconciliation."""
 
@@ -132,19 +172,9 @@ def create_web_blueprint(
         def wrapped(*args, **kwargs):
             # One transaction includes token checks, attempts, learning state and progress.
             # SQLite coordinates concurrent requests even across Gunicorn workers.
-            with progress_repository.database.transaction() as connection:
-                active_bank = connection.execute(
-                    "SELECT generation FROM question_bank_state WHERE id = 1"
-                ).fetchone()
-                # The generation only advances on structural bank changes; a
-                # worker started from an older question set must never write
-                # through.  Cosmetic bank edits keep the generation, so they
-                # neither block sibling workers nor disturb learners.
-                active_generation = (
-                    active_bank["generation"] if active_bank is not None else 0
-                )
-                if active_generation != bank_generation:
-                    abort(503, description="题库已更新，请重启服务后刷新页面。")
+            # Stale workers never reach this point: ``reject_stale_worker``
+            # fences every fenced route before the view runs.
+            with progress_repository.database.transaction():
                 g.quiz_progress = {}
                 for mode in _progress_state.PRACTICE_MODES:
                     stored = progress_repository.get(g.learner_id, mode)
@@ -174,8 +204,13 @@ def create_web_blueprint(
                 for mode in _progress_state.PRACTICE_MODES:
                     state = g.quiz_progress.get(_progress_state.session_key(mode))
                     stored = progress_repository.get(g.learner_id, mode)
-                    if (stored is not None or state is not None) and stored != (
-                        question_bank_version, state
+                    stored_state = stored[1] if stored is not None else None
+                    # Only a real change of the learner's practice state is
+                    # worth a write.  ``bank_version`` is diagnostic, so two
+                    # workers running banks that differ only in wording must
+                    # not rewrite this row back and forth.
+                    if (stored is not None or state is not None) and (
+                        stored is None or stored_state != state
                     ):
                         progress_repository.save(
                             g.learner_id, mode, question_bank_version, state
@@ -239,8 +274,13 @@ def create_web_blueprint(
         return render_template("auth.html", page="register")
 
     @blueprint.post("/logout")
-    @shared_progress
     def logout() -> Any:
+        """Clear the session and return to the login page.
+
+        Deliberately free of the shared progress transaction: a worker whose
+        question bank was superseded must still let a learner sign out of a
+        shared device instead of answering 503.
+        """
         session.clear()
         flash("你已安全退出。", "success")
         return redirect(url_for("web.login"))
@@ -276,7 +316,10 @@ def create_web_blueprint(
 
         Reference-only counterpart of the personal dashboard: the page
         renders group totals and chapter difficulty, never single-account
-        details, so it needs no per-learner progress handling.
+        details, so it needs no per-learner progress handling.  It is still a
+        learning page: ``reject_stale_worker`` fences it exactly like
+        ``/dashboard`` so that a stale worker can never report group totals
+        against its own out-of-date bank.
         """
         return render_template(
             "stats.html",
@@ -933,7 +976,7 @@ def create_web_blueprint(
         return updates
 
     @blueprint.app_errorhandler(HTTPException)
-    def friendly_http_error(error: HTTPException) -> tuple[str, int]:
+    def friendly_http_error(error: HTTPException) -> Any:
         messages = {
             400: "提交的数据无效，请返回后重试。",
             404: "没有找到你要访问的页面。",
@@ -941,12 +984,13 @@ def create_web_blueprint(
             409: "当前练习状态已经失效，请重新开始。",
             410: "这道题已经不在当前题库中。",
             500: "服务暂时出现问题，请返回首页后重试。",
+            503: STALE_BANK_MESSAGE,
         }
         if error.code in {404, 405, 500}:
             description = messages[error.code]
         else:
             description = str(error.description) if error.description else messages.get(error.code)
-        return (
+        response = make_response(
             render_template(
                 "error.html",
                 error_code=error.code or 500,
@@ -954,6 +998,11 @@ def create_web_blueprint(
             ),
             error.code or 500,
         )
+        if error.code == 503:
+            # Ask well-behaved clients to back off while the service is being
+            # restarted, without promising when that restart finishes.
+            response.headers["Retry-After"] = str(STALE_BANK_RETRY_AFTER_SECONDS)
+        return response
 
     def _mode_endpoints(mode: QuizMode) -> dict[str, str]:
         if mode is QuizMode.NORMAL:

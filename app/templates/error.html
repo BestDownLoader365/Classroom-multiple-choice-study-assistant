@@ -7,13 +7,26 @@
     <div class="error-code">{{ error_code }}</div>
     <h1>页面出现问题</h1>
     <p class="lead">{{ error_message }}</p>
+    {% if error_code == 503 and g.user %}
+    {# The bank is being replaced: every learning page answers 503 until the
+       service restarts, so offer a way out (and a page that still works)
+       instead of linking back into the same 503. #}
     <div class="inline-actions">
-        {% if g.user %}
+        <a class="button button-ghost" href="{{ url_for('web.glossary') }}">浏览术语表</a>
+        <form method="post" action="{{ url_for('web.logout') }}" class="inline-actions">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="button button-primary" type="submit">退出登录</button>
+        </form>
+    </div>
+    {% elif g.user %}
+    <div class="inline-actions">
         <a class="button button-primary" href="{{ url_for('web.home') }}">返回首页</a>
         <a class="button button-ghost" href="{{ url_for('web.mistakes') }}">查看我的错题</a>
-        {% else %}
-        <a class="button button-primary" href="{{ url_for('web.login') }}">返回登录</a>
-        {% endif %}
     </div>
+    {% else %}
+    <div class="inline-actions">
+        <a class="button button-primary" href="{{ url_for('web.login') }}">返回登录</a>
+    </div>
+    {% endif %}
 </section>
 {% endblock %}
