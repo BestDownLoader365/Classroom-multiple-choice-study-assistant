@@ -28,7 +28,7 @@ python run.py
 
 程序在启动时分别读取并校验题库和术语库。修改任一 JSON 后都需要重启。`questions.json` 的维护按 `question.id` 逐题增量生效，不会再清空全站学习数据：修改题干、翻译、解析、选项文案或顺序、`section`/`pages`、JSON 格式等普通维护会完整保留所有账号的答题历史、错题纠正状态、SRS 排期、薄弱知识点状态和练习/考试进度；修改某题的题型、正确答案集合，或删除/重命名已有选项 ID 时，只清理这一道题受影响的记录；删除题目会保留其历史作答，但静默移除它的错题/SRS 状态和相关复习引用。注意“保留历史作答”不等于“统计数字不变”：页面统计只统计仍在题库中的题目，因此删除题目后累计答题数可能下降、正确率可能变化，题目恢复后这些历史作答又会重新计入。无效题库会阻止应用启动。`glossary.json` 不参与题库同步，单独修改它不会影响学习记录。
 
-数据库为每个题目 ID 永久保存注册信息：被删除题目的 ID 会永久退役，不能再分配给不同的新题（误判复用会阻止启动，可先用 `python scripts/check_question_bank.py` 预检）；误删的题目按原 ID 原判题规则加回即可自动恢复。`chapter_ids` 或 `source_id` 的修改会改变题目归属（影响章节筛选、Review 与章节进度），课件/章节的**增删、顺序或归属变化**会改变各 worker 的章节菜单与筛选校验，因此它们与增删题目、判题规则变化一样属于**结构性变化**：题库 generation 会 +1，运行旧题库的工作进程在学习页面（含 `/stats`）统一返回 503，直到**所有 worker 一起重启**；纯文案修改（题库标题、课件/章节标题、lecture/filename、JSON 格式）不会打断运行中的工作进程，只会让不同 worker 的标签文案在重启前短暂不同。发布题库文件必须使用原子替换（推荐 `python scripts/swap_question_bank.py candidate.json`），不要直接 `cp` 覆盖正在使用的文件，也不要用编辑器原地保存：写入中断时 worker 可能读到半截 JSON，报出误导性的 `Invalid JSON in question bank at line 1, column N`。预检脚本会分别报告 `catalogue-changed`（需要统一重启）与 `presentation-only`（仅文案，无需为此重启）。
+数据库为每个题目 ID 永久保存注册信息：被删除题目的 ID 会永久退役，不能再分配给不同的新题（误判复用会阻止启动，可先用 `python scripts/check_question_bank.py` 预检）；误删的题目按原 ID 原判题规则加回即可自动恢复。`chapter_ids` 或 `source_id` 的修改会改变题目归属（影响章节筛选、Review 与章节进度），课件/章节的**增删、顺序或归属变化**会改变各 worker 的章节菜单与筛选校验，因此它们与增删题目、判题规则变化一样属于**结构性变化**：题库 generation 会 +1，运行旧题库的工作进程在学习页面（含 `/stats`）统一返回 503，直到**所有 worker 一起重启**；纯文案修改（题库标题、课件/章节标题、lecture/filename、JSON 格式）不会打断运行中的工作进程，只会让不同 worker 的标签文案在重启前短暂不同。发布题库文件必须使用原子替换（推荐 `python scripts/swap_question_bank.py candidate.json`），不要直接 `cp` 覆盖正在使用的文件，也不要用编辑器原地保存：写入中断时 worker 可能读到半截 JSON，报出误导性的 `Invalid JSON in question bank at line 1, column N`。预检脚本会分别报告 `catalogue-changed`（需要统一重启）与 `presentation-only`（仅文案，无需为此重启）。这两个标记是从“文件字节是否变化 + 各类指纹是否变化”反推的分类，因此 `presentation-only: no` 并不代表文案没变（例如同一次发布里还改了题干或章节目录），判断是否需要统一重启请以 `catalogue-changed` 与题目级各行为准。
 
 ## 主要功能
 
@@ -221,7 +221,9 @@ python scripts/audit_glossary.py --questions path/to/questions.json --glossary p
 - 每个账号自己的错题次数和题目纠正状态（旧数据库列 `review_streak` / `mastered` 保留作无损兼容，当前语义为未纠正/已纠正，不再表示知识点掌握）；
 - 每个账号以 chapter 为单位的薄弱状态、Review 中已验证的不同 question IDs 和强化进度；
 - 每个账号正常练习、错题巩固的题目队列、Review item role、当前位置、选项顺序、反馈和本轮统计，以及 Normal coverage bag；
-- 每个账号的模拟考试场次（题量、时限、状态、成绩、用时）和每场考试的固定题目集合与保存的作答。
+- 每个账号的模拟考试场次（题量、时限、状态、成绩、用时）和每场考试的固定题目集合与保存的作答；
+- 题库注册信息与题库状态：每个题目 ID 的判题身份、内容指纹、归属指纹和退役状态（`question_registry`），以及当前 `bank_version`、结构性 generation 和目录指纹（`question_bank_state`）；这些表只保存指纹与状态，不保存题目正文；
+- 登录/注册失败的限流窗口（`auth_rate_limits`），用于阻止暴力尝试，过期记录会被清理。
 
 ### 换设备继续做题
 

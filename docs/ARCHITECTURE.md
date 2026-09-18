@@ -235,8 +235,10 @@ Contains the complete question bank. Every application process reads and validat
 
 Contains the active course's domain-neutral terminology metadata, canonical terms,
 aliases, translations, definitions and optional categories. Every process validates
-and loads it once at startup. It is independent of learner state and the question-bank
-fingerprint.
+and loads it once at startup. It is independent of learner state and of every
+question-bank fingerprint (`bank_version` plus the grading, content, placement and
+catalogue fingerprints), so glossary maintenance never triggers reconciliation and
+never fences sibling workers.
 
 #### `docs/QUESTION_JSON_GUIDE.md` and `docs/GLOSSARY_JSON_GUIDE.md`
 
@@ -266,6 +268,32 @@ changed with no fingerprint-visible change: labels or formatting, which is deplo
 without fencing) — and lists retired IDs that have no recorded grading identity
 (pre-registry tombstones), which a candidate bank must not rely on for identity
 checks.
+
+#### How to read the two bank-level report lines
+
+`catalogue-changed` and `presentation-only` are *derived classifications*, not field
+diffs: the database stores no label snapshot, only the `bank_version` and the
+fingerprints. The script prints `presentation-only: yes` only when all three of these
+hold: the candidate's raw bytes differ from the recorded `bank_version`; no
+per-question fingerprint changed; and the catalogue shape is unchanged. In other words
+the edit can only live in untracked fields (bank/source/chapter labels, `lecture`,
+`filename`) or in JSON formatting/whitespace.
+
+Consequences worth knowing:
+
+- `presentation-only: no` must **not** be read as “labels did not change”. It is also
+  printed for a byte-identical candidate (nothing to deploy), for any per-question
+  change (a question *wording* edit is a `content_fingerprint` change and shows up
+  under `content-only`), for any catalogue-shape change (reported by
+  `catalogue-changed: yes`), for a database whose `question_bank_state` row is missing
+  (no baseline to compare), and for a publish that mixes label edits with any tracked
+  change.
+- A formatting-only rewrite of an unchanged bank reports `presentation-only: yes`, so
+  the flag answers “is this change attributable to labels/formatting?”, not “are the
+  labels different?”.
+- The flag never influences the exit code. Decide whether the coordinated restart is
+  required from `catalogue-changed` and the per-question lines; `presentation-only`
+  only confirms that this publish has no fencing or learner-data impact.
 
 #### `scripts/swap_question_bank.py`
 
@@ -375,11 +403,11 @@ There is no database migration framework. Schema creation is additive, and colum
 
 ### `app/repositories/question_bank_state_repository.py`
 
-`QuestionBankStateRepository` owns the single `question_bank_state` row: the last loaded raw bank fingerprint (diagnostic only) plus the structural bank generation counter that stale workers compare against. It never touches learner data; per-question reconciliation lives in `QuestionBankSyncService`. `create_app` constructs both dedicated repositories directly: the bank-state repository runs once during startup, and the rate-limit repository is injected into the web blueprint, so `Database` itself only manages connections, transactions, and schema.
+`QuestionBankStateRepository` owns the single `question_bank_state` row: the last loaded raw bank fingerprint (diagnostic only), the normalized shape of the loaded catalogue, and the structural bank generation counter that stale workers compare against. It never touches learner data; per-question reconciliation lives in `QuestionBankSyncService`. `create_app` constructs both dedicated repositories directly: the bank-state repository runs once during startup, and the rate-limit repository is injected into the web blueprint, so `Database` itself only manages connections, transactions, and schema.
 
 ### `app/repositories/question_registry_repository.py`
 
-`QuestionRegistryRepository` owns the permanent `question_registry` table — one row per question ID ever loaded, holding its grading identity (`question_type`, the option-ID set, the correct-answer set), a content fingerprint, and a lifecycle status. Rows are never deleted: a question that leaves the bank is only marked `retired`, leaving a tombstone that prevents the ID from being silently recycled for a human-different question later. Reappearing retired IDs are resurrected when the grading identity matches exactly, and rejected with a startup error otherwise.
+`QuestionRegistryRepository` owns the permanent `question_registry` table — one row per question ID ever loaded, holding its grading identity (`question_type`, the option-ID set, the correct-answer set), a content fingerprint, a placement fingerprint (`source_id` + `chapter_ids`), and a lifecycle status. Rows are never deleted: a question that leaves the bank is only marked `retired`, leaving a tombstone that prevents the ID from being silently recycled for a human-different question later. Reappearing retired IDs are resurrected when the grading identity matches exactly, and rejected with a startup error otherwise; tombstones adopted from pre-registry learner history carry no grading identity and are therefore adopted on their first reappearance (see “Pre-registry tombstone compatibility”).
 
 ### `app/repositories/question_loader.py`
 
@@ -1132,6 +1160,7 @@ Developers should preserve these rules when extending the application:
 21. An uncorrected wrong question never carries an SRS due timestamp; a failed review always returns to the correction flow before being rescheduled at level 0.
 22. Keep SRS timestamps as UTC ISO strings, evaluate "due" with `next_review_at <= now` (inclusive), and keep the interval ladder in `srs_service.SRS_INTERVAL_DAYS` rather than scattering numbers across layers.
 23. A `question.id` is a permanent identity: never change it for content edits, never recycle a retired ID for a different question, and never judge question identity from text.
+24. Keep the worker fence and the bank's structure consistent: the question set, grading identities, a question's `chapter_ids`/`source_id` placement, and the catalogue *shape* advance `question_bank_state.generation` (labels never do), stale workers answer 503 on every learning page until a coordinated restart, and `generation` is never hand-edited to bypass the check.
 
 ## 17. Common Extension Points
 
@@ -1413,7 +1442,10 @@ hand-editing the generation.
 
 1. Write the candidate bank to its own file (never edit the live file in place).
 2. Run `python scripts/check_question_bank.py candidate.json --db instance/mcq.db`
-   (add `--strict` in CI to fail on updates that clear learner state).
+   (add `--strict` in CI to fail on updates that clear learner state). Read the
+   report with the semantics of “How to read the two bank-level report lines”
+   above: `catalogue-changed: yes` requires the coordinated restart, while
+   `presentation-only: no` does not mean the labels stayed identical.
 3. Publish atomically: `python scripts/swap_question_bank.py candidate.json`
    writes a temporary file in the target directory, fsyncs it, and swaps it in
    with `os.replace()`. Do not `cp` over the live file and do not rely on an

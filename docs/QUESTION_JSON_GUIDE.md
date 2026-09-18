@@ -645,6 +645,20 @@ candidate.json
 
 预检还会单独报告两类整体性变化：`catalogue-changed: yes` 表示课件/章节被增删、重排或改变了归属（各 worker 的章节菜单与筛选校验因此不同），必须统一重启；`presentation-only: yes` 表示只有标签文案或 JSON 格式变化（题库标题、课件/章节标题、lecture、filename），学习数据与 worker 围栏都不受影响，这些文案在全部 worker 重启前可能短暂不同，但不需要为它单独安排重启。
 
+注意 `presentation-only: no` **不等于**“文案没有变化”：这两个标记是从“文件字节是否变化 + 各类指纹是否变化”反推出来的分类，数据库里没有标签快照。下面这些情况都会打印 `no`，只有最后一种才是“确实只改了文案以外的东西”：
+
+| 情况 | `presentation-only` |
+|---|---|
+| 候选文件与数据库记录的 `bank_version` 相同（没有变化 / 只是重跑预检） | `no` |
+| 改了题干、翻译、解析、选项文案或顺序、section/pages（属于 `content-only`） | `no` |
+| 有增删题目、判题规则变化、题目归属变化 | `no` |
+| 课件/章节增删、重排或改归属（属于 `catalogue-changed: yes`） | `no` |
+| 一次发布里既改了标签文案、又改了任何上面这些内容 | `no` |
+| 数据库缺少 `question_bank_state` 记录（没有可比对的基线） | `no` |
+| 只改了标签文案，或只是 JSON 缩进/空白重排（内容未变） | `yes` |
+
+也就是说：判断“要不要统一重启”请以 `catalogue-changed` 与题目级各行为准；`presentation-only` 只说明“这次发布没有任何指纹可见的变化”，它不影响退出码。想知道具体改了哪些标签，需要自行比对两份候选文件。
+
 不要用 `cp` 直接覆盖正在使用的 `questions.json`，也不要依赖编辑器的原地保存：写入过程中若被截断或分两次落盘，恰好在此期间启动或 reload 的 worker 会读到半截 JSON，并报出看起来像题库语法错误的 `Invalid JSON in question bank at line 1, column N`。`scripts/swap_question_bank.py` 只做三件事：校验候选文件、写入同目录临时文件并 fsync、用 `os.replace()` 原子就位。
 
 任何结构性变化（增删题目、判题规则变化、`chapter_ids`/`source_id` 变化）之后都必须**统一重启全部 worker**；只重启一部分会让未被重启的 worker 在学习页面返回 503（这是防止两套题库同时写学习数据的 fail-fast 设计，不要通过忽略 generation 检查或手工改 `question_bank_state.generation` 绕过）。

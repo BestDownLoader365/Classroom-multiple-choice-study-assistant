@@ -12,7 +12,7 @@
 
 - `questions.json` 保存题目、选项、答案、解析和课程目录；
 - `glossary.json` 保存专业术语、别名、翻译、释义和分类；
-- 术语数据不写入 SQLite，也不参与题库指纹。只修改 `glossary.json` 不会清空账号、答题记录、错题状态或练习进度。
+- 术语数据不写入 SQLite，也不参与任何题库指纹（`bank_version` 与 grading / content / placement / catalogue 指纹）。只修改 `glossary.json` 不会清空账号、答题记录、错题状态或练习进度，也不会推进题库 generation：即使其它 worker 仍在运行旧题库，`/ready` 依旧为 200，学习页面不会因此返回 503。
 
 ## 2. 可直接使用的完整示例
 
@@ -248,7 +248,7 @@ pytest -q
 7. 人工处理 orphan 与候选报告，不要把候选结果直接批量写入术语库。
 8. 同时部署 `questions.json` 和 `glossary.json`，重启全部应用进程并完成浏览器验收。
 
-更换 `questions.json` 的任意原始字节会触发全局课程学习数据重置；只修改 `glossary.json` 不会触发该重置。准备新课程时仍建议两个文件一起审核，避免旧术语错误地出现在新题库中。
+更换 `questions.json` 时按 [`QUESTION_JSON_GUIDE.md`](QUESTION_JSON_GUIDE.md) 第 11.6 节发布：先预检、原子替换、再统一重启。题库按 `question.id` 逐题增量同步，**不会重置全站学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进题库 generation，让仍在运行旧题库的 worker 在学习页面返回 503，因此这类发布必须统一重启全部 worker。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。准备新课程时仍建议两个文件一起审核，避免旧术语错误地出现在新题库中。
 
 ## 13. 发布前检查清单
 
