@@ -204,6 +204,12 @@ class QuestionRegistryEntry:
     the grading identity: historical answers stay meaningful exactly while
     all three stay compatible.  ``content_fingerprint`` covers every other
     validated field and only distinguishes cosmetic edits from no-ops.
+    ``placement_fingerprint`` covers the ``source_id``/``chapter_ids`` filing
+    identity: changing it keeps learner history but is still a structural bank
+    change, because chapter membership drives filtering, review selection and
+    chapter progress.  Rows written before placement tracking store an empty
+    placement fingerprint and are adopted (backfilled) on the next startup
+    without a generation bump.
     A retired row is a tombstone: it is never deleted, so a deleted
     question's ID can never be silently recycled for a different question.
     """
@@ -217,3 +223,4 @@ class QuestionRegistryEntry:
     first_seen_at: str
     last_seen_at: str
     retired_at: str | None = None
+    placement_fingerprint: str = ""

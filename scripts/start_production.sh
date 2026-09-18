@@ -4,6 +4,10 @@ set -Eeuo pipefail
 readonly APP_SERVICE="mcq-template.service"
 readonly NGINX_SERVICE="nginx.service"
 readonly HEALTH_URL="http://127.0.0.1:8080/health"
+# Readiness is the check that matters after a bank update: a worker still
+# running a superseded (or restored-from-backup) questions.json answers 503 on
+# every learning page while /health keeps returning 200.
+readonly READY_URL="http://127.0.0.1:8080/ready"
 
 as_root() {
     if (( EUID == 0 )); then
@@ -46,20 +50,36 @@ fi
 
 echo "[4/4] 验证 Nginx → Gunicorn → Flask……"
 health_response=""
+ready_response=""
 for _ in {1..10}; do
     if health_response="$(curl --fail --silent --show-error --max-time 3 "$HEALTH_URL" 2>/dev/null)"; then
         break
     fi
     sleep 1
 done
+for _ in {1..10}; do
+    if ready_response="$(curl --fail --silent --show-error --max-time 3 "$READY_URL" 2>/dev/null)"; then
+        break
+    fi
+    sleep 1
+done
 
 if [[ "$health_response" != *'"status":"ok"'* ]]; then
-    echo "错误：服务已启动，但健康检查未通过：$HEALTH_URL" >&2
+    echo "错误：服务已启动，但存活检查未通过：$HEALTH_URL" >&2
     echo "请检查：journalctl -u $APP_SERVICE -n 50 --no-pager" >&2
     exit 1
 fi
 
+if [[ "$ready_response" != *'"status":"ready"'* ]]; then
+    echo "错误：服务已启动，但没有 worker 可以承接学习流量：$READY_URL" >&2
+    echo "常见原因：仍有 worker 使用旧 questions.json 或数据库被恢复到较旧备份。" >&2
+    echo "请查看日志中的 'Question bank generation mismatch' 并重启全部 worker：" >&2
+    echo "  journalctl -u $APP_SERVICE -n 50 --no-pager" >&2
+    exit 1
+fi
+
 echo
-echo "生产服务启动成功：$health_response"
-echo "本机地址：$HEALTH_URL"
+echo "生产服务启动成功：$ready_response"
+echo "存活检查：$HEALTH_URL"
+echo "就绪检查：$READY_URL"
 echo "Sakura FRP TCP 本地目标：127.0.0.1:8080"

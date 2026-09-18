@@ -2,11 +2,11 @@
 
 The single ``question_bank_state`` row records which raw bank fingerprint
 was loaded last and the structural bank generation.  The generation is only
-bumped when the question set itself changes (new, deleted, grading-changed
-or resurrected questions) and drives the stale-worker guard; cosmetic
-edits leave it untouched so unchanged workers keep serving.  Per-question
-reconciliation lives in ``QuestionBankSyncService`` — this repository only
-owns the state row, never learner data.
+bumped when the bank's structure changes (new, deleted, grading-changed,
+chapter/source-moved or resurrected questions) and drives the stale-worker
+guard; cosmetic edits leave it untouched so unchanged workers keep serving.
+Per-question reconciliation lives in ``QuestionBankSyncService`` — this
+repository only owns the state row, never learner data.
 """
 
 import sqlite3

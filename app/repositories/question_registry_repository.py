@@ -45,14 +45,16 @@ class QuestionRegistryRepository:
                 INSERT INTO question_registry (
                     question_id, status, question_type, option_ids,
                     correct_answers, content_fingerprint,
-                    first_seen_at, last_seen_at, retired_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    placement_fingerprint, first_seen_at, last_seen_at,
+                    retired_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(question_id) DO UPDATE SET
                     status = excluded.status,
                     question_type = excluded.question_type,
                     option_ids = excluded.option_ids,
                     correct_answers = excluded.correct_answers,
                     content_fingerprint = excluded.content_fingerprint,
+                    placement_fingerprint = excluded.placement_fingerprint,
                     first_seen_at = excluded.first_seen_at,
                     last_seen_at = excluded.last_seen_at,
                     retired_at = excluded.retired_at
@@ -64,6 +66,7 @@ class QuestionRegistryRepository:
                     json.dumps(list(entry.option_ids), ensure_ascii=False),
                     json.dumps(list(entry.correct_answers), ensure_ascii=False),
                     entry.content_fingerprint,
+                    entry.placement_fingerprint or None,
                     entry.first_seen_at,
                     entry.last_seen_at,
                     entry.retired_at,
@@ -98,6 +101,14 @@ class QuestionRegistryRepository:
 
         The grading columns stay empty: no bank version of this ID was ever
         observed, so a later reappearance is adopted instead of rejected.
+
+        This is a one-time migration-era tolerance for pre-registry databases
+        (the ID only ever existed in learner history, e.g. stored progress or
+        exam slots).  It is *not* a general licence to reuse a retired ID: a
+        tombstone that does record a grading identity rejects a different
+        question.  The trade-off is documented in ``docs/ARCHITECTURE.md``:
+        such a legacy tombstone cannot prove the reappearing question is the
+        same one, so the reappearance inherits the old history.
         """
         return QuestionRegistryEntry(
             question_id=question_id,
@@ -123,4 +134,10 @@ class QuestionRegistryRepository:
             first_seen_at=row["first_seen_at"],
             last_seen_at=row["last_seen_at"],
             retired_at=row["retired_at"],
+            placement_fingerprint=_optional_column(row, "placement_fingerprint"),
         )
+
+
+def _optional_column(row: sqlite3.Row, name: str) -> str:
+    """Read a column that may be missing in a pre-migration database."""
+    return (row[name] or "") if name in row.keys() else ""

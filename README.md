@@ -26,9 +26,9 @@ python run.py
 
 `run.py` 使用 Flask 开发服务器，只用于开发，不适合长期运行。
 
-程序在启动时分别读取并校验题库和术语库。修改任一 JSON 后都需要重启。`questions.json` 的维护按 `question.id` 逐题增量生效，不会再清空全站学习数据：修改题干、翻译、解析、选项文案或顺序、章节元数据、JSON 格式等普通维护会完整保留所有账号的答题历史、错题纠正状态、SRS 排期、薄弱知识点状态和练习/考试进度；修改某题的题型、正确答案集合，或删除/重命名已有选项 ID 时，只清理这一道题受影响的记录；删除题目会保留其历史作答，但静默移除它的错题/SRS 状态和相关复习引用。无效题库会阻止应用启动。`glossary.json` 不参与题库同步，单独修改它不会影响学习记录。
+程序在启动时分别读取并校验题库和术语库。修改任一 JSON 后都需要重启。`questions.json` 的维护按 `question.id` 逐题增量生效，不会再清空全站学习数据：修改题干、翻译、解析、选项文案或顺序、`section`/`pages`、JSON 格式等普通维护会完整保留所有账号的答题历史、错题纠正状态、SRS 排期、薄弱知识点状态和练习/考试进度；修改某题的题型、正确答案集合，或删除/重命名已有选项 ID 时，只清理这一道题受影响的记录；删除题目会保留其历史作答，但静默移除它的错题/SRS 状态和相关复习引用。注意“保留历史作答”不等于“统计数字不变”：页面统计只统计仍在题库中的题目，因此删除题目后累计答题数可能下降、正确率可能变化，题目恢复后这些历史作答又会重新计入。无效题库会阻止应用启动。`glossary.json` 不参与题库同步，单独修改它不会影响学习记录。
 
-数据库为每个题目 ID 永久保存注册信息：被删除题目的 ID 会永久退役，不能再分配给不同的新题（误判复用会阻止启动，可先用 `python scripts/check_question_bank.py` 预检）；误删的题目按原 ID 原判题规则加回即可自动恢复。题库发生结构性变化（增删题目或判题规则变化）后请统一重启服务，运行旧题库的工作进程会返回 503，防止写入不一致的数据；纯文案修改不打断运行中的工作进程。
+数据库为每个题目 ID 永久保存注册信息：被删除题目的 ID 会永久退役，不能再分配给不同的新题（误判复用会阻止启动，可先用 `python scripts/check_question_bank.py` 预检）；误删的题目按原 ID 原判题规则加回即可自动恢复。`chapter_ids` 或 `source_id` 的修改会改变题目归属（影响章节筛选、Review 与章节进度），因此与增删题目、判题规则变化一样属于**结构性变化**：题库 generation 会 +1，运行旧题库的工作进程在学习页面（含 `/stats`）统一返回 503，直到**所有 worker 一起重启**；纯文案修改不会打断运行中的工作进程。发布题库文件必须使用原子替换（推荐 `python scripts/swap_question_bank.py candidate.json`），不要直接 `cp` 覆盖正在使用的文件，也不要用编辑器原地保存：写入中断时 worker 可能读到半截 JSON，报出误导性的 `Invalid JSON in question bank at line 1, column N`。
 
 ## 主要功能
 
@@ -159,9 +159,9 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 更换课程只需要：
 
-1. 提供符合题库 schema 的新 `questions.json`。
+1. 把新题库写入独立候选文件，先运行 `python scripts/check_question_bank.py candidate.json --db instance/mcq.db` 预检（加 `--strict` 可让“会清理学习状态”的更新直接返回非 0），再用 `python scripts/swap_question_bank.py candidate.json` 原子替换 `questions.json`。
 2. 提供符合 schema version 1 的新 `glossary.json`。
-3. 重启应用。
+3. 统一重启全部应用 worker，并用 `/ready` 确认所有 worker 都加载了新题库。
 
 无需修改 Python、Jinja template、JavaScript、CSS 或数据库 schema。`glossary.json` 不参与 question-bank fingerprint；单独修改术语、翻译或定义不会清空答题记录、错题、纠正/强化状态或练习进度。
 
@@ -360,14 +360,19 @@ sudo tail -f /var/log/nginx/mcq-template.error.log
 在 WSL 中：
 
 ```bash
-curl -i http://127.0.0.1:8001/health
+curl -i http://127.0.0.1:8001/health   # 进程存活
+curl -i http://127.0.0.1:8001/ready    # 可以承接学习流量
 curl -i http://127.0.0.1:8080/health
+curl -i http://127.0.0.1:8080/ready
 ```
+
+`/health` 只表示进程活着（旧题库的 worker 也会返回 200，因为它仍要能登录/登出）；`/ready` 只有在当前 worker 的题库 generation 与数据库一致时才返回 200，否则返回 503 与 `{"status":"stale","worker_generation":N,"database_generation":M}`。监控与启动脚本应使用 `/ready`。
 
 在 Windows PowerShell 中：
 
 ```powershell
 curl.exe -i http://localhost:8080/health
+curl.exe -i http://localhost:8080/ready
 ```
 
 ### Sakura FRP 本地目标
@@ -384,5 +389,6 @@ Local HTTP URL: http://127.0.0.1:8080
 ### 故障排查
 
 - `502 Bad Gateway`：先执行 `systemctl status mcq-template`，再用 `curl http://127.0.0.1:8001/health` 检查 Gunicorn，最后查看 `journalctl -u mcq-template` 和 Nginx error log。
+- `503 题库正在更新`：当前 worker 仍在使用旧题库（日志中会出现 `Question bank generation mismatch: worker=… db=… path=…`），或数据库被恢复到较旧备份。按上文流程统一重启 `mcq-template.service`，然后用 `curl http://127.0.0.1:8001/ready` 确认返回 200；不要手工修改 `question_bank_state.generation` 绕过检查。用户在 503 页面上仍可正常退出登录。
 - `Connection refused`：依次检查 Sakura FRP 的本地目标、Windows 的 `curl.exe http://localhost:8080/health`、`systemctl status nginx`、`systemctl status mcq-template`。
 - `500 Internal Server Error`：查看 `journalctl -u mcq-template -n 100 --no-pager`；Flask 异常由 Gunicorn 写入该 journal。随后查看 `/var/log/nginx/mcq-template.error.log` 以关联代理请求。

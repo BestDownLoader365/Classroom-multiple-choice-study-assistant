@@ -38,8 +38,13 @@ from .question_bank_sync_service import (
     BankDiff,
     QuestionBankSyncService,
     diff_questions,
+    needs_placement_backfill,
 )
-from .question_fingerprint import content_fingerprint, grading_fingerprint
+from .question_fingerprint import (
+    content_fingerprint,
+    grading_fingerprint,
+    placement_fingerprint,
+)
 from .statistics_service import (
     ChapterMastery,
     DashboardData,
@@ -92,6 +97,8 @@ __all__ = [
     "diff_questions",
     "display_day",
     "grading_fingerprint",
+    "needs_placement_backfill",
+    "placement_fingerprint",
     "reconcile_state",
     "resolve_display_timezone",
     "timezone_label",

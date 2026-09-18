@@ -125,6 +125,7 @@ class Database:
                     option_ids TEXT NOT NULL,
                     correct_answers TEXT NOT NULL,
                     content_fingerprint TEXT NOT NULL,
+                    placement_fingerprint TEXT,
                     first_seen_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL,
                     retired_at TEXT
@@ -134,6 +135,7 @@ class Database:
             self._migrate_wrong_question_srs_columns(connection)
             self._migrate_attempt_mode_constraint(connection)
             self._migrate_exam_question_fingerprint(connection)
+            self._migrate_registry_placement_fingerprint(connection)
             connection.execute(
                 """
                 DELETE FROM attempts
@@ -247,6 +249,23 @@ class Database:
         if "grading_fingerprint" not in columns:
             connection.execute(
                 "ALTER TABLE exam_questions ADD COLUMN grading_fingerprint TEXT"
+            )
+
+    @staticmethod
+    def _migrate_registry_placement_fingerprint(connection: sqlite3.Connection) -> None:
+        """Add the chapter/source placement column to a pre-placement registry.
+
+        Existing rows keep ``NULL``: their placement identity was never
+        recorded, so the next startup adopts (backfills) it without bumping
+        the bank generation.  Only later moves are treated as structural.
+        """
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(question_registry)")
+        }
+        if "placement_fingerprint" not in columns:
+            connection.execute(
+                "ALTER TABLE question_registry ADD COLUMN placement_fingerprint TEXT"
             )
 
     @contextmanager

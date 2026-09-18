@@ -745,33 +745,298 @@ def test_chapter_reassignment_updates_weak_verification(tmp_path):
     generation_before = generation(app)
     restarted = restart(app, changed)
 
-    # Content-only chapter move: q2 no longer counts toward chapter-a.
+    # The chapter move keeps every learner record but is structural: q2 no
+    # longer counts toward chapter-a and the generation advances so slicing
+    # workers stop serving.
     point = services(restarted).weak_knowledge_point_repository.get_by_id(
         user, "chapter-a"
     )
     assert point is not None
     assert point.verified_question_ids == ("q0",)
     assert point.active is True
+    assert generation(restarted) == generation_before + 1
+
+    # The superseded worker can no longer read or write the old mapping: a
+    # learner cannot answer q2 there and push chapter-a back to "completed".
+    assert client.get("/dashboard").status_code == 503
+    assert client.get("/quiz/setup").status_code == 503
+    assert client.post("/review/start").status_code == 503
+    attempts_before = services(restarted).attempt_repository.count()
+    assert client.post(
+        "/review/answer", data={"answer_token": "stale", "answers": "b"}
+    ).status_code == 503
+    point = services(restarted).weak_knowledge_point_repository.get_by_id(
+        user, "chapter-a"
+    )
+    assert point.verified_question_ids == ("q0",)
+    assert point.active is True
+    assert services(restarted).attempt_repository.count() == attempts_before
+
+
+def placement_bank_payload():
+    """A two-source bank whose questions can be re-filed between chapters."""
+    return {
+        "title": "Placement Bank",
+        "sources": [
+            {"id": "pd", "title": "Physical Design"},
+            {"id": "verify", "title": "Verification"},
+        ],
+        "chapters": [
+            {"id": "chapter-a", "source_id": "pd", "title": "Chapter A", "order": 1},
+            {"id": "chapter-b", "source_id": "pd", "title": "Chapter B", "order": 2},
+            {"id": "verify-a", "source_id": "verify", "title": "Verify A", "order": 1},
+        ],
+        "questions": [
+            {
+                "id": "q1",
+                "source_id": "pd",
+                "chapter_ids": ["chapter-a"],
+                "text": "Question 1",
+                "type": "single",
+                "options": [
+                    {"id": "a", "text": "Alpha"},
+                    {"id": "b", "text": "Beta"},
+                ],
+                "correct_answers": ["b"],
+                "explanation": "Because.",
+            },
+            {
+                "id": "q2",
+                "source_id": "pd",
+                "chapter_ids": ["chapter-b"],
+                "text": "Question 2",
+                "type": "single",
+                "options": [
+                    {"id": "a", "text": "Alpha"},
+                    {"id": "b", "text": "Beta"},
+                ],
+                "correct_answers": ["b"],
+                "explanation": "Because.",
+            },
+        ],
+    }
+
+
+def test_chapter_ids_change_bumps_generation_without_clearing_history(tmp_path):
+    app = make_app(tmp_path, placement_bank_payload())
+    client, user = prepare(app)
+    svc = services(app)
+    svc.wrong_question_service.record_attempt(user, "q2", QuizMode.NORMAL, ("a",), False)
+    svc.wrong_question_service.record_attempt(user, "q2", QuizMode.REVIEW, ("b",), True)
+    attempts_before = svc.attempt_repository.count()
+
+    changed = placement_bank_payload()
+    for question in changed["questions"]:
+        if question["id"] == "q2":
+            question["chapter_ids"] = ["chapter-a"]
+
+    generation_before = generation(app)
+    restarted = restart(app, changed)
+
+    assert generation(restarted) == generation_before + 1
+    # Moving a question is not a data loss: history and review state stay.
+    assert services(restarted).attempt_repository.count() == attempts_before
+    assert services(restarted).wrong_question_repository.get_by_id(user, "q2") is not None
+    assert registry(restarted)["q2"].placement_fingerprint
+    # The new mapping is the baseline now: a second restart is a no-op.
+    again = create_app(dict(restarted.config))
+    assert generation(again) == generation_before + 1
+
+
+def test_source_id_change_bumps_generation_without_clearing_history(tmp_path):
+    app = make_app(tmp_path, placement_bank_payload())
+    client, user = prepare(app)
+    svc = services(app)
+    svc.wrong_question_service.record_attempt(user, "q2", QuizMode.NORMAL, ("a",), False)
+    attempts_before = svc.attempt_repository.count()
+
+    # q2 keeps chapter_ids but moves from the "pd" source to "verify"; its
+    # chapter moves with it so the bank stays internally consistent.
+    changed = placement_bank_payload()
+    changed["chapters"][1]["source_id"] = "verify"
+    for question in changed["questions"]:
+        if question["id"] == "q2":
+            question["source_id"] = "verify"
+
+    generation_before = generation(app)
+    restarted = restart(app, changed)
+
+    assert generation(restarted) == generation_before + 1
+    assert services(restarted).attempt_repository.count() == attempts_before
+    assert registry(restarted)["q2"].placement_fingerprint
+
+
+def test_content_only_edit_keeps_placement_baseline(tmp_path):
+    """A wording edit neither bumps the generation nor makes later moves no-ops."""
+    app = make_app(tmp_path, placement_bank_payload())
+    prepare(app)
+    generation_before = generation(app)
+
+    retitled = placement_bank_payload()
+    retitled["questions"][1]["text"] = "Question 2 (reworded)"
+    restarted = restart(app, retitled)
     assert generation(restarted) == generation_before
 
+    moved = placement_bank_payload()
+    moved["questions"][1]["text"] = "Question 2 (reworded)"
+    moved["questions"][1]["chapter_ids"] = ["chapter-a"]
+    final = restart(restarted, moved)
+    assert generation(final) == generation_before + 1
 
-def test_check_question_bank_script(tmp_path, valid_payload, capsys):
+
+def test_check_question_bank_script_reports_safe_and_blocking_results(
+    tmp_path, valid_payload, capsys
+):
     from scripts.check_question_bank import main
 
     app = make_app(tmp_path, valid_payload)
     question_file = app.config["QUESTION_FILE"]
     database = tmp_path / "mcq.db"
 
+    # No change at all: nothing to do, safe to deploy (also under --strict).
     assert main([str(question_file), "--db", str(database)]) == 0
+    assert main([str(question_file), "--db", str(database), "--strict"]) == 0
+    assert "可以安全部署" in capsys.readouterr().out
 
-    changed = copy.deepcopy(valid_payload)
-    del changed["questions"][1]
-    restarted = restart(app, changed)
-    reused = copy.deepcopy(valid_payload)
-    reused["questions"][1]["correct_answers"] = ["b"]
+    # A real content-only edit keeps every learner record.
+    edited = copy.deepcopy(valid_payload)
+    edited["questions"][0]["text"] = "Pick exactly one"
+    write_json(question_file, edited)
+    assert main([str(question_file), "--db", str(database), "--strict"]) == 0
+    out = capsys.readouterr().out
+    assert "可以安全部署" in out
+    assert "(content-only): 1" in out
+
+    # A chapter/source move is structural but still keeps every record: it is
+    # deployable, yet the report must ask for a unified restart.
+    placed = copy.deepcopy(edited)
+    placed["sources"] = [{"id": "pd", "title": "Physical Design"}]
+    placed["chapters"] = [
+        {"id": "chapter-a", "source_id": "pd", "title": "Chapter A", "order": 1},
+        {"id": "chapter-b", "source_id": "pd", "title": "Chapter B", "order": 2},
+    ]
+    placed["questions"][0].update(source_id="pd", chapter_ids=["chapter-a"])
+    placed["questions"][1].update(source_id="pd", chapter_ids=["chapter-b"])
+    write_json(question_file, placed)
+    restart(app, placed)
+    moved = copy.deepcopy(placed)
+    moved["questions"][1]["chapter_ids"] = ["chapter-a"]
+    write_json(question_file, moved)
+    assert main([str(question_file), "--db", str(database)]) == 0
+    captured = capsys.readouterr()
+    assert "(placement-changed): 1" in captured.out
+    assert "统一重启" in captured.out
+    assert "可以安全部署" in captured.out
+    assert "将清理" not in captured.err
+
+    # Reusing a retired ID for a different grading rule blocks startup.
+    del placed["questions"][1]
+    restart(app, placed)
+    reused = copy.deepcopy(placed)
+    reused["questions"].append(copy.deepcopy(valid_payload["questions"][1]))
+    reused["questions"][-1].update(
+        id="q2", source_id="pd", chapter_ids=["chapter-b"], correct_answers=["b"]
+    )
     write_json(question_file, reused)
     assert main([str(question_file), "--db", str(database)]) == 2
     assert "q2" in capsys.readouterr().err
 
     question_file.write_text('{"questions": [}', encoding="utf-8")
     assert main([str(question_file), "--db", str(database)]) == 1
+
+
+def test_check_question_bank_script_warns_before_clearing_learner_state(
+    tmp_path, valid_payload, capsys
+):
+    from scripts.check_question_bank import main
+
+    app = make_app(tmp_path, valid_payload)
+    question_file = app.config["QUESTION_FILE"]
+    database = tmp_path / "mcq.db"
+
+    # A grading rule change clears exactly that question's learner state.
+    grading = copy.deepcopy(valid_payload)
+    grading["questions"][0]["correct_answers"] = ["1"]
+    write_json(question_file, grading)
+    assert main([str(question_file), "--db", str(database)]) == 0
+    captured = capsys.readouterr()
+    assert "可以安全部署" not in captured.out
+    assert "将清理" in captured.err
+    assert "q1" in captured.err
+    assert "(grading-changed): 1" in captured.out
+    assert main([str(question_file), "--db", str(database), "--strict"]) == 3
+    assert "--strict" in capsys.readouterr().err
+
+    # A deletion keeps raw attempts but silently clears review state; the
+    # report lists both affected questions and never says "safe to deploy".
+    deleted = copy.deepcopy(grading)
+    del deleted["questions"][1]
+    write_json(question_file, deleted)
+    assert main([str(question_file), "--db", str(database)]) == 0
+    captured = capsys.readouterr()
+    assert "可以安全部署" not in captured.out
+    assert "(deleted): 1" in captured.out
+    assert "q1" in captured.err and "q2" in captured.err
+    assert main([str(question_file), "--db", str(database), "--strict"]) == 3
+
+
+def test_check_question_bank_script_lists_legacy_tombstones(
+    tmp_path, valid_payload, capsys
+):
+    """Pre-registry orphans without a grading identity are reported, not fatal."""
+    from scripts.check_question_bank import main
+
+    app = make_app(tmp_path, valid_payload)
+    client, user = prepare(app)
+    database_path = tmp_path / "mcq.db"
+    database = services(app).progress_repository.database
+    with database.connect() as connection:
+        # A question ID that only ever existed in learner history, plus the
+        # pre-registry world: no registry, no bank state.
+        connection.execute(
+            "INSERT INTO attempts "
+            "(learner_id, question_id, mode, selected_answers, is_correct, answered_at) "
+            "VALUES (?, 'ghost', 'normal', '[\"1\"]', 0, "
+            "'2026-01-01T00:00:00+00:00')",
+            (user,),
+        )
+        connection.execute("DROP TABLE question_registry")
+        connection.execute("DROP TABLE question_bank_state")
+
+    upgraded = create_app(dict(app.config))
+    tombstone = registry(upgraded)["ghost"]
+    assert tombstone.status.value == "retired"
+    assert tombstone.option_ids == ()
+
+    assert main([str(app.config["QUESTION_FILE"]), "--db", str(database_path)]) == 0
+    captured = capsys.readouterr()
+    assert "legacy tombstones without grading identity" in captured.err
+    assert "ghost" in captured.err
+    assert "可以安全部署" in captured.out
+
+
+def test_swap_question_bank_publishes_atomically(tmp_path, valid_payload, capsys):
+    from app.repositories import QuestionLoader
+    from scripts.swap_question_bank import main
+
+    target = tmp_path / "questions.json"
+    target.write_text('{"questions": []}', encoding="utf-8")
+    candidate = write_json(tmp_path / "candidate.json", valid_payload)
+
+    assert main([str(candidate), "--target", str(target)]) == 0
+    assert "统一重启" in capsys.readouterr().out
+    published = json.loads(target.read_text(encoding="utf-8"))
+    assert [question["id"] for question in published["questions"]] == ["q1", "q2"]
+    assert len(QuestionLoader(target).load()) == 2
+    # The swap leaves no temporary sibling behind.
+    assert {path.name for path in tmp_path.iterdir()} == {
+        "candidate.json",
+        "questions.json",
+    }
+
+    # An invalid or missing candidate never touches the live file.
+    broken = tmp_path / "broken.json"
+    broken.write_text('{"questions": [}', encoding="utf-8")
+    assert main([str(broken), "--target", str(target)]) == 1
+    assert main([str(tmp_path / "missing.json"), "--target", str(target)]) == 1
+    assert json.loads(target.read_text(encoding="utf-8")) == published

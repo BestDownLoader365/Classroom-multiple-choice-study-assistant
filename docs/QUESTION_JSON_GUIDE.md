@@ -20,6 +20,8 @@
 
 应用启动时会同时校验 `questions.json` 和 `glossary.json`，两个文件都必须有效。题库维护按 `question.id` 逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该题自身的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py` 预检题库变更的实际影响。
 
+“不会影响学习记录”与“不改变题库结构”是两件事。`chapter_ids`（章节归属）和 `source_id` 决定题目出现在哪些章节筛选、哪些 Review 强化目标和哪些章节进度里，因此它们的变化属于**结构性变化**：学习历史仍然保留，但题库 generation 会 +1，运行旧题库的工作进程在学习页面（包括 `/stats`）统一返回 503，直到**所有 worker 一起重启**。纯展示型章节字段（`chapters[].title`、`chapters[].order`，以及尚无题目引用的新 source/chapter）不属于结构性变化，允许新旧 worker 在下次统一重启前短暂显示不同文案。发布题库文件必须原子替换，详见第 11.6 节。
+
 ## 2. 新题库的推荐完整结构
 
 新题库统一使用 `schema_version: 2`，并显式提供 `sources`、`chapters` 和每道题的课程元数据。
@@ -198,6 +200,7 @@ JSON 文件必须使用 UTF-8 编码。标准 JSON 不允许注释、尾随逗�
 - 修正题干、翻译、解析、选项文案、选项顺序、section/pages，或新增一个错误选项时，**保留原 question ID**，该题的全部学习历史自动保留。
 - 修改题型、正确答案集合，或删除/重命名已有 option ID，属于判题规则变化：该题的历史作答和错题状态会被定向清理（不影响其他题），请谨慎操作并确认确有必要。
 - 删除题目后，该 ID 会被永久保留为退役状态，**不能再分配给另一道题**；把退役 ID 复用于判题规则不同的新题会导致应用拒绝启动（预检脚本会提前发现）。
+- 例外只存在于迁移历史中：pre-registry 阶段由历史作答推导出的退役 ID 没有判题身份（`option_ids` 为空），第一次重新出现时会被直接采用，因此新题可能继承这些 ID 上的旧作答历史。这是迁移期的一次性宽容，不是通用规则；`python scripts/check_question_bank.py` 会把这些记录列为 `legacy tombstones without grading identity`，新内容应改用全新的 ID。
 - 如果误删后想恢复，把原题按原 ID、原判题规则原样加回即可，系统会自动识别为同一道题的回归。
 - 替换为另一门课程并继续使用原数据库时，不要重新从通用的 `q001` 开始复用旧 ID。推荐加入课程命名空间，例如 `calculus-q001`、`history-q001`。
 
@@ -622,6 +625,28 @@ pytest -q
 - 错题列表和复习模式可以正常找到新题目；错题页选择课件或章节后应立即筛选，不再出现“筛选错题”按钮。
 - 题目、选项、反馈和解析中的专业术语能按 `glossary.json` 正确高亮。
 
+### 11.6 预检、原子发布与统一重启
+
+题库文件是运行中的 worker 会直接读取的文件，发布必须按下面的流程完成：
+
+```text
+candidate.json
+    ↓  python scripts/check_question_bank.py candidate.json --db instance/mcq.db
+    ↓  （--strict 时，会清理学习状态的更新返回非 0）
+    ↓  python scripts/swap_question_bank.py candidate.json
+    ↓  同目录临时文件 → fsync → os.replace(temp, questions.json)
+    ↓  统一重启全部应用 worker
+    ↓  curl http://127.0.0.1:8001/ready 确认 200
+```
+
+预检脚本的退出码含义：`0` 可部署（可能同时打印“将清理学习状态”的警告），`1` 题库校验失败，`2` 非法复用退役 ID（启动会被阻止），`3` 仅在使用 `--strict` 时出现，表示更新会清理学习状态。**只要输出中出现清理学习状态的警告，脚本就不会打印“可以安全部署”**；请确认可以接受后再部署。
+
+不要用 `cp` 直接覆盖正在使用的 `questions.json`，也不要依赖编辑器的原地保存：写入过程中若被截断或分两次落盘，恰好在此期间启动或 reload 的 worker 会读到半截 JSON，并报出看起来像题库语法错误的 `Invalid JSON in question bank at line 1, column N`。`scripts/swap_question_bank.py` 只做三件事：校验候选文件、写入同目录临时文件并 fsync、用 `os.replace()` 原子就位。
+
+任何结构性变化（增删题目、判题规则变化、`chapter_ids`/`source_id` 变化）之后都必须**统一重启全部 worker**；只重启一部分会让未被重启的 worker 在学习页面返回 503（这是防止两套题库同时写学习数据的 fail-fast 设计，不要通过忽略 generation 检查或手工改 `question_bank_state.generation` 绕过）。
+
+删除题目还会改变页面统计口径：`attempts` 仍保存在数据库中，但统计只统计仍在题库中的题目，因此累计答题数可能下降、正确率可能变化；题目恢复后这些历史作答会重新计入。恢复数据库备份后同样要统一重启全部 worker，并用 `/ready` 确认状态一致。
+
 ## 12. 常见错误
 
 ### 12.1 Loader / schema 错误
@@ -691,6 +716,7 @@ pytest -q
 - [ ] 每道多选题的题干明确提示多选，答案集合已经复核。
 - [ ] 每题至少一个 chapter，多个 chapter 只用于真正的跨知识点题目。
 - [ ] 每题的 source 和全部 chapters 属于同一资料来源。
+- [ ] `chapter_ids` / `source_id` 的调整已按结构性变化处理（预检、原子替换、统一重启全部 worker、确认 `/ready` 为 200）。
 - [ ] `pages` 只含不重复的正整数，并已核对页码口径。
 - [ ] 标准 JSON、项目 Loader、题库测试和完整测试集全部通过。
 - [ ] 配套 `glossary.json` 已按专业术语库指南完成校验和覆盖审计。

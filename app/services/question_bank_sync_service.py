@@ -8,6 +8,9 @@ truly lost its meaning:
 
 - content-only edits (wording, translations, option order or text, new
   wrong options, section/pages, formatting) keep every learner record;
+- chapter/source moves (`chapter_ids` or `source_id`) keep every learner
+  record but count as a structural change: they advance the bank generation
+  so sibling workers holding the old filing mapping are fenced off;
 - grading-identity changes (type, correct answers, removed/renamed option
   IDs) clear exactly that question's attempts and correction/SRS state;
 - questions that left the bank keep their attempts but silently lose their
@@ -44,7 +47,7 @@ from app.repositories import (
 from . import srs_service as srs
 from .exam_service import ExamService
 from .progress_state import is_valid_progress_state, reconcile_state
-from .question_fingerprint import content_fingerprint
+from .question_fingerprint import content_fingerprint, placement_fingerprint
 from .weak_knowledge_point_service import WeakKnowledgePointService
 
 LOGGER = logging.getLogger(__name__)
@@ -57,6 +60,7 @@ class BankDiff:
     new_ids: tuple[str, ...] = ()
     content_changed_ids: tuple[str, ...] = ()
     grading_changed_ids: tuple[str, ...] = ()
+    placement_changed_ids: tuple[str, ...] = ()
     deleted_ids: tuple[str, ...] = ()
     resurrected_ids: tuple[str, ...] = ()
     violations: tuple[str, ...] = ()
@@ -67,19 +71,31 @@ class BankDiff:
             self.new_ids
             or self.content_changed_ids
             or self.grading_changed_ids
+            or self.placement_changed_ids
             or self.deleted_ids
             or self.resurrected_ids
         )
 
     @property
     def structural(self) -> bool:
-        """Whether the question set or any grading identity changed."""
+        """Whether the question set, grading identity or filing changed.
+
+        Chapter/source moves count: they drive filtering, review selection and
+        chapter progress, so sibling workers holding the old mapping must be
+        fenced off even though no learner history is cleared.
+        """
         return bool(
             self.new_ids
             or self.grading_changed_ids
+            or self.placement_changed_ids
             or self.deleted_ids
             or self.resurrected_ids
         )
+
+    @property
+    def clears_learner_state(self) -> bool:
+        """Whether applying this diff removes stored learner state."""
+        return bool(self.unusable_ids)
 
     @property
     def unusable_ids(self) -> set[str]:
@@ -112,6 +128,16 @@ def _grading_identical(entry: QuestionRegistryEntry, question: Question) -> bool
     )
 
 
+def _placement_known(entry: QuestionRegistryEntry) -> bool:
+    """Return whether the row recorded a chapter/source placement identity.
+
+    Rows written before placement tracking (or the retired tombstones built
+    from learner history) store nothing: the first bank version after the
+    upgrade is adopted as the baseline instead of being reported as a move.
+    """
+    return bool(entry.placement_fingerprint)
+
+
 def diff_questions(
     questions: list[Question],
     registry: dict[str, QuestionRegistryEntry],
@@ -120,6 +146,7 @@ def diff_questions(
     new_ids: list[str] = []
     content_changed: list[str] = []
     grading_changed: list[str] = []
+    placement_changed: list[str] = []
     resurrected: list[str] = []
     violations: list[str] = []
     for question in questions:
@@ -138,6 +165,12 @@ def diff_questions(
             continue
         if not _grading_compatible(entry, question):
             grading_changed.append(question.id)
+        elif _placement_known(entry) and entry.placement_fingerprint != (
+            placement_fingerprint(question)
+        ):
+            # Moving a question between chapters/sources keeps its history but
+            # changes what the bank means: sibling workers must be fenced off.
+            placement_changed.append(question.id)
         elif entry.content_fingerprint != content_fingerprint(question):
             content_changed.append(question.id)
     live_ids = {question.id for question in questions}
@@ -151,9 +184,28 @@ def diff_questions(
         new_ids=tuple(new_ids),
         content_changed_ids=tuple(content_changed),
         grading_changed_ids=tuple(grading_changed),
+        placement_changed_ids=tuple(placement_changed),
         deleted_ids=tuple(sorted(deleted)),
         resurrected_ids=tuple(resurrected),
         violations=tuple(violations),
+    )
+
+
+def needs_placement_backfill(
+    questions: list[Question],
+    registry: dict[str, QuestionRegistryEntry],
+) -> tuple[str, ...]:
+    """Return live IDs whose registry row predates placement tracking.
+
+    The sync adopts their current chapter/source mapping without a generation
+    bump, so later moves can be detected against a real baseline.
+    """
+    return tuple(
+        question.id
+        for question in questions
+        if (entry := registry.get(question.id)) is not None
+        and entry.status is QuestionRegistryStatus.ACTIVE
+        and not _placement_known(entry)
     )
 
 
@@ -187,9 +239,10 @@ class QuestionBankSyncService:
         """Reconcile learner data once per bank change; return the generation.
 
         The raw ``bank_version`` is recorded for diagnostics only.  The
-        returned generation advances exclusively on structural changes, so
-        cosmetic bank edits never invalidate sibling workers and never touch
-        learner data.
+        returned generation advances exclusively on structural changes (the
+        question set, grading identity, or a question's chapter/source
+        placement), so cosmetic bank edits never invalidate sibling workers
+        and never touch learner data.
         """
         now = srs.utc_now()
         questions = self.question_repository.get_all()
@@ -211,18 +264,27 @@ class QuestionBankSyncService:
                     f"questions: {', '.join(diff.violations)}. Retired IDs are "
                     "reserved permanently; assign fresh IDs instead."
                 )
-            if diff.has_changes:
-                self._apply(diff, registry, questions, now)
+            backfill = needs_placement_backfill(questions, registry)
+            if diff.has_changes or backfill:
+                self._apply(diff, registry, questions, now, backfill_ids=backfill)
                 LOGGER.info(
                     "Question bank reconciled: %d new, %d content-only, "
-                    "%d grading-changed, %d deleted, %d resurrected.",
+                    "%d grading-changed, %d placement-changed, %d deleted, "
+                    "%d resurrected, %d placement-backfilled.",
                     len(diff.new_ids),
                     len(diff.content_changed_ids),
                     len(diff.grading_changed_ids),
+                    len(diff.placement_changed_ids),
                     len(diff.deleted_ids),
                     len(diff.resurrected_ids),
+                    len(backfill),
                 )
-            if diff.has_changes or state is None or state[0] != bank_version:
+            if (
+                diff.has_changes
+                or backfill
+                or state is None
+                or state[0] != bank_version
+            ):
                 if diff.structural:
                     generation += 1
                 self.state_repository.save_state(bank_version, generation)
@@ -295,23 +357,29 @@ class QuestionBankSyncService:
         registry: dict[str, QuestionRegistryEntry],
         questions: list[Question],
         now: datetime,
+        *,
+        backfill_ids: tuple[str, ...] = (),
     ) -> None:
         """Persist registry transitions and reconcile affected learner data."""
         seen_at = now.isoformat()
         by_id = {question.id: question for question in questions}
+        refresh_ids = (
+            set(diff.content_changed_ids)
+            | set(diff.grading_changed_ids)
+            | set(diff.placement_changed_ids)
+            | set(diff.resurrected_ids)
+            | set(backfill_ids)
+        )
         entries: list[QuestionRegistryEntry] = []
         for question_id in diff.new_ids:
             entries.append(self._entry_for(by_id[question_id], seen_at=seen_at))
-        for question_id in (
-            diff.content_changed_ids
-            + diff.grading_changed_ids
-            + diff.resurrected_ids
-        ):
+        for question_id in sorted(refresh_ids):
+            existing = registry.get(question_id)
             entries.append(
                 self._entry_for(
                     by_id[question_id],
                     seen_at=seen_at,
-                    first_seen_at=registry[question_id].first_seen_at,
+                    first_seen_at=existing.first_seen_at if existing else None,
                 )
             )
         if entries:
@@ -331,7 +399,8 @@ class QuestionBankSyncService:
         if diff.unusable_ids:
             self._reconcile_learner_data(diff.unusable_ids, now)
         else:
-            # Content-only diffs can still reassign chapters; sweep the
+            # Non-destructive diffs (content-only edits, chapter/source moves
+            # and placement backfills) can still reassign chapters; sweep the
             # verification lists so stale references never linger.
             self.weak_knowledge_point_service.reconcile_all(set())
 
@@ -406,6 +475,7 @@ class QuestionBankSyncService:
             option_ids=tuple(sorted(option.id for option in question.options)),
             correct_answers=tuple(sorted(question.correct_answers)),
             content_fingerprint=content_fingerprint(question),
+            placement_fingerprint=placement_fingerprint(question),
             first_seen_at=first_seen_at or seen_at,
             last_seen_at=seen_at,
         )
