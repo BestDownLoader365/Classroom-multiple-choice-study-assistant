@@ -1436,8 +1436,10 @@ are structural and bump the generation, as above. Pure presentation metadata —
 the bank `title`/`title_zh`, `sources[].title`/`lecture`/`filename`, and
 `chapters[].title` — is not part of any fingerprint, so workers may briefly
 disagree about labels until the next coordinated restart; that inconsistency is
-accepted and only affects wording, never which chapters exist, the order they are
-listed in, or a question's filtering/progress. `scripts/check_question_bank.py`
+accepted and only affects wording, never which chapters exist or a question's
+filtering/progress. One nuance: menus are ordered by `(order, title)`, so when two
+chapters share the same `order`, a title edit can still shift their relative order
+in the menu. `scripts/check_question_bank.py`
 reports the two cases separately (`catalogue-changed` vs `presentation-only`) so
 maintainers know whether the coordinated restart is required or merely optional.
 
