@@ -537,7 +537,7 @@ schema 不要求代码理解某个学科的语义。课程差异应由目录和�
 6. 添加解析和结构化来源信息。
 7. 审核双语内容的一致性。
 8. 由独立 reviewer 执行本节的语义审核，不接受“生成器已经标注的答案”作为证据。
-9. 执行第 11 节中的 JSON、Loader 和 pytest 校验；再按 [`GLOSSARY_GUIDE.md`](GLOSSARY_GUIDE.md) 准备术语库并运行覆盖审计。
+9. 执行第 11 节中的 JSON、Loader 和 pytest 校验；再按 [`GLOSSARY_GUIDE.md`](GLOSSARY_GUIDE.md) 准备术语库并运行 `check_glossary.py` 覆盖校验。
 10. 在浏览器中抽查章节筛选、选项显示、判题、错题复习和术语高亮。
 
 ### 10.1 Generation pass
@@ -579,6 +579,8 @@ schema 不要求代码理解某个学科的语义。课程差异应由目录和�
 
 - **Machine validation** 能检查 JSON syntax、schema、字段类型、ID、引用关系和 `correct_answers` 是否指向已有 option。
 - **Semantic review** 由独立 LLM reviewer 或人工完成，检查答案唯一性、事实、干扰项、隐藏前提、answer leakage、认知难度和 source 的语义支持。
+
+所有课程内容种类都有只读校验脚本，命名统一为 `check_<校验对象>.py`：课程目录/manifest 用 `check_courses.py`，题库用 `check_question_bank.py`，术语表用 `check_glossary.py`。修改内容后必须先运行对应校验，**只有退出码为 `0`** 才能执行 publish course（11.6 节）；校验未通过时不得发布。
 
 当前项目没有自动化“题目语义质量检测脚本”。以下命令均为仓库中真实存在的校验路径，并不能替代第 10.3 节的语义审核。
 
@@ -740,8 +742,9 @@ candidate.json
 - [ ] `chapter_ids` / `source_id` 的调整已按结构性变化处理（预检、原子替换、统一重启全部 worker、确认 `/ready` 为 200）。
 - [ ] 课件/章节的增删、顺序或归属变化已按结构性变化处理（预检中 `catalogue-changed` 为 `yes` 时必须统一重启）。
 - [ ] `pages` 只含不重复的正整数，并已核对页码口径。
-- [ ] 标准 JSON、项目 Loader、题库测试和完整测试集全部通过。
-- [ ] 配套 `glossary.json` 已按专业术语库指南完成校验和覆盖审计。
+- [ ] 标准 JSON、项目 Loader、`check_question_bank.py`、题库测试和完整测试集全部通过。
+- [ ] 配套 `glossary.json` 已按专业术语库指南完成校验和 `check_glossary.py` 覆盖校验。
+- [ ] 校验通过后才发布：任一 `check_*.py` 返回非零时没有执行 publish course，也没有文件被替换。
 - [ ] 已在浏览器中抽查章节筛选、判题、解析、错题即时筛选、错题复习和术语高亮。
 
 ### 14.2 Question quality checklist

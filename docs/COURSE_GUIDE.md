@@ -302,15 +302,19 @@ manifest → fsync 目录。它输出 `published, pending worker activation`，*
 回滚走正常流程：把旧内容当作新候选再发布一次（`check_question_bank.py` + `swap_question_bank.py`），
 **不允许**手工 `generation--`。
 
-### 7.6 术语表审计
+### 7.6 术语表校验
 
 ```bash
-python scripts/audit_glossary.py --course physical_design
-python scripts/audit_glossary.py --all
-python scripts/audit_glossary.py --questions path/questions.json --glossary path/glossary.json  # 显式离线
+python scripts/check_glossary.py --course physical_design
+python scripts/check_glossary.py --all
+python scripts/check_glossary.py --questions path/questions.json --glossary path/glossary.json  # 显式离线
 ```
 
-审计只读取内容，不修改 registry、generation 或任何学习数据。
+校验只读取内容，不修改 registry、generation 或任何学习数据。校验通过后再发布：
+
+```bash
+python scripts/publish_course.py --course physical_design --glossary new_glossary.json --run-preflight
+```
 
 ### 7.7 故障定位
 
@@ -323,6 +327,25 @@ journalctl -u mcq-template.service -n 100 --no-pager | grep -E 'is stale|is unav
 * `stale`：还有 worker 使用旧内容 → 统一重启；只有该课程的页面被围栏。
 * `unavailable`：该课程内容损坏 → 查看日志中的具体原因，修复后用 `check_courses.py` 复核。
 * `undeployed`：数据库有该课程身份，但本 worker 的课程目录未声明它 → 检查部署内容是否齐全。
+
+### 7.8 内容变更统一流程（先校验，后发布）
+
+脚本命名统一为 `check_<校验对象>.py`；每一类课程内容都有一个只读校验脚本，发布命令只切换已通过校验的内容：
+
+| 变更对象 | 校验脚本（只读） | 发布命令 |
+| --- | --- | --- |
+| 课程目录 / manifest / 整门课能否加载 | `check_courses.py` | `publish_course.py --add` / `--enable` / `--disable` |
+| `questions.json` | `check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` | `swap_question_bank.py --course <course_id> candidate.json --db instance/mcq.db`（或 `publish_course.py --questions … --run-preflight`） |
+| `glossary.json` | `check_glossary.py --course <course_id>` | `publish_course.py --course <course_id> --glossary new_glossary.json --run-preflight` |
+
+固定流程（缺一不可）：
+
+1. **准备校验脚本**：确认该内容种类已有 `check_<校验对象>.py`；若还没有，先补齐脚本与测试。
+2. **修改内容**：只编辑候选文件，不要原地覆盖正在使用的 `questions.json` / `glossary.json`。
+3. **运行校验**：`check_courses.py` 必须始终通过；题库再跑 `check_question_bank.py`，术语表再跑 `check_glossary.py`。
+4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`swap_question_bank.py` 与 `publish_course.py --run-preflight` 会在写入前内部重跑校验并拒绝未通过的内容）。发布是纯文件系统切换，最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
+
+校验未通过时不得发布：schema 校验失败或校验脚本返回非零时，发布命令不会替换、不会创建任何文件，也不会推进 generation。
 
 ---
 

@@ -179,8 +179,13 @@ MCQ_Template/
 │           ├── app.js
 │           └── glossary.js
 ├── scripts/
-│   ├── audit_glossary.py
+│   ├── check_courses.py
+│   ├── check_glossary.py
 │   ├── check_question_bank.py
+│   ├── course_tooling.py
+│   ├── migrate_courses.py
+│   ├── publish_course.py
+│   ├── rename_course.py
 │   ├── swap_question_bank.py
 │   ├── start_production.sh
 │   └── stop_production.sh
@@ -260,11 +265,24 @@ These are the user-facing authoring contracts for the two startup-loaded JSON fi
 They document the fields accepted by the current loaders, validation commands,
 content-quality guidance, replacement behavior, and release checklists.
 
-#### `scripts/audit_glossary.py`
+#### `scripts/check_courses.py`
 
-Validates a glossary with `GlossaryLoader`, compares canonical terms and aliases with
-learner-facing question-bank text, reports orphan entries, and emits conservative
-manual-review candidates. It is read-only and does not generate or modify glossary data.
+Course-level gate: validates every manifest (schema version, slug, required paths, path
+containment, declared glossary) and loads every enabled course's question bank *and*
+glossary through the application's own loader, reporting per-course status. Read-only: a
+global catalogue ambiguity exits ``2``, a single broken course exits ``1`` while the
+other courses are still reported.
+
+#### `scripts/check_glossary.py`
+
+Glossary gate: validates a glossary with `GlossaryLoader`, compares canonical terms and
+aliases with learner-facing question-bank text, reports orphan entries, and emits
+conservative manual-review candidates. It is read-only and does not generate or modify
+glossary data. `publish_course.py` re-runs it (offline) before switching over a glossary.
+
+The three ``check_<subject>.py`` scripts are the read-only gates of the content flow
+(check → publish → restart worker); the publish half and the full flow are documented in
+[`COURSE_GUIDE.md`](COURSE_GUIDE.md) §7.8.
 
 #### `scripts/check_question_bank.py`
 

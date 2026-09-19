@@ -1,6 +1,13 @@
 """Course-level operations: add, publish content, enable and disable.
 
-    # add a new course (writes courses/<id>/course.json and copies content in)
+Every course-content change follows the same check-then-publish flow: run the
+matching ``check_<subject>.py`` gate first, and only publish when it exits ``0``::
+
+    # 1) check the candidates (read-only; publishes nothing)
+    python scripts/check_question_bank.py --course physical_design candidate.json --db instance/mcq.db
+    python scripts/check_glossary.py --course physical_design
+
+    # 2) add a new course (writes courses/<id>/course.json and copies content in)
     python scripts/publish_course.py --course physical_design --title "Physical Design" \\
         --questions candidate.json --glossary glossary_candidate.json --add
 
@@ -17,7 +24,10 @@
 Content publication uses the same frozen-bytes, versioned, atomic-manifest
 machinery as ``swap_question_bank.py``: the candidate is read once, validated,
 archived under ``versions/<sha256>/`` and switched over with a single rename.
-Nothing here restarts a worker or bumps a generation.
+Every publish also re-runs the matching check script: a glossary publish (and a
+course creation that carries a glossary) runs ``check_glossary.py`` and refuses
+to switch over content that fails it; ``--run-preflight`` adds the database
+preflight for questions.  Nothing here restarts a worker or bumps a generation.
 
 Exit codes: ``0`` success, ``1`` validation/publish refused, ``2`` usage.
 """
@@ -61,7 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--run-preflight",
         action="store_true",
-        help="also diff against --db before publishing questions",
+        help=(
+            "also run the matching check script before publishing: "
+            "check_question_bank.py (diff against --db) for --questions, "
+            "check_glossary.py for --glossary"
+        ),
     )
     parser.add_argument(
         "--db", default=PROJECT_ROOT / "instance" / "mcq.db", type=Path
@@ -76,6 +90,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--glossary-file", default=PROJECT_ROOT / "glossary.json", type=Path
     )
     return parser
+
+
+def _run_glossary_check(questions_path: Path, glossary_path: Path) -> int:
+    """Run ``check_glossary.py`` offline over a candidate (questions, glossary) pair.
+
+    A non-zero exit means the glossary is invalid, so the caller refuses to
+    publish: the documented flow is check first, publish only when it passes.
+    """
+    from scripts.check_glossary import main as check_main
+
+    return check_main(
+        ["--questions", str(questions_path), "--glossary", str(glossary_path)]
+    )
 
 
 def _add_course(args: argparse.Namespace) -> int:
@@ -96,14 +123,30 @@ def _add_course(args: argparse.Namespace) -> int:
     if args.questions is None:
         print("--add 需要 --questions（新课程必须携带题库）", file=sys.stderr)
         return 2
-    payload, digest = freeze_candidate(args.questions.resolve())
-    questions = validate_bytes(payload)
+    try:
+        payload, digest = freeze_candidate(args.questions.resolve())
+        questions = validate_bytes(payload)
+        glossary_payload: bytes | None = None
+        if args.glossary is not None:
+            glossary_payload, _ = freeze_candidate(args.glossary.resolve())
+            validate_glossary_bytes(glossary_payload)
+    except (ToolingError, OSError) as exc:
+        print(f"候选内容校验失败，未创建课程：\n{exc}", file=sys.stderr)
+        return 1
+    if args.glossary is not None:
+        exit_code = _run_glossary_check(
+            args.questions.resolve(), args.glossary.resolve()
+        )
+        if exit_code != 0:
+            print(
+                f"\n术语表校验返回 {exit_code}：未创建课程，也没有写入任何文件。",
+                file=sys.stderr,
+            )
+            return exit_code
     target.mkdir(parents=True, exist_ok=True)
     write_file_atomically(target / "questions.json", payload)
     glossary_name: str | None = None
-    if args.glossary is not None:
-        glossary_payload, _ = freeze_candidate(args.glossary.resolve())
-        validate_glossary_bytes(glossary_payload)
+    if glossary_payload is not None:
         write_file_atomically(target / "glossary.json", glossary_payload)
         glossary_name = "glossary.json"
     manifest = {
@@ -236,6 +279,16 @@ def main(argv: list[str] | None = None) -> int:
         except (ToolingError, OSError) as exc:
             print(f"候选术语表校验失败，未替换任何文件：\n{exc}", file=sys.stderr)
             return 1
+        if args.run_preflight:
+            exit_code = _run_glossary_check(
+                definition.questions_path, args.glossary.resolve()
+            )
+            if exit_code != 0:
+                print(
+                    f"\n术语表校验返回 {exit_code}：未发布任何内容。",
+                    file=sys.stderr,
+                )
+                return exit_code
         try:
             published = publish_glossary(definition, payload, digest)
         except (ToolingError, OSError) as exc:

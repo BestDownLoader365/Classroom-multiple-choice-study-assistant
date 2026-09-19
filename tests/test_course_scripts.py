@@ -6,6 +6,7 @@ import json
 import pytest
 
 from scripts.check_courses import main as check_courses_main
+from scripts.check_glossary import main as check_glossary_main
 from scripts.check_question_bank import main as check_main
 from scripts.course_tooling import (
     ToolingError,
@@ -17,7 +18,13 @@ from scripts.course_tooling import (
 )
 from scripts.publish_course import main as publish_course_main
 from scripts.swap_question_bank import main as swap_main
-from tests.conftest import course_bank, make_multi_app, write_course, write_json
+from tests.conftest import (
+    course_bank,
+    course_glossary,
+    make_multi_app,
+    write_course,
+    write_json,
+)
 
 A = "course_a"
 B = "course_b"
@@ -240,6 +247,173 @@ def test_check_courses_reports_status_and_exits_nonzero_on_a_broken_course(
 
     write_json(courses_dir / A / "questions.json", {"questions": "broken"})
     assert check_courses_main(common) == 1
+
+
+def test_check_glossary_validates_and_reports_coverage(tmp_path, capsys):
+    """``check_glossary.py`` validates a candidate pair and reports coverage."""
+    questions = tmp_path / "questions.json"
+    glossary = tmp_path / "glossary.json"
+    write_json(questions, course_bank())
+    write_json(glossary, course_glossary("alpha"))
+
+    exit_code = check_glossary_main(
+        ["--questions", str(questions), "--glossary", str(glossary)]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Validated 2 canonical terms" in out
+    # The terms never occur in this corpus, so they are reported as orphans -
+    # advisory output that must not change the exit code.
+    assert "alpha-term-1" in out
+
+
+def test_check_glossary_rejects_an_invalid_glossary(tmp_path, capsys):
+    questions = tmp_path / "questions.json"
+    glossary = tmp_path / "glossary.json"
+    write_json(questions, course_bank())
+    payload = course_glossary("alpha")
+    payload["terms"][0].pop("term_zh")
+    write_json(glossary, payload)
+
+    exit_code = check_glossary_main(
+        ["--questions", str(questions), "--glossary", str(glossary)]
+    )
+
+    assert exit_code == 1
+    assert "ERROR" in capsys.readouterr().err
+
+
+def test_check_glossary_is_course_scoped_and_skips_glossary_less_courses(
+    tmp_path, capsys
+):
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank(), glossary=course_glossary("alpha"))
+    write_course(courses_dir, B, course_bank(("b", "beta")))
+
+    exit_code = check_glossary_main(
+        [
+            "--all",
+            "--courses-dir",
+            str(courses_dir),
+            "--question-file",
+            str(tmp_path / "absent" / "questions.json"),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"=== {A} ===" in out
+    assert f"=== {B} ===" in out
+    assert "没有配置术语表" in out
+
+
+def test_publish_course_runs_the_glossary_check_before_switching_over(
+    tmp_path, capsys
+):
+    """A glossary publish is gated by ``check_glossary.py``."""
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank())
+    glossary = tmp_path / "glossary.json"
+    write_json(glossary, course_glossary("alpha"))
+    common = [
+        "--courses-dir",
+        str(courses_dir),
+        "--question-file",
+        str(tmp_path / "absent" / "questions.json"),
+        "--glossary-file",
+        str(tmp_path / "absent" / "glossary.json"),
+    ]
+
+    assert (
+        publish_course_main(
+            ["--course", A, "--glossary", str(glossary), "--run-preflight", *common]
+        )
+        == 0
+    )
+    digest = hashlib.sha256(glossary.read_bytes()).hexdigest()
+    published = courses_dir / A / "versions" / digest / "glossary.json"
+    manifest = json.loads((courses_dir / A / "course.json").read_text())
+    assert published.is_file()
+    assert manifest["glossary"] == f"versions/{digest}/glossary.json"
+
+    # A glossary that fails the check is never published.
+    before = (courses_dir / A / "course.json").read_bytes()
+    broken = tmp_path / "broken_glossary.json"
+    payload = course_glossary("alpha")
+    payload["terms"][0]["aliases"] = "not-an-array"
+    write_json(broken, payload)
+
+    assert (
+        publish_course_main(
+            ["--course", A, "--glossary", str(broken), "--run-preflight", *common]
+        )
+        == 1
+    )
+    assert (courses_dir / A / "course.json").read_bytes() == before
+    capsys.readouterr()
+
+
+def test_publish_course_add_validates_the_glossary_before_writing(tmp_path, capsys):
+    """``--add`` with a glossary checks it before creating any file."""
+    courses_dir = tmp_path / "courses"
+    courses_dir.mkdir(parents=True)
+    questions = tmp_path / "questions.json"
+    glossary = tmp_path / "glossary.json"
+    write_json(questions, course_bank())
+    write_json(glossary, course_glossary("alpha"))
+    common = [
+        "--courses-dir",
+        str(courses_dir),
+        "--question-file",
+        str(tmp_path / "absent" / "questions.json"),
+        "--glossary-file",
+        str(tmp_path / "absent" / "glossary.json"),
+    ]
+
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                "physical_design",
+                "--add",
+                "--questions",
+                str(questions),
+                "--glossary",
+                str(glossary),
+                *common,
+            ]
+        )
+        == 0
+    )
+    manifest = json.loads(
+        (courses_dir / "physical_design" / "course.json").read_text()
+    )
+    assert manifest["glossary"] == "glossary.json"
+    assert (courses_dir / "physical_design" / "glossary.json").is_file()
+
+    # A failed check creates nothing at all, not even the course directory.
+    bad_glossary = tmp_path / "bad_glossary.json"
+    payload = course_glossary("alpha")
+    payload["schema_version"] = 2
+    write_json(bad_glossary, payload)
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                "another_course",
+                "--add",
+                "--questions",
+                str(questions),
+                "--glossary",
+                str(bad_glossary),
+                *common,
+            ]
+        )
+        == 1
+    )
+    assert not (courses_dir / "another_course").exists()
+    capsys.readouterr()
 
 
 def test_publish_course_can_add_disable_and_reenable(tmp_path, capsys):

@@ -115,6 +115,7 @@ python scripts/migrate_courses.py --db instance/mcq.db --layout
 python scripts/migrate_courses.py --db instance/mcq.db --dry-run       # 应显示"不需要迁移"
 python scripts/check_courses.py                                       # 课程目录校验
 python scripts/check_question_bank.py --course legacy --db instance/mcq.db
+python scripts/check_glossary.py --course legacy                      # 术语表校验（声明了术语表时）
 systemctl start mcq-template.service
 curl -i http://127.0.0.1:8001/ready
 curl -i http://127.0.0.1:8001/ready/legacy

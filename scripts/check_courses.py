@@ -3,14 +3,16 @@
     python scripts/check_courses.py
     python scripts/check_courses.py --json
 
-The command validates every manifest (schema version, ``course_id`` slug,
-required paths, path containment, declared glossary), loads each enabled
-course's content through the application's own loader, and reports per-course
-status.  A *global* catalogue ambiguity (duplicate ``course_id``, invalid
-manifest) exits ``2``; a single broken course package exits ``1`` but still
-reports the other courses.
+This is the course-level gate of the read-only ``check_<subject>.py`` set
+(with ``check_glossary.py`` and ``check_question_bank.py``): it validates every
+manifest (schema version, ``course_id`` slug, required paths, path containment,
+declared glossary) and loads each enabled course's question bank *and* glossary
+through the application's own loader.  A *global* catalogue ambiguity (duplicate
+``course_id``, invalid manifest) exits ``2``; a single broken course package
+exits ``1`` but still reports the other courses.
 
-Nothing is written and no database is touched.
+Nothing is written and no database is touched.  Run it after changing any course
+content and before publishing; never publish while it reports a failure.
 """
 
 from __future__ import annotations

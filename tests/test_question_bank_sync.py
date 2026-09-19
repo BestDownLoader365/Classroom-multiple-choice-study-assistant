@@ -1161,29 +1161,39 @@ def test_check_question_bank_script_reports_catalogue_and_label_changes(
 
 
 def test_swap_question_bank_publishes_atomically(tmp_path, valid_payload, capsys):
+    """The legacy single-file layout is still switched over atomically."""
     from app.repositories import QuestionLoader
     from scripts.swap_question_bank import main
 
+    # Building the app registers the ``legacy`` course so the read-only preflight
+    # has a real baseline to diff against.
+    make_app(tmp_path, valid_payload)
     target = tmp_path / "questions.json"
-    target.write_text('{"questions": []}', encoding="utf-8")
     candidate = write_json(tmp_path / "candidate.json", valid_payload)
+    common = [
+        "--courses-dir",
+        str(tmp_path / "absent" / "courses"),
+        "--question-file",
+        str(target),
+        "--glossary-file",
+        str(tmp_path / "absent" / "glossary.json"),
+        "--db",
+        str(tmp_path / "mcq.db"),
+    ]
 
-    assert main([str(candidate), "--target", str(target)]) == 0
+    assert main([str(candidate), *common]) == 0
     assert "统一重启" in capsys.readouterr().out
     published = json.loads(target.read_text(encoding="utf-8"))
     assert [question["id"] for question in published["questions"]] == ["q1", "q2"]
     assert len(QuestionLoader(target).load()) == 2
-    # The swap leaves no temporary sibling behind.
-    assert {path.name for path in tmp_path.iterdir()} == {
-        "candidate.json",
-        "questions.json",
-    }
+    # The swap leaves no temporary sibling behind (the publication lock stays).
+    assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
 
     # An invalid or missing candidate never touches the live file.
     broken = tmp_path / "broken.json"
     broken.write_text('{"questions": [}', encoding="utf-8")
-    assert main([str(broken), "--target", str(target)]) == 1
-    assert main([str(tmp_path / "missing.json"), "--target", str(target)]) == 1
+    assert main([str(broken), *common]) == 1
+    assert main([str(tmp_path / "missing.json"), *common]) == 1
     assert json.loads(target.read_text(encoding="utf-8")) == published
 
 

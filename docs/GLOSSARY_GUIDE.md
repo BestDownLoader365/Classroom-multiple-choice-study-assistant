@@ -146,11 +146,11 @@ Loader 会对每个 canonical term 和 alias 执行 Unicode NFKC 规范化、大
 - 分类应使用稳定、粒度一致的名称，例如 `Descriptive Statistics`、`Hypothesis Testing`，不要把近义类别拆成大小写或单复数不同的多组。
 - 术语数组的顺序就是词汇卡片的显示顺序；建议按课程顺序或分类后概念顺序排列。
 
-## 8. 哪些课程文本会参与覆盖审计
+## 8. 哪些课程文本会参与覆盖校验
 
 术语高亮只发生在模板明确标记的学习内容中。目前包括题干、选项、答案反馈、解析和错题内容。
 
-`scripts/audit_glossary.py` 为了检查术语覆盖面，会读取**同一门课程**的 `questions.json` 中面向学习者的英文文本：
+`scripts/check_glossary.py` 为了检查术语覆盖面，会读取**同一门课程**的 `questions.json` 中面向学习者的英文文本：
 
 - `sources[].title`；
 - `chapters[].title`；
@@ -159,9 +159,9 @@ Loader 会对每个 canonical term 和 alias 执行 Unicode NFKC 规范化、大
 - `questions[].options[].text`；
 - `questions[].explanation`，并忽略末尾旧式 `Source: ...` 引用。
 
-ID、文件名、页码、中文翻译和答案 ID 不属于覆盖语料。审计范围和页面高亮范围用途不同，因此某个出现在 source/chapter 标题里的词条可以通过覆盖审计，但不一定会在普通题目页出现高亮。
+ID、文件名、页码、中文翻译和答案 ID 不属于覆盖语料。校验范围和页面高亮范围用途不同，因此某个出现在 source/chapter 标题里的词条可以通过覆盖校验，但不一定会在普通题目页出现高亮。
 
-## 9. 校验与审计命令
+## 9. 校验命令
 
 以下命令均在项目根目录执行，`<course_id>` 用课程 manifest 里的身份（例如 `eek5106`）；只声明了一门启用课程时可以省略 `--course`。
 
@@ -193,37 +193,37 @@ python scripts/check_courses.py
 
 只有看到 `OK`，才表示字段类型、必填值、ID 和标签冲突都通过了当前代码校验。
 
-### 9.3 审计与题库的覆盖关系
+### 9.3 术语表覆盖校验
 
-审核单门课程（用该课程自己的题库做语料）：
+校验单门课程（用该课程自己的题库做语料）：
 
 ```bash
-python scripts/audit_glossary.py --course eek5106
+python scripts/check_glossary.py --course eek5106
 ```
 
-审核全部启用课程：
+校验全部启用课程：
 
 ```bash
-python scripts/audit_glossary.py --all
+python scripts/check_glossary.py --all
 ```
 
 显式离线检查任意两个文件（不经过课程目录）：
 
 ```bash
-python scripts/audit_glossary.py \
+python scripts/check_glossary.py \
   --questions path/to/questions.json \
   --glossary path/to/glossary.json
 ```
 
-审计只读取内容，不会修改 `question_registry`、generation 或任何学习数据。
+校验只读取内容，不会修改 `question_registry`、generation 或任何学习数据。
 
 输出含义：
 
 - `Validated ...`：术语 JSON 已通过 Loader；
-- `Orphan entries`：该词条的 term 和 aliases 都没有在审计语料中出现，可能是多余词条、缺少 alias，或题库还未覆盖该概念；
+- `Orphan entries`：该词条的 term 和 aliases 都没有在校验语料中出现，可能是多余词条、缺少 alias，或题库还未覆盖该概念；
 - `Possible uncovered glossary candidates`：脚本从大写缩写、括号缩写和连字符 token 中找出的人工复核候选；它不是“必须加入”的错误清单。
 
-审计不会修改任何 JSON，也不会自动生成翻译。只要文件能读取且 schema 合法，即使报告 orphan 或候选，命令也会以成功状态结束；是否增删词条必须由课程内容审核决定。
+校验不会修改任何 JSON，也不会自动生成翻译。只要文件能读取且 schema 合法，即使报告 orphan 或候选，命令也会以成功状态结束；是否增删词条必须由课程内容审核决定。校验通过后再发布（见第 12 节）。
 
 ### 9.4 运行测试
 
@@ -268,9 +268,9 @@ pytest -q
 3. 为每个概念确定 canonical term、中文译名、稳定 ID 和分类。
 4. 根据题库真实写法补充无歧义 aliases。
 5. 编写简洁、课程语境明确的中英文定义。
-6. 运行 JSON 语法检查、GlossaryLoader 校验和覆盖审计。
+6. 运行 `python -m json.tool`、`python scripts/check_glossary.py --course <course_id>` 覆盖校验；课程目录或 manifest 有改动时再跑 `python scripts/check_courses.py`。
 7. 人工处理 orphan 与候选报告，不要把候选结果直接批量写入术语库。
-8. 同时部署 `questions.json` 和 `glossary.json`（`publish_course.py` 可一次发布两者），重启应用进程并完成浏览器验收。
+8. 校验通过后再部署 `questions.json` 和 `glossary.json`（`python scripts/publish_course.py --course <course_id> --questions ... --glossary ... --run-preflight` 可一次发布两者），重启应用进程并完成浏览器验收。
 
 更换 `questions.json` 时按 [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) 第 11.6 节发布：先预检（`--course <course_id>`）、再原子发布（`swap_question_bank.py` / `publish_course.py`）、最后更新 worker。题库按 `question.id` **在该课程内**逐题增量同步，**不会重置该课程的学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进**该课程**的 generation，让仍在运行旧内容的 worker 只在该课程的学习页面返回 503，因此这类发布要更新 worker，但**不影响其他课程**。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。发布新课程时建议两个文件一起审核，避免旧术语出现在新题库中。
 
@@ -285,6 +285,7 @@ pytest -q
 - [ ] 需要识别的复数、缩写、空格和连字符变体已显式加入 aliases。
 - [ ] 中文译名和定义已经过课程内容审核。
 - [ ] 分类名称与粒度一致，词条顺序符合学习需要。
-- [ ] 标准 JSON、GlossaryLoader、覆盖审计和完整测试集已运行。
+- [ ] 标准 JSON、GlossaryLoader、`check_glossary.py` 覆盖校验、`check_courses.py` 和完整测试集已运行且通过。
 - [ ] orphan 和候选报告已经人工复核。
+- [ ] 校验全部通过后才执行 publish course（`--glossary … --run-preflight`）；任一校验失败时没有发布任何内容。
 - [ ] 已更新 worker 并完成桌面端、手机端、鼠标和键盘验收。

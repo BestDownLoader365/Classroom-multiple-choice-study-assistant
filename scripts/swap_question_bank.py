@@ -17,6 +17,11 @@ column N`` — a publishing artefact mistaken for a broken bank.  This helper
     python scripts/check_question_bank.py --course physical_design candidate.json
     python scripts/swap_question_bank.py --course physical_design candidate.json --db instance/mcq.db
 
+This is the publish half of the unified flow: ``check_question_bank.py`` is the
+read-only gate, and this command refuses to switch the manifest over unless that
+gate (re-run internally) exits ``0``.  Glossary changes use the same flow with
+``check_glossary.py`` + ``publish_course.py --glossary``.
+
 Filesystem publication and database activation are **not** one transaction: the
 command reports ``published, pending worker activation``.  It never restarts
 anything and never bumps the course generation itself — the startup

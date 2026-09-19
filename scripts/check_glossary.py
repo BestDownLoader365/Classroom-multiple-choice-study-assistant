@@ -1,5 +1,30 @@
 #!/usr/bin/env python3
-"""Validate a glossary and report its coverage of a question-bank corpus."""
+"""Check a glossary: validate it and report its coverage of a question-bank corpus.
+
+One ``check_<subject>.py`` script guards every kind of course content, and all of
+them are read-only::
+
+    python scripts/check_courses.py        # manifests, paths, every course loads
+    python scripts/check_glossary.py       # glossary schema plus corpus coverage
+    python scripts/check_question_bank.py  # question bank schema plus registry diff
+
+The glossary gate is run per course against that course's own bank::
+
+    python scripts/check_glossary.py --course eek5106
+    python scripts/check_glossary.py --all
+    python scripts/check_glossary.py --questions path/questions.json --glossary path/glossary.json
+
+``--questions``/``--glossary`` run fully offline: no catalogue, no database and no
+registry writes.  Every other mode resolves the course(s) through the
+application's own loader, so the same validation the workers run is reused here.
+
+Nothing is published by this script.  Run it *before* publishing; the publish
+commands (``publish_course.py``, ``swap_question_bank.py``) refuse to switch over
+content that does not pass its check.
+
+Exit codes: ``0`` the glossary is valid (orphan/candidate reports are advisory),
+``1`` the glossary (or its corpus) fails to load or fails validation.
+"""
 
 import argparse
 import json
@@ -77,8 +102,8 @@ def candidates(corpus: str) -> list[tuple[str, int]]:
     )
 
 
-def audit_one(questions_path: Path, glossary_path: Path) -> int:
-    """Audit one (questions, glossary) pair and print its report."""
+def check_one(questions_path: Path, glossary_path: Path) -> int:
+    """Check one (questions, glossary) pair and print its report."""
     try:
         glossary = GlossaryLoader(glossary_path.resolve()).load()
         question_payload = json.loads(questions_path.read_text(encoding="utf-8"))
@@ -126,16 +151,16 @@ def audit_one(questions_path: Path, glossary_path: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--course",
         default=None,
-        help="course_id whose glossary should be audited against its own bank",
+        help="course_id whose glossary should be checked against its own bank",
     )
     parser.add_argument(
         "--all",
         action="store_true",
-        help="audit every declared, enabled course",
+        help="check every declared, enabled course",
     )
     parser.add_argument(
         "--courses-dir",
@@ -174,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         questions = (args.questions or args.question_file).resolve()
         glossary = (args.glossary or PROJECT_ROOT / "glossary.json").resolve()
         print(f"offline: {questions} + {glossary}")
-        return audit_one(questions, glossary)
+        return check_one(questions, glossary)
 
     loader = build_loader(args.courses_dir, args.question_file, args.question_file.parent / "glossary.json")
     try:
@@ -193,13 +218,13 @@ def main(argv: list[str] | None = None) -> int:
     for definition in definitions:
         print(f"\n=== {definition.course_id} ===")
         if definition.glossary_path is None:
-            print("该课程没有配置术语表（glossary: null），跳过审核。")
+            print("该课程没有配置术语表（glossary: null），跳过校验。")
             continue
         exit_code = max(
-            exit_code, audit_one(definition.questions_path, definition.glossary_path)
+            exit_code, check_one(definition.questions_path, definition.glossary_path)
         )
     print(
-        "\n审核只读取内容，不修改 question_registry、generation 或任何学习数据。"
+        "\n校验只读取内容，不修改 question_registry、generation 或任何学习数据。"
     )
     return exit_code
 

@@ -85,7 +85,7 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 题库与术语库各有与当前 Loader 同步的独立指南，多课程运营请看课程手册：
 
 - [`questions.json` 题库编写指南](docs/QUESTION_GUIDE.md)：题目、目录、多章节归属、内容质量、校验与迁移；
-- [`glossary.json` 专业术语库编写指南](docs/GLOSSARY_GUIDE.md)：术语、别名、翻译、定义、分类、匹配规则、覆盖审计与验收；
+- [`glossary.json` 专业术语库编写指南](docs/GLOSSARY_GUIDE.md)：术语、别名、翻译、定义、分类、匹配规则、覆盖校验与验收；
 - [课程模型与运营手册](docs/COURSE_GUIDE.md)：课程 manifest、URL、切课、就绪检查、按课程发布与故障隔离；
 - [多课程迁移与回滚手册](docs/MULTI_COURSE_MIGRATION.md)：命名空间迁移、字段级验证、故障注入与回滚。
 
@@ -193,15 +193,15 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 Root 必填字段为 `schema_version`、`title`、`title_zh`、`terms`；`description` 和 `description_zh` 可选。每个 term 必须包含 `id`、`term`、`term_zh`，可选字段为 `aliases`、`definition`、`definition_zh`、`category`。分类直接按 `terms[].category` 首次出现顺序生成，不需要维护第二份 categories 数组。详细的字段表、alias 设计、Unicode 边界与冲突规则见专业术语库指南。
 
-Loader 会拒绝重复 ID、标准化后重复的 canonical term、空 alias、term/alias 冲突和同一 alias 指向多个词条。发布前可运行通用审计：
+Loader 会拒绝重复 ID、标准化后重复的 canonical term、空 alias、term/alias 冲突和同一 alias 指向多个词条。发布前运行统一命名的术语表校验脚本 `check_glossary.py`：
 
 ```bash
-python scripts/audit_glossary.py --course physical_design   # 审核某门课的术语表
-python scripts/audit_glossary.py --all                       # 审核全部启用课程
-python scripts/audit_glossary.py --questions path/to/questions.json --glossary path/to/glossary.json  # 显式离线
+python scripts/check_glossary.py --course physical_design   # 校验某门课的术语表
+python scripts/check_glossary.py --all                       # 校验全部启用课程
+python scripts/check_glossary.py --questions path/to/questions.json --glossary path/to/glossary.json  # 显式离线
 ```
 
-审计只读取内容，不会修改 `question_registry`、generation 或任何学习数据。审计会验证 schema、报告未在学习语料中出现的 orphan entries，并给出大写缩写、括号缩写和连字符 token 等“可能遗漏候选”；候选只供人工复核，不会自动写入 glossary 或生成翻译。
+校验只读取内容，不会修改 `question_registry`、generation 或任何学习数据。它会验证 schema、报告未在学习语料中出现的 orphan entries，并给出大写缩写、括号缩写和连字符 token 等“可能遗漏候选”；候选只供人工复核，不会自动写入 glossary 或生成翻译。
 
 `sources` 和 `chapters` 是**该课程**题库内唯一的课程目录；题目通过 `chapter_ids` 可以同时属于同一份课程资料下的一个或多个章节，筛选任一所属章节都能找到该题。
 
@@ -217,6 +217,23 @@ python scripts/audit_glossary.py --questions path/to/questions.json --glossary p
 - 判题使用 `option.id`，不受随机显示顺序影响。
 - 提供 `sources` / `chapters` 目录时，每题必须包含有效的 `source_id` 和非空、无重复的 `chapter_ids`；所有章节必须属于该 `source_id`。旧的单值 `chapter_id` 仍兼容，但不能与 `chapter_ids` 同时提供。
 - `pages` 如存在，必须为不重复的正整数数组。
+
+## 内容变更统一流程
+
+脚本命名统一为 `check_<校验对象>.py`，每一类课程内容都有一个只读校验脚本。修改任何课程内容都必须遵循「准备校验脚本 → 修改内容 → 运行校验 → 重新执行 publish course」，**校验未通过时不得发布**：
+
+| 变更对象 | 校验脚本（只读，先运行） | 发布命令（校验通过后） |
+| --- | --- | --- |
+| 课程目录 / manifest / 整门课能否加载 | `python scripts/check_courses.py` | `python scripts/publish_course.py --add` / `--enable` / `--disable` |
+| `questions.json` | `python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` | `python scripts/swap_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` |
+| `glossary.json` | `python scripts/check_glossary.py --course <course_id>` | `python scripts/publish_course.py --course <course_id> --glossary new_glossary.json --run-preflight` |
+
+1. **准备校验脚本**：确认该内容种类已有 `check_<校验对象>.py`；没有就先补齐脚本和测试。
+2. **修改内容**：只编辑候选文件，不要原地覆盖正在使用的 `questions.json` / `glossary.json`。
+3. **运行校验**：`check_courses.py` 必须始终通过；题库再用 `check_question_bank.py`，术语表再用 `check_glossary.py`。
+4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`swap_question_bank.py` 与 `publish_course.py --run-preflight` 会在写入前内部重跑校验并拒绝未通过的内容）。发布是纯文件系统切换，最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
+
+校验失败时，发布命令不会替换或创建任何文件，也不会推进 generation；完整运维细节见[课程模型与运营手册](docs/COURSE_GUIDE.md)第 7.8 节。
 
 ## 数据说明
 
@@ -245,7 +262,7 @@ python scripts/audit_glossary.py --questions path/to/questions.json --glossary p
 ## 测试
 
 ```bash
-python scripts/audit_glossary.py
+python scripts/check_glossary.py --all
 pytest
 ```
 
