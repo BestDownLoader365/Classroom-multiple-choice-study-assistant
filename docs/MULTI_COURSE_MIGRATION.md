@@ -191,5 +191,6 @@ python scripts/publish_course.py --course physical_design --questions old_questi
 | `/courses` 显示 `undeployed` 的课程 | 数据库有身份但本 worker 未声明 | 检查部署内容是否齐全；这不影响就绪度 |
 | 迁移被拒绝并列出 exam_id | 旧库有孤儿 `exam_questions` | 人工确认后修复这些行，再重试 |
 | 想给 legacy 课程换一个真实的课程 ID | `course_id` 就是 namespace | `python scripts/rename_course.py --db instance/mcq.db --from legacy --to <course_id> --courses-dir courses --rename-directory`（自动备份、单事务、前后计数校验）。它会一起更新 `legacy_course_id`，所以重启后不会再出现空的 `legacy` 课程 |
-| 迁移后 `/courses` 出现一个空的 `legacy`（undeployed） | 该行是旧版本启动时写入的占位身份 | 用 `rename_course.py` 迁走历史，或确认数据库里该 namespace 已无数据后删除这一行；当前版本只在缺失时才创建占位行 |
+| 迁移后 `/courses` 出现一个空的 `legacy`（undeployed） | 该行是持久化的 `legacy_course_id` 命名空间占位身份，由启动逻辑维护（缺失即重建） | 用 `rename_course.py --rename-directory` 把历史改挂到真实课程 ID；不要手工删除这一行，它会被重建。真正需要删除一门 manifest 课程时用 `python scripts/delete_course.py --course <course_id> --dry-run` 预览后删除 |
+| 想彻底删除一门课程（目录 + 数据库引用） | 手工 `rm -rf courses/<id>` 会留下 `courses` 身份、学习数据、`question_bank_state`、`question_registry` 退役记录与 `default_course_id` 偏好 | `python scripts/delete_course.py --course <course_id> --dry-run` 先预览，确认后去掉 `--dry-run`（默认备份数据库；仍有学习数据时需 `--force`） |
 

@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import shutil
+import sqlite3
 
 import pytest
 
@@ -16,6 +18,7 @@ from scripts.course_tooling import (
     publish_questions,
     resolve_definition,
 )
+from scripts.delete_course import main as delete_course_main
 from scripts.publish_course import main as publish_course_main
 from tests.conftest import (
     course_bank,
@@ -662,4 +665,544 @@ def test_rename_course_moves_the_namespace_without_touching_history(tmp_path, ca
         == 1
     )
     capsys.readouterr()
+
+
+# --------------------------------------------------- default candidate files
+
+
+def _changed_bank(tag: str = "alpha", text: str = "Rewritten for alpha") -> dict:
+    """A bank whose first question was edited (content-only, no generation bump)."""
+    payload = course_bank(("a", tag))
+    payload["questions"][0]["text"] = text
+    return payload
+
+
+def test_check_question_bank_defaults_to_the_course_candidate(world, capsys):
+    """No positional path: the course's ``questions_candidate.json`` is checked."""
+    app, courses_dir, database, _digest = world
+    del app
+    write_json(courses_dir / A / "questions_candidate.json", _changed_bank())
+
+    assert check_main(["--course", A, *cli_common(courses_dir, database)]) == 0
+    out = capsys.readouterr().out
+    assert "questions_candidate.json" in out
+    assert "(content-only): 1" in out
+
+    # --published ignores the working copy and re-checks what the course serves.
+    assert check_main(["--course", A, "--published", *cli_common(courses_dir, database)]) == 0
+    out = capsys.readouterr().out
+    assert "questions_candidate.json" not in out
+    assert "(content-only): 1" not in out
+
+
+def test_check_question_bank_maps_a_candidate_inside_a_published_course(world, capsys):
+    """A working copy next to the manifest belongs to that course, not to legacy."""
+    app, courses_dir, database, _digest = world
+    del app
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                A,
+                "--questions",
+                str(courses_dir / A / "questions.json"),
+                *cli_common(courses_dir, database),
+            ]
+        )
+        == 0
+    )
+    # The manifest now points at versions/<digest>/, so the published file is no
+    # longer a sibling of the course's default working copy.
+    candidate = write_json(courses_dir / A / "questions_candidate.json", _changed_bank())
+
+    assert check_main([str(candidate), *cli_common(courses_dir, database)]) == 0
+    out = capsys.readouterr().out
+    assert f"课程 (course_id): {A}" in out
+
+
+def test_check_question_bank_refuses_published_with_an_explicit_path(world, capsys):
+    app, courses_dir, database, _digest = world
+    del app
+    candidate = courses_dir / A / "questions_candidate.json"
+    write_json(candidate, course_bank())
+    assert (
+        check_main(
+            [str(candidate), "--published", *cli_common(courses_dir, database)]
+        )
+        == 2
+    )
+    assert "二选一" in capsys.readouterr().err
+
+
+def test_check_glossary_defaults_to_the_course_candidates(tmp_path, capsys):
+    """Course mode reads the two default working copies when they exist."""
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank(), glossary=course_glossary("alpha"))
+    app = make_multi_app(
+        tmp_path, {A: course_bank()}, glossaries={A: course_glossary("alpha")}
+    )
+    del app
+    candidate_glossary = course_glossary("alpha")
+    candidate_glossary["terms"].append(
+        {"id": "alpha-term-3", "term": "alpha term three", "term_zh": "三"}
+    )
+    write_json(courses_dir / A / "glossary_candidate.json", candidate_glossary)
+    write_json(courses_dir / A / "questions_candidate.json", _changed_bank())
+    common = [
+        "--courses-dir",
+        str(courses_dir),
+        "--question-file",
+        str(tmp_path / "absent" / "questions.json"),
+    ]
+
+    assert check_glossary_main(["--course", A, *common]) == 0
+    out = capsys.readouterr().out
+    assert "Validated 3 canonical terms" in out
+    assert "glossary_candidate.json" in out
+    assert "语料 (candidate)" in out
+
+    # --published falls back to the deployed pair (2 terms).
+    assert check_glossary_main(["--course", A, "--published", *common]) == 0
+    out = capsys.readouterr().out
+    assert "Validated 2 canonical terms" in out
+    assert "语料 (published)" in out
+
+
+def test_publish_course_uses_the_default_candidates(tmp_path, capsys):
+    """A bare ``--course`` publishes both default working copies."""
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank(), glossary=course_glossary("alpha"))
+    app = make_multi_app(
+        tmp_path, {A: course_bank()}, glossaries={A: course_glossary("alpha")}
+    )
+    del app
+    database = tmp_path / "mcq.db"
+    questions = write_json(
+        courses_dir / A / "questions_candidate.json", _changed_bank()
+    )
+    glossary = course_glossary("alpha")
+    glossary["terms"].append(
+        {"id": "alpha-term-3", "term": "alpha term three", "term_zh": "三"}
+    )
+    glossary_path = write_json(courses_dir / A / "glossary_candidate.json", glossary)
+
+    assert publish_course_main(["--course", A, *cli_common(courses_dir, database)]) == 0
+
+    manifest = json.loads((courses_dir / A / "course.json").read_text())
+    questions_digest = hashlib.sha256(questions.read_bytes()).hexdigest()
+    glossary_digest = hashlib.sha256(glossary_path.read_bytes()).hexdigest()
+    assert manifest["questions"] == f"versions/{questions_digest}/questions.json"
+    assert manifest["glossary"] == f"versions/{glossary_digest}/glossary.json"
+    assert "使用默认候选" in capsys.readouterr().out
+
+
+
+def test_publish_course_add_uses_the_default_candidates(tmp_path, capsys):
+    """``--add`` picks the new course's default working copies up."""
+    courses_dir = tmp_path / "courses"
+    target = courses_dir / "physical_design"
+    target.mkdir(parents=True)
+    write_json(target / "questions_candidate.json", course_bank())
+    write_json(target / "glossary_candidate.json", course_glossary("alpha"))
+
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                "physical_design",
+                "--add",
+                "--title",
+                "Physical Design",
+                *cli_common(courses_dir, tmp_path / "mcq.db"),
+            ]
+        )
+        == 0
+    )
+
+    manifest = json.loads((target / "course.json").read_text())
+    assert manifest["title"] == "Physical Design"
+    assert manifest["questions"] == "questions.json"
+    assert manifest["glossary"] == "glossary.json"
+    assert (target / "questions.json").is_file()
+    assert (target / "glossary.json").is_file()
+
+    # Without any candidate at all, --add points at the path it expected.
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                "empty_course",
+                "--add",
+                *cli_common(courses_dir, tmp_path / "mcq.db"),
+            ]
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert "questions_candidate.json" in err
+    assert not (courses_dir / "empty_course").exists()
+
+
+def test_publish_course_without_content_names_the_default_paths(tmp_path, capsys):
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank())
+
+    assert (
+        publish_course_main(
+            ["--course", A, *cli_common(courses_dir, tmp_path / "mcq.db")]
+        )
+        == 2
+    )
+    err = capsys.readouterr().err
+    assert "questions_candidate.json" in err
+    assert "glossary_candidate.json" in err
+
+
+def test_publish_course_ignores_a_glossary_candidate_the_course_never_declared(
+    tmp_path, capsys
+):
+    """Enabling a glossary for a ``glossary: null`` course stays explicit."""
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank())
+    app = make_multi_app(tmp_path, {A: course_bank()})
+    del app
+    database = tmp_path / "mcq.db"
+    write_json(courses_dir / A / "questions_candidate.json", _changed_bank())
+    write_json(courses_dir / A / "glossary_candidate.json", course_glossary("alpha"))
+
+    assert publish_course_main(["--course", A, *cli_common(courses_dir, database)]) == 0
+    manifest = json.loads((courses_dir / A / "course.json").read_text())
+    assert manifest["glossary"] is None
+    assert "glossary 为 null" in capsys.readouterr().out
+
+
+
+# ------------------------------------------------------------- delete course
+
+
+SCOPED_TABLES = (
+    "quiz_progress",
+    "attempts",
+    "wrong_questions",
+    "weak_knowledge_points",
+    "exam_sessions",
+    "question_bank_state",
+    "question_registry",
+)
+
+
+def _scalar(database, sql: str, params: tuple = ()):
+    connection = sqlite3.connect(database)
+    try:
+        return connection.execute(sql, params).fetchone()[0]
+    finally:
+        connection.close()
+
+
+def _seed_course_state(database, course_id: str) -> None:
+    """Give one course a full database footprint: learner rows, exam, bookkeeping."""
+    stamp = "2026-01-01T00:00:00+00:00"
+    exam_id = f"exam-{course_id}"
+    statements = (
+        (
+            "INSERT OR REPLACE INTO quiz_progress "
+            "(learner_id, course_id, mode, bank_version, state) "
+            "VALUES (?, ?, 'normal', 'bank-v1', ?)",
+            ("u1", course_id, json.dumps({"position": 0})),
+        ),
+        (
+            "INSERT OR REPLACE INTO attempts (learner_id, course_id, question_id, "
+            "mode, selected_answers, is_correct, answered_at) "
+            "VALUES (?, ?, 'q001', 'normal', ?, 1, ?)",
+            ("u1", course_id, json.dumps(["a"]), stamp),
+        ),
+        (
+            "INSERT OR REPLACE INTO wrong_questions "
+            "(learner_id, course_id, question_id, last_wrong_at) "
+            "VALUES (?, ?, 'q001', ?)",
+            ("u1", course_id, stamp),
+        ),
+        (
+            "INSERT OR REPLACE INTO weak_knowledge_points "
+            "(learner_id, course_id, chapter_id, last_wrong_at, updated_at) "
+            "VALUES (?, ?, 'chapter_1', ?, ?)",
+            ("u1", course_id, stamp, stamp),
+        ),
+        (
+            "INSERT OR REPLACE INTO exam_sessions "
+            "(id, course_id, learner_id, status, question_count, option_seed, "
+            "created_at, started_at) VALUES (?, ?, 'u1', 'in_progress', 1, '1', ?, ?)",
+            (exam_id, course_id, stamp, stamp),
+        ),
+        (
+            "INSERT OR REPLACE INTO exam_questions (exam_id, position, question_id) "
+            "VALUES (?, 0, 'q001')",
+            (exam_id,),
+        ),
+        (
+            "INSERT OR REPLACE INTO question_bank_state "
+            "(course_id, bank_version, generation) VALUES (?, 'bank-v1', 1)",
+            (course_id,),
+        ),
+        (
+            "INSERT OR REPLACE INTO question_registry "
+            "(course_id, question_id, status, question_type, option_ids, "
+            "correct_answers, content_fingerprint, first_seen_at, last_seen_at) "
+            "VALUES (?, 'q999', 'retired', 'single', ?, ?, 'c', ?, ?)",
+            (course_id, json.dumps(["a", "b"]), json.dumps(["a"]), stamp, stamp),
+        ),
+    )
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for sql, params in statements:
+            connection.execute(sql, params)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _set_default_course(database, course_id: str) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "INSERT INTO schema_meta (key, value) VALUES ('default_course_id', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (course_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _snapshot(database, course_id: str) -> dict[str, int]:
+    """Count every row that belongs to one course, across every table."""
+    counts = {
+        table: _scalar(
+            database, f"SELECT COUNT(*) FROM {table} WHERE course_id = ?", (course_id,)
+        )
+        for table in SCOPED_TABLES
+    }
+    counts["exam_questions"] = _scalar(
+        database,
+        "SELECT COUNT(*) FROM exam_questions q JOIN exam_sessions s "
+        "ON s.id = q.exam_id WHERE s.course_id = ?",
+        (course_id,),
+    )
+    counts["courses"] = _scalar(
+        database, "SELECT COUNT(*) FROM courses WHERE course_id = ?", (course_id,)
+    )
+    return counts
+
+
+def _seeded_two_course_world(tmp_path):
+    """A two-course deployment whose courses both own learner data."""
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank(), glossary=course_glossary("alpha"))
+    write_course(courses_dir, B, course_bank(("b", "beta")))
+    app = make_multi_app(
+        tmp_path,
+        {A: course_bank(), B: course_bank(("b", "beta"))},
+        glossaries={A: course_glossary("alpha")},
+    )
+    database = tmp_path / "mcq.db"
+    _seed_course_state(database, A)
+    _seed_course_state(database, B)
+    _set_default_course(database, A)
+    return app, courses_dir, database
+
+
+
+def test_delete_course_removes_directory_and_every_namespace_row(tmp_path, capsys):
+    """The directory and every database reference go together, and only that one."""
+    app, courses_dir, database = _seeded_two_course_world(tmp_path)
+    before_b = _snapshot(database, B)
+
+    assert (
+        delete_course_main(
+            ["--course", A, "--force", *cli_common(courses_dir, database)]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "已删除课程目录" in out
+
+    # The directory is gone; the other course is untouched.
+    assert not (courses_dir / A).exists()
+    assert (courses_dir / B / "course.json").is_file()
+
+    # No scoped row, no registry tombstone, no generation row is left for A.
+    assert _snapshot(database, A) == dict.fromkeys(_snapshot(database, A), 0)
+    assert _snapshot(database, B) == before_b
+    # Only B and the persisted legacy placeholder identity remain.
+    assert (
+        _scalar(
+            database,
+            "SELECT GROUP_CONCAT(course_id) FROM "
+            "(SELECT course_id FROM courses ORDER BY course_id)",
+        )
+        == "course_b,legacy"
+    )
+
+    # The navigation preference pointed at A and was cleared with it.
+    assert (
+        _scalar(
+            database,
+            "SELECT COUNT(*) FROM schema_meta WHERE key = 'default_course_id'",
+        )
+        == 0
+    )
+    # A timestamped backup was written before any deletion.
+    assert list(tmp_path.glob("mcq.db.bak-*"))
+
+    # The application still assembles, and no longer serves A.
+    from app import create_app
+
+    restarted = create_app(dict(app.config))
+    registry = restarted.extensions["mcq_services"].course_registry
+    assert registry.has(A) is False
+    assert registry.has(B) is True
+
+
+
+def test_delete_course_dry_run_writes_nothing(tmp_path, capsys):
+    app, courses_dir, database = _seeded_two_course_world(tmp_path)
+    del app
+    before_a = _snapshot(database, A)
+    manifest_before = (courses_dir / A / "course.json").read_bytes()
+
+    assert (
+        delete_course_main(
+            ["--course", A, "--force", "--dry-run", *cli_common(courses_dir, database)]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "--dry-run" in out
+    # Everything the real run would touch is reported and nothing changed.
+    assert "attempts: 1 行" in out
+    assert "exam_sessions: 1 行" in out
+    assert "exam_questions: 1 行" in out
+    # The application's own sync registered q001/q002, and the seed added q999.
+    assert "question_registry: 3 行" in out
+    assert "schema_meta.default_course_id" in out
+    assert (courses_dir / A / "course.json").read_bytes() == manifest_before
+    assert _snapshot(database, A) == before_a
+    assert (
+        _scalar(
+            database,
+            "SELECT value FROM schema_meta WHERE key = 'default_course_id'",
+        )
+        == A
+    )
+    assert not list(tmp_path.glob("mcq.db.bak-*"))
+
+
+def test_delete_course_requires_force_while_learner_data_exists(tmp_path, capsys):
+    app, courses_dir, database = _seeded_two_course_world(tmp_path)
+    del app
+    before_a = _snapshot(database, A)
+
+    assert delete_course_main(["--course", A, *cli_common(courses_dir, database)]) == 1
+
+    err = capsys.readouterr().err
+    assert "--force" in err and "拒绝删除" in err
+    assert (courses_dir / A / "course.json").is_file()
+    assert _snapshot(database, A) == before_a
+    assert not list(tmp_path.glob("mcq.db.bak-*"))
+
+
+def test_delete_course_refuses_an_unknown_or_legacy_course(tmp_path, capsys):
+    app, courses_dir, database = _seeded_two_course_world(tmp_path)
+    del app
+
+    # A typo must never silently delete a namespace that happens to exist.
+    assert (
+        delete_course_main(
+            ["--course", "does_not_exist", *cli_common(courses_dir, database)]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "未知课程" in err and A in err and B in err
+    assert _scalar(database, "SELECT COUNT(*) FROM courses") == 3
+
+    # The legacy root-file layout has no course directory to delete.
+    root = tmp_path / "legacy_root"
+    root.mkdir()
+    write_json(root / "questions.json", course_bank())
+    assert (
+        delete_course_main(
+            [
+                "--course",
+                "legacy",
+                "--db",
+                str(database),
+                "--courses-dir",
+                str(tmp_path / "absent_courses"),
+                "--question-file",
+                str(root / "questions.json"),
+                "--glossary-file",
+                str(root / "glossary.json"),
+            ]
+        )
+        == 1
+    )
+    assert "legacy adapter" in capsys.readouterr().err
+    assert _scalar(database, "SELECT COUNT(*) FROM courses") == 3
+
+
+def test_delete_course_cleans_an_undeployed_database_identity(tmp_path, capsys):
+    """A manually removed directory can still be finished off from the database."""
+    app, courses_dir, database = _seeded_two_course_world(tmp_path)
+    del app
+    shutil.rmtree(courses_dir / A)  # what a manual rm leaves behind
+    before_b = _snapshot(database, B)
+
+    assert (
+        delete_course_main(
+            ["--course", A, "--force", *cli_common(courses_dir, database)]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "未部署的课程身份" in out
+    assert _snapshot(database, A) == dict.fromkeys(_snapshot(database, A), 0)
+    assert _snapshot(database, B) == before_b
+    assert (courses_dir / B / "course.json").is_file()
+
+
+def test_delete_course_refuses_the_persisted_legacy_namespace(tmp_path, capsys):
+    """``legacy_course_id`` is recreated on every startup, so it cannot be deleted."""
+    from app.repositories import Database
+    from tests.test_course_migration import build_legacy_database
+
+    database = build_legacy_database(tmp_path / "legacy.db")
+    Database(database).initialize()
+    before = _snapshot(database, "legacy")
+    assert before["courses"] == 1
+
+    assert (
+        delete_course_main(
+            [
+                "--course",
+                "legacy",
+                "--force",
+                "--db",
+                str(database),
+                "--courses-dir",
+                str(tmp_path / "absent_courses"),
+                "--question-file",
+                str(tmp_path / "absent" / "questions.json"),
+                "--glossary-file",
+                str(tmp_path / "absent" / "glossary.json"),
+            ]
+        )
+        == 1
+    )
+
+    assert "legacy_course_id" in capsys.readouterr().err
+    assert _snapshot(database, "legacy") == before
 

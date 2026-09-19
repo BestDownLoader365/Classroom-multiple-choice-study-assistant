@@ -108,6 +108,8 @@ MCQ_Template/
 ├── courses/                       # one directory per course (manifest layout)
 │   └── <course_id>/
 │       ├── course.json            # manifest: course_id, title, enabled, paths
+│       ├── questions_candidate.json   # working copy the CLI reads by default
+│       ├── glossary_candidate.json    # optional glossary working copy
 │       ├── questions.json
 │       ├── glossary.json          # optional; `"glossary": null` means none
 │       └── versions/<sha256>/     # immutable publications written by the tooling
@@ -183,6 +185,7 @@ MCQ_Template/
 │   ├── check_glossary.py
 │   ├── check_question_bank.py
 │   ├── course_tooling.py
+│   ├── delete_course.py
 │   ├── migrate_courses.py
 │   ├── publish_course.py
 │   ├── rename_course.py
@@ -279,16 +282,41 @@ aliases with learner-facing question-bank text, reports orphan entries, and emit
 conservative manual-review candidates. It is read-only and does not generate or modify
 glossary data. `publish_course.py` re-runs it (offline) before switching over a glossary.
 
+Per course it reads the default working copies (`questions_candidate.json` /
+`glossary_candidate.json` inside the course directory) when they exist and the published
+files otherwise, always printing which two files it read; `--published` forces the
+deployed files.
+
 The three ``check_<subject>.py`` scripts are the read-only gates of the content flow
 (check → publish → restart worker); the publish half and the full flow are documented in
-[`COURSE_GUIDE.md`](COURSE_GUIDE.md) §7.8.
+[`COURSE_GUIDE.md`](COURSE_GUIDE.md) §7.10.
+
+#### `scripts/delete_course.py`
+
+The only supported way to remove a course, because a course is more than its directory.
+It removes the content directory (manifest, published content, `versions/<sha256>/`
+copies, `.publish.lock`) *and* every database reference in one audited operation: the
+`courses` identity row, all course-scoped learner rows (`quiz_progress`, `attempts`,
+`wrong_questions`, `weak_knowledge_points`, `exam_sessions` plus the `exam_questions`
+slots they own), `question_bank_state`, `question_registry` and — when it points at the
+deleted course — `schema_meta.default_course_id`. Safety comes from a `--dry-run` report,
+a timestamped database backup, a refusal while learner rows exist unless `--force` is
+given, a strict `--courses-dir` containment check, a refusal for the persisted
+`legacy_course_id` namespace and the legacy root-file layout, and a per-table total
+row-count re-check inside the transaction that rolls back rather than commit a partially
+scoped deletion. Exit codes: `0` deleted (or dry run), `1` refused (nothing written),
+`2` usage/IO.
 
 #### `scripts/check_question_bank.py`
 
 Pre-deploy gate for `questions.json`: validates the file with `QuestionLoader`, then
 dry-runs the registry diff against a read-only copy of the live database and prints
 exactly what startup reconciliation would do (new, content-only, placement-changed,
-catalogue-changed, presentation-only, grading-changed, deleted, resurrected). Exit
+catalogue-changed, presentation-only, grading-changed, deleted, resurrected). The
+candidate it validates is the explicit positional path, or — when none is given — the
+course's default working copy (`courses/<course_id>/questions_candidate.json`) if it
+exists, else the currently published file (`--published` forces that last case), and the
+report always names the file it read. Exit
 codes: `0` deployable (including allowed-but-destructive cleanups, which always print
 a warning and never claim the deploy is data-loss-free), `1` invalid bank, `2` a
 retired question ID is reused for a different question (startup would refuse to run),
@@ -332,8 +360,13 @@ The single publish entry point for every course-content type: add a course, publ
 `questions.json` and/or `glossary.json`, and enable/disable a course. A publish reads the
 candidate once, validates exactly those frozen bytes, archives them under
 `versions/<sha256>/`, and switches the manifest over with a single `os.replace` (the
-legacy root-file layout falls back to an atomic single-file replace). It re-runs the
-matching gate by default — `check_question_bank.py` against the database for questions,
+legacy root-file layout falls back to an atomic single-file replace). `--questions` and
+`--glossary` default to the course's working copies
+(`courses/<course_id>/questions_candidate.json` and `glossary_candidate.json`), so a bare
+`--course <course_id>` publishes exactly the candidates a maintainer just edited; an
+explicit path always wins, a glossary candidate is ignored for a course whose manifest
+declares `glossary: null`, and a command with no content at all writes nothing. It re-runs
+the matching gate by default — `check_question_bank.py` against the database for questions,
 `check_glossary.py` for the glossary — and refuses to switch over content that fails it;
 `--skip-preflight` is the explicit, discouraged escape hatch. Direct `cp` over a live file
 (or an editor's in-place save) can truncate the JSON while a worker starts, which surfaces
@@ -1215,7 +1248,8 @@ Developers should preserve these rules when extending the application:
 - Extend Normal selection: keep it limited to live eligible IDs plus `fairness_scope`/`fairness_remaining_ids`; do not inject review signals.
 - Extend Review selection: add role-bearing candidate rules through weak/correction services; do not touch the Normal bag.
 - Add a new learning mode: extend `QuizMode`, define its queue and persistence rules, add an independent mode in the progress table, and update the database mode constraint if attempts use the new mode.
-- Replace the question bank: publish the candidate with `python scripts/publish_course.py --course <course_id> --questions candidate.json` (it re-runs `scripts/check_question_bank.py` by default; never `cp` over the live file) and then restart **all** workers together. Ordinary maintenance is reconciled per question without clearing learner data; grading-identity changes and deletions affect exactly the involved questions, and chapter/source moves or catalogue-shape changes bump the generation so slicing workers stop serving until the shared restart (labels alone do not).
+- Replace the question bank: put the working copy at `courses/<course_id>/questions_candidate.json` and publish it with `python scripts/publish_course.py --course <course_id>` (the default candidate; an explicit `--questions <path>` also works — it re-runs `scripts/check_question_bank.py` by default; never `cp` over the live file) and then restart **all** workers together. Ordinary maintenance is reconciled per question without clearing learner data; grading-identity changes and deletions affect exactly the involved questions, and chapter/source moves or catalogue-shape changes bump the generation so slicing workers stop serving until the shared restart (labels alone do not).
+- Remove a course: never `rm -rf courses/<course_id>`. Use `python scripts/delete_course.py --course <course_id> --dry-run` first, then run it without `--dry-run` so the content directory, `courses` identity, course-scoped learner rows, `question_bank_state`, `question_registry` and the `default_course_id` preference are removed together (`--force` is required while learner data exists, and the database is backed up first).
 
 ## 18. Local Production Deployment
 
@@ -1495,14 +1529,18 @@ hand-editing the generation.
 ### Publishing a new question bank
 
 1. Write the candidate bank to its own file (never edit the live file in place).
-2. Run `python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db`
+   The default location is `courses/<course_id>/questions_candidate.json`, which
+   the commands below then need no path argument for.
+2. Run `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db`
    (add `--strict` in CI to fail on updates that clear learner state, and
    `--simulate` to run the real reconciliation against a temporary copy of the
-   database). Read the report with the semantics of “How to read the two
+   database; `--published` re-checks the deployed file while a working copy
+   exists). Read the report with the semantics of “How to read the two
    bank-level report lines” above: `catalogue-changed: yes` means that course's
    workers need the restart, while `presentation-only: no` does not mean the
    labels stayed identical.
-3. Publish atomically: `python scripts/publish_course.py --course <course_id> --questions candidate.json --db instance/mcq.db`
+3. Publish atomically: `python scripts/publish_course.py --course <course_id> --questions questions_candidate.json`
+   (or simply `--course <course_id>` when the working copy is the default one)
    reads the candidate **once**, validates exactly those bytes, writes them to an
    immutable `versions/<sha256>/questions.json`, re-validates the publication
    baseline inside the course publication lock, and switches `course.json` over

@@ -12,7 +12,14 @@ The glossary gate is run per course against that course's own bank::
 
     python scripts/check_glossary.py --course eek5106
     python scripts/check_glossary.py --all
+    python scripts/check_glossary.py --course eek5106 --published
     python scripts/check_glossary.py --questions path/questions.json --glossary path/glossary.json
+
+Without ``--published``, a course is checked against its default working copies
+(``questions_candidate.json`` / ``glossary_candidate.json`` inside the course
+directory) whenever they exist, and against the files it currently publishes
+otherwise; the report always names the two files it read.  ``--published``
+forces the deployed files.
 
 ``--questions``/``--glossary`` run fully offline: no catalogue, no database and no
 registry writes.  Every other mode resolves the course(s) through the
@@ -163,6 +170,14 @@ def main(argv: list[str] | None = None) -> int:
         help="check every declared, enabled course",
     )
     parser.add_argument(
+        "--published",
+        action="store_true",
+        help=(
+            "ignore questions_candidate.json / glossary_candidate.json and check "
+            "the files each course currently publishes"
+        ),
+    )
+    parser.add_argument(
         "--courses-dir",
         default=PROJECT_ROOT / "courses",
         type=Path,
@@ -189,8 +204,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     from scripts.course_tooling import (
+        GLOSSARY_CANDIDATE_NAME,
+        QUESTIONS_CANDIDATE_NAME,
         ToolingError,
         build_loader,
+        preferred_candidate,
         resolve_definition,
     )
 
@@ -217,12 +235,33 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = 0
     for definition in definitions:
         print(f"\n=== {definition.course_id} ===")
-        if definition.glossary_path is None:
-            print("该课程没有配置术语表（glossary: null），跳过校验。")
+        if args.published:
+            questions_path = definition.questions_path
+            glossary_path = definition.glossary_path
+            questions_source = glossary_source = "published"
+        else:
+            questions_path, questions_source = preferred_candidate(
+                definition.root,
+                QUESTIONS_CANDIDATE_NAME,
+                definition.questions_path,
+            )
+            glossary_path, glossary_source = preferred_candidate(
+                definition.root,
+                GLOSSARY_CANDIDATE_NAME,
+                definition.glossary_path,
+            )
+        if glossary_path is None:
+            hint = "" if args.published else f"，也没有 {GLOSSARY_CANDIDATE_NAME}"
+            print(f"该课程没有配置术语表（glossary: null）{hint}，跳过校验。")
             continue
-        exit_code = max(
-            exit_code, check_one(definition.questions_path, definition.glossary_path)
-        )
+        if not definition.declares_glossary:
+            print(
+                "提示：manifest 的 glossary 为 null；本次只校验候选文件，"
+                "发布时必须显式传 --glossary（默认候选只用于课程已声明的内容）。"
+            )
+        print(f"语料 ({questions_source}): {questions_path}")
+        print(f"术语表 ({glossary_source}): {glossary_path}")
+        exit_code = max(exit_code, check_one(questions_path, glossary_path))
     print(
         "\n校验只读取内容，不修改 question_registry、generation 或任何学习数据。"
     )

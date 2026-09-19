@@ -21,6 +21,17 @@ pretends otherwise:
 Filesystem publication is *not* a joint transaction with SQLite.  The tooling
 therefore reports "published, pending worker activation" rather than claiming
 the deployment is complete, and it never bumps the generation itself.
+
+Candidate resolution
+--------------------
+
+Every content command works on a *working copy* next to the course manifest
+(``courses/<course_id>/questions_candidate.json`` /
+``glossary_candidate.json``).  When a command is given no explicit path it uses
+that default, and falls back to the file the course currently publishes when the
+working copy does not exist, so the same command both drives an edit and
+re-validates a deployed course.  ``preferred_candidate`` is the single place that
+precedence lives.
 """
 
 from __future__ import annotations
@@ -46,6 +57,13 @@ from app.repositories import CourseLoader  # noqa: E402
 VERSIONS_DIRECTORY = "versions"
 LOCK_FILE_NAME = ".publish.lock"
 
+#: Working-copy file names the CLI falls back to when a command is not given an
+#: explicit path.  A candidate belongs to exactly one course, so the default is
+#: resolved inside that course's own directory (``courses/<course_id>/``) and
+#: never against the shell's current directory.
+QUESTIONS_CANDIDATE_NAME = "questions_candidate.json"
+GLOSSARY_CANDIDATE_NAME = "glossary_candidate.json"
+
 
 class ToolingError(RuntimeError):
     """Raised when a course operation cannot be performed safely."""
@@ -61,6 +79,35 @@ def build_loader(
         legacy_questions_name=question_file.name,
         legacy_glossary_name=glossary_file.name,
     )
+
+
+def default_candidate_path(course_root: Path, name: str) -> Path:
+    """Return the default working copy of one content type for a course.
+
+    ``course_root`` is the course directory (``definition.root``), not the
+    directory of the currently published file: after a publication the manifest
+    points at ``versions/<sha256>/``, while the working copy stays next to the
+    manifest where a maintainer edits it.
+    """
+    return course_root / name
+
+
+def preferred_candidate(
+    course_root: Path, name: str, published: Path | None
+) -> tuple[Path | None, str]:
+    """Return ``(path, source)`` for one content type of a resolved course.
+
+    The default working copy (``questions_candidate.json`` /
+    ``glossary_candidate.json``) wins when it exists, because that is the file a
+    maintainer is about to publish; otherwise the currently published file is
+    used, so the read-only gates still re-validate a deployed course.  Callers
+    print ``source`` (``"candidate"`` or ``"published"``) instead of leaving the
+    file that was read implicit.
+    """
+    candidate = default_candidate_path(course_root, name)
+    if candidate.is_file():
+        return candidate.resolve(), "candidate"
+    return published, "published"
 
 
 def resolve_definition(

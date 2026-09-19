@@ -18,7 +18,7 @@
 
 当前代码不会解释或渲染图片、音频、视频、公式对象、填空题、排序题、主观题等额外题型。即使把 `image`、`difficulty`、`tags` 等未知字段写入 JSON，Loader 也会忽略它们，界面不会自动获得对应功能。
 
-`questions.json` 属于**某门课程**：它位于 `courses/<course_id>/questions.json`，并由同目录的 `course.json`（manifest）声明。应用启动时会加载并校验每一门启用课程的题库与（可选）`glossary.json`。题库维护按 `question.id` **在该课程内**逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该课程该题的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` 预检题库变更的实际影响。
+`questions.json` 属于**某门课程**：它位于 `courses/<course_id>/questions.json`，并由同目录的 `course.json`（manifest）声明。应用启动时会加载并校验每一门启用课程的题库与（可选）`glossary.json`。题库维护按 `question.id` **在该课程内**逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该课程该题的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db` 预检题库变更的实际影响（不传路径时默认校验该课程目录里的 `questions_candidate.json`，没有候选文件时回退到已发布题库；候选文件放在中间过程之外时把路径作为位置参数传入）。
 
 “不会影响学习记录”与“不改变题库结构”是两件事。`chapter_ids`（章节归属）和 `source_id` 决定题目出现在哪些章节筛选、哪些 Review 强化目标和哪些章节进度里，因此它们的变化属于**结构性变化**：学习历史仍然保留，但**该课程**的 generation 会 +1，运行旧题库的 worker 在该课程的学习页面（包括 `/stats`）返回 503，直到 worker 更新；**其他课程完全不受影响**。课件/章节的**增删、顺序或归属变化**同样是结构性变化（每个 worker 用自己那份课程目录生成菜单并校验提交的筛选值，新旧菜单不一致会让旧 worker 提交出新 worker 拒绝为 400 的章节）。只有纯展示文案——题库 `title`/`title_zh`、`sources[].title`/`lecture`/`filename`、`chapters[].title` 与 JSON 格式——不推进 generation，允许新旧 worker 在下次更新前短暂显示不同文案。发布题库文件必须原子替换，详见第 11.6 节；`check_question_bank.py` 会分别报告 `catalogue-changed` 与 `presentation-only`，便于判断是否需要安排更新。
 
@@ -631,18 +631,23 @@ pytest -q
 
 ### 11.6 预检、原子发布与 worker 更新
 
-题库文件属于一门课程，发布流程按**课程**执行（`<course_id>` 是该课程的 manifest 身份；一门启用课程时可以省略 `--course`）：
+题库文件属于一门课程，发布流程按**课程**执行（`<course_id>` 是该课程的 manifest 身份；一门启用课程时可以省略 `--course`）。候选文件放在课程目录里，默认路径为 `courses/<course_id>/questions_candidate.json`：
 
 ```text
-candidate.json
-    ↓  python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db
-    ↓  （--strict 时，会清理学习状态的更新返回非 0；--simulate 会用临时数据库副本跑一次真实 reconciliation）
-    ↓  python scripts/publish_course.py --course <course_id> --questions candidate.json --db instance/mcq.db
+courses/<course_id>/questions_candidate.json
+    ↓  python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db
+    ↓  （默认校验上面的候选文件；--published 改为校验已发布文件；--strict 时，会清理学习状态的更新返回非 0；--simulate 会用临时数据库副本跑一次真实 reconciliation）
+    ↓  python scripts/publish_course.py --course <course_id> --questions questions_candidate.json
+    ↓  （省略 --questions 时发布的同样是这个默认候选文件）
     ↓  冻结候选字节 → 写入不可变 versions/<sha256>/questions.json
     ↓  发布锁内重新校验 baseline → 单次 os.replace 原子切换 course.json
     ↓  更新 worker（systemctl restart mcq-template.service）
     ↓  curl http://127.0.0.1:8001/ready/<course_id> 确认 200
 ```
+
+指定其他候选文件时，把路径作为 `check_question_bank.py` 的位置参数传入即可（例如
+`python scripts/check_question_bank.py --course <course_id> other_questions.json --db instance/mcq.db`），
+`publish_course.py` 则显式传 `--questions other_questions.json`；显式路径始终优先于默认值。
 
 `publish_course.py --questions` 只读一次候选文件，校验与发布使用**同一份字节**；它输出 `published, pending worker activation`，**不会**自行推进 generation（由 worker 启动时的 reconciliation 完成），也不声称文件系统发布与数据库激活是同一个事务。回滚就是把旧内容当作新候选再发布一次，不要手工改 `generation`。
 

@@ -201,6 +201,13 @@ python scripts/check_courses.py
 python scripts/check_glossary.py --course eek5106
 ```
 
+课程目录里存在 `questions_candidate.json` / `glossary_candidate.json` 时，它们就是默认校验对象（报告会打印实
+际读取的两个文件与来源）；只想复核已发布内容时加 `--published`：
+
+```bash
+python scripts/check_glossary.py --course eek5106 --published
+```
+
 校验全部启用课程：
 
 ```bash
@@ -270,7 +277,7 @@ pytest -q
 5. 编写简洁、课程语境明确的中英文定义。
 6. 运行 `python -m json.tool`、`python scripts/check_glossary.py --course <course_id>` 覆盖校验；课程目录或 manifest 有改动时再跑 `python scripts/check_courses.py`。
 7. 人工处理 orphan 与候选报告，不要把候选结果直接批量写入术语库。
-8. 校验通过后再部署 `questions.json` 和 `glossary.json`（`python scripts/publish_course.py --course <course_id> --questions ... --glossary ...` 可一次发布两者，默认会重跑对应校验），重启应用进程并完成浏览器验收。
+8. 校验通过后再部署 `questions.json` 和 `glossary.json`（`python scripts/publish_course.py --course <course_id> --questions questions_candidate.json --glossary glossary_candidate.json` 可一次发布两者，不传内容参数时默认发布的也正是这两个候选文件；默认会重跑对应校验），重启应用进程并完成浏览器验收。
 
 更换 `questions.json` 时按 [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) 第 11.6 节发布：先预检（`--course <course_id>`）、再原子发布（`publish_course.py --questions`）、最后更新 worker。题库按 `question.id` **在该课程内**逐题增量同步，**不会重置该课程的学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进**该课程**的 generation，让仍在运行旧内容的 worker 只在该课程的学习页面返回 503，因此这类发布要更新 worker，但**不影响其他课程**。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。发布新课程时建议两个文件一起审核，避免旧术语出现在新题库中。
 

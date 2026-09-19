@@ -4,9 +4,24 @@ Run this before publishing a new ``questions.json`` for one course to see exactl
 what the startup reconciliation would do — and to catch retired-ID reuse *before*
 it can take a course down::
 
-    python scripts/check_question_bank.py --course physical_design candidate.json --db instance/mcq.db
+    python scripts/check_question_bank.py --course physical_design
+    python scripts/check_question_bank.py --course physical_design other_questions.json --db instance/mcq.db
+    python scripts/check_question_bank.py --course physical_design --published
     python scripts/check_question_bank.py --course physical_design --strict
     python scripts/check_question_bank.py --course physical_design --simulate
+
+The candidate is resolved in this order (``--help`` shows the same default):
+
+1. an explicit positional path always wins;
+2. ``--published`` re-validates the file the course currently serves;
+3. otherwise the course's default working copy
+   (``courses/<course_id>/questions_candidate.json``, or
+   ``<course_root>/questions_candidate.json`` for the legacy root layout) is
+   used when it exists;
+4. otherwise the currently published file is checked.
+
+Deleting the working copy therefore restores the old "re-check what is deployed"
+behaviour, and ``--published`` makes that explicit while a candidate exists.
 
 Everything is scoped to one course: the course's own registry, its own bank
 state row and its own generation.  A course A check never reads or reports
@@ -77,8 +92,19 @@ from app.repositories.schema_migrations import (  # noqa: E402
     SCHEMA_VERSION_KEY,
 )
 from app.services import catalogue_fingerprint, diff_questions  # noqa: E402
+from scripts.course_tooling import (  # noqa: E402
+    QUESTIONS_CANDIDATE_NAME,
+    preferred_candidate,
+)
 
 MIGRATION_TABLE_SUFFIX = "__course_migration"
+
+#: Human labels for where the checked file came from.
+CANDIDATE_SOURCES = {
+    "explicit": "显式指定",
+    "candidate": "默认候选",
+    "published": "当前已发布",
+}
 
 
 class ScriptError(RuntimeError):
@@ -405,12 +431,17 @@ def resolve_definition(args: argparse.Namespace) -> CourseDefinition:
     definitions = loader.enabled_definitions()
     candidate = Path(args.candidate).resolve() if args.candidate else None
     if candidate is not None:
-        # A candidate inside (or next to) a declared course belongs to it.
+        # A candidate inside (or next to) a declared course belongs to it.  The
+        # parent comparison also covers a working copy that sits next to the
+        # manifest while the published file already lives in versions/<digest>/.
         for definition in definitions:
             if definition.questions_path == candidate:
                 return definition
         for definition in definitions:
-            if definition.questions_path.parent == candidate.parent:
+            if candidate.parent in {
+                definition.root,
+                definition.questions_path.parent,
+            }:
                 return definition
         # Otherwise the candidate defines the deployment's root content location.
         return _synthetic_legacy_definition(args, candidate)
@@ -429,15 +460,23 @@ def resolve_definition(args: argparse.Namespace) -> CourseDefinition:
 
 def candidate_file_for(
     args: argparse.Namespace, definition: CourseDefinition
-) -> Path:
-    """Return the candidate file: the positional argument or the course's own.
+) -> tuple[Path, str]:
+    """Return ``(candidate_file, source)`` for the course being checked.
 
-    ``--course`` without a positional path re-validates the published course, so
-    an operator can confirm the deployed state after a publication.
+    Precedence: an explicit positional path, ``--published``, the course's
+    default working copy (``questions_candidate.json``), and finally the file the
+    course currently publishes.  A bare ``--course <course_id>`` therefore checks
+    the file a maintainer is editing while it exists, and the deployed file
+    otherwise.
     """
     if args.candidate is not None:
-        return Path(args.candidate).resolve()
-    return definition.questions_path
+        return Path(args.candidate).resolve(), "explicit"
+    if args.published:
+        return definition.questions_path, "published"
+    candidate, source = preferred_candidate(
+        definition.root, QUESTIONS_CANDIDATE_NAME, definition.questions_path
+    )
+    return candidate, source
 
 
 def simulate(database_path: Path, candidate_file: Path, definition: CourseDefinition) -> int:
@@ -512,8 +551,17 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         help=(
-            "candidate questions.json to validate; omit to re-check the course's "
-            "currently published file"
+            "candidate questions.json to validate; omit to check the course's "
+            f"default working copy ({QUESTIONS_CANDIDATE_NAME}) when it exists, "
+            "else its currently published file"
+        ),
+    )
+    parser.add_argument(
+        "--published",
+        action="store_true",
+        help=(
+            f"ignore any {QUESTIONS_CANDIDATE_NAME} working copy and re-check the "
+            "file the course currently publishes"
         ),
     )
     parser.add_argument(
@@ -567,6 +615,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.published and args.candidate is not None:
+        print(
+            "--published 与显式 candidate 路径不能同时使用：请二选一。",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         definition = resolve_definition(args)
@@ -574,8 +628,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"无法解析课程：\n{exc}", file=sys.stderr)
         return 4
     course_id = definition.course_id
-    candidate = candidate_file_for(args, definition)
+    candidate, source = candidate_file_for(args, definition)
     print(f"课程 (course_id): {course_id} [{definition.layout}]")
+    print(f"题库文件 ({CANDIDATE_SOURCES[source]}): {candidate}")
 
     loader = QuestionLoader(candidate)
     try:

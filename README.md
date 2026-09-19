@@ -4,7 +4,7 @@
 
 ## Development
 
-推荐的多课程布局是 `courses/<course_id>/course.json` + `questions.json`（可选 `glossary.json`）；本仓库已按该布局放好一门课程（`courses/eek5106/`）。旧版的根目录 `questions.json`/`glossary.json` 仍然支持：没有 manifest 时会作为 `legacy` 课程加载。然后运行：
+推荐的多课程布局是 `courses/<course_id>/course.json` + `questions.json`（可选 `glossary.json`）；日常维护时把候选内容写成同目录的 `questions_candidate.json` / `glossary_candidate.json`，`check_*.py` 与 `publish_course.py` 在不传路径时默认读取它们（发布流程与目录约定见 [`docs/COURSE_GUIDE.md`](docs/COURSE_GUIDE.md) 第 7 节）。本仓库已按该布局放好一门课程（`courses/eek5106/`）。旧版的根目录 `questions.json`/`glossary.json` 仍然支持：没有 manifest 时会作为 `legacy` 课程加载。然后运行：
 
 ```powershell
 python -m venv .venv
@@ -28,7 +28,7 @@ python run.py
 
 程序在启动时加载并校验**每一门启用课程**的题库与术语库；发布内容后需要重启 worker 才能激活（文件系统发布与数据库激活不是同一个事务）。`questions.json` 的维护按 `question.id` 逐题增量生效，不会再清空全站学习数据：修改题干、翻译、解析、选项文案或顺序、`section`/`pages`、JSON 格式等普通维护会完整保留所有账号的答题历史、错题纠正状态、SRS 排期、薄弱知识点状态和练习/考试进度；修改某题的题型、正确答案集合，或删除/重命名已有选项 ID 时，只清理这一道题受影响的记录；删除题目会保留其历史作答，但静默移除它的错题/SRS 状态和相关复习引用。注意“保留历史作答”不等于“统计数字不变”：页面统计只统计仍在题库中的题目，因此删除题目后累计答题数可能下降、正确率可能变化，题目恢复后这些历史作答又会重新计入。单门课程的无效题库不会阻止应用启动：该课程变为 `unavailable`，历史状态原样保留，其他课程继续服务；只有重复 `course_id` 这类全局歧义才会让应用装配失败。`glossary.json` 不参与题库同步，单独修改它不会影响学习记录。
 
-数据库为**每门课程的每个题目 ID** 永久保存注册信息：被删除题目的 ID 在该课程内永久退役，不能再分配给不同的新题（误判复用会让该课程变为 `unavailable`，可先用 `python scripts/check_question_bank.py --course <course_id>` 预检）；误删的题目按原 ID 原判题规则加回即可自动恢复。`chapter_ids` 或 `source_id` 的修改会改变题目归属（影响章节筛选、Review 与章节进度），该课程课件/章节的**增删、顺序或归属变化**会改变 worker 的章节菜单与筛选校验，因此它们与增删题目、判题规则变化一样属于**结构性变化**：**该课程**的 generation 会 +1，运行旧内容的 worker 在该课程的学习页面（含 `/stats`）返回 503，直到 worker 重启；**其他课程完全不受影响**（generation、数据与请求行为都不变）；纯文案修改（题库标题、课件/章节标题、lecture/filename、JSON 格式）不会打断运行中的工作进程，只会让不同 worker 的标签文案在重启前短暂不同。发布题库文件必须使用原子替换（推荐 `python scripts/publish_course.py --course <course_id> --questions candidate.json`），不要直接 `cp` 覆盖正在使用的文件，也不要用编辑器原地保存：写入中断时 worker 可能读到半截 JSON，报出误导性的 `Invalid JSON in question bank at line 1, column N`。预检脚本会分别报告 `catalogue-changed`（需要统一重启）与 `presentation-only`（仅文案，无需为此重启）。这两个标记是从“文件字节是否变化 + 各类指纹是否变化”反推的分类，因此 `presentation-only: no` 并不代表文案没变（例如同一次发布里还改了题干或章节目录），判断是否需要统一重启请以 `catalogue-changed` 与题目级各行为准。
+数据库为**每门课程的每个题目 ID** 永久保存注册信息：被删除题目的 ID 在该课程内永久退役，不能再分配给不同的新题（误判复用会让该课程变为 `unavailable`，可先用 `python scripts/check_question_bank.py --course <course_id>` 预检）；误删的题目按原 ID 原判题规则加回即可自动恢复。`chapter_ids` 或 `source_id` 的修改会改变题目归属（影响章节筛选、Review 与章节进度），该课程课件/章节的**增删、顺序或归属变化**会改变 worker 的章节菜单与筛选校验，因此它们与增删题目、判题规则变化一样属于**结构性变化**：**该课程**的 generation 会 +1，运行旧内容的 worker 在该课程的学习页面（含 `/stats`）返回 503，直到 worker 重启；**其他课程完全不受影响**（generation、数据与请求行为都不变）；纯文案修改（题库标题、课件/章节标题、lecture/filename、JSON 格式）不会打断运行中的工作进程，只会让不同 worker 的标签文案在重启前短暂不同。发布题库文件必须使用原子替换（推荐 `python scripts/publish_course.py --course <course_id> --questions questions_candidate.json`），不要直接 `cp` 覆盖正在使用的文件，也不要用编辑器原地保存：写入中断时 worker 可能读到半截 JSON，报出误导性的 `Invalid JSON in question bank at line 1, column N`。预检脚本会分别报告 `catalogue-changed`（需要统一重启）与 `presentation-only`（仅文案，无需为此重启）。这两个标记是从“文件字节是否变化 + 各类指纹是否变化”反推的分类，因此 `presentation-only: no` 并不代表文案没变（例如同一次发布里还改了题干或章节目录），判断是否需要统一重启请以 `catalogue-changed` 与题目级各行为准。
 
 ## 主要功能
 
@@ -161,9 +161,9 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 更换课程只需要：
 
-1. 为这门课写入独立候选文件，先运行 `python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` 预检（加 `--strict` 可让“会清理学习状态”的更新直接返回非 0），再用 `python scripts/publish_course.py --course <course_id> --questions candidate.json --db instance/mcq.db` 原子发布（该命令默认会重跑同一份预检）。
+1. 把课程内容放进 `courses/<course_id>/`：题库写成 `questions_candidate.json`（术语库写成 `glossary_candidate.json`），先运行 `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db` 预检（加 `--strict` 可让“会清理学习状态”的更新直接返回非 0），再用 `python scripts/publish_course.py --course <course_id> --questions questions_candidate.json --db instance/mcq.db` 原子发布（该命令默认会重跑同一份预检；省略 `--questions` 时发布的就是默认候选文件）。
 2. 如需术语表，提供符合 schema version 1 的 `glossary.json`（或在 manifest 中写 `"glossary": null` 明确表示没有）。
-3. 新增课程用 `python scripts/publish_course.py --course <course_id> --add ...`；停用/启用用 `--disable` / `--enable`。
+3. 新增课程用 `python scripts/publish_course.py --course <course_id> --add ...`；停用/启用用 `--disable` / `--enable`；删除课程用 `python scripts/delete_course.py --course <course_id> --dry-run` 预览后再删除（**不要**手工 `rm -rf courses/<course_id>`）。
 4. 统一重启应用 worker，并用 `/ready/<course_id>` 确认该课程已激活。
 
 无需修改 Python、Jinja template、JavaScript、CSS 或数据库 schema。`glossary.json` 不参与 question-bank fingerprint；单独修改术语、翻译或定义不会清空答题记录、错题、纠正/强化状态或练习进度。
@@ -225,15 +225,17 @@ python scripts/check_glossary.py --questions path/to/questions.json --glossary p
 | 变更对象 | 校验脚本（只读，先运行） | 发布命令（校验通过后） |
 | --- | --- | --- |
 | 课程目录 / manifest / 整门课能否加载 | `python scripts/check_courses.py` | `python scripts/publish_course.py --add` / `--enable` / `--disable` |
-| `questions.json` | `python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` | `python scripts/publish_course.py --course <course_id> --questions candidate.json --db instance/mcq.db` |
-| `glossary.json` | `python scripts/check_glossary.py --course <course_id>` | `python scripts/publish_course.py --course <course_id> --glossary new_glossary.json` |
+| `questions.json` | `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db` | `python scripts/publish_course.py --course <course_id> --questions questions_candidate.json` |
+| `glossary.json` | `python scripts/check_glossary.py --course <course_id>` | `python scripts/publish_course.py --course <course_id> --glossary glossary_candidate.json` |
+| 删除整门课程 | `python scripts/delete_course.py --course <course_id> --dry-run` | `python scripts/delete_course.py --course <course_id>`（有学习数据时先确认再加 `--force`） |
 
 1. **准备校验脚本**：确认该内容种类已有 `check_<校验对象>.py`；没有就先补齐脚本和测试。
-2. **修改内容**：只编辑候选文件，不要原地覆盖正在使用的 `questions.json` / `glossary.json`。
-3. **运行校验**：`check_courses.py` 必须始终通过；题库再用 `check_question_bank.py`，术语表再用 `check_glossary.py`。
+2. **修改内容**：只编辑候选文件（`courses/<course_id>/questions_candidate.json` / `glossary_candidate.json`），不要原地覆盖正在使用的 `questions.json` / `glossary.json`。
+3. **运行校验**：`check_courses.py` 必须始终通过；题库再用 `check_question_bank.py`，术语表再用 `check_glossary.py`。不传文件参数时它们默认读取该课程的候选文件（用 `--published` 可以强制只校验已发布内容）。
 4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换，最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
+5. **删除课程不要手工 `rm`**：课程目录之外还有 `courses` 身份、学习数据、`question_bank_state`、`question_registry` 退役记录和 `default_course_id` 偏好。`python scripts/delete_course.py --course <course_id> --dry-run` 会先列出全部将删除/清理的内容，确认后再去掉 `--dry-run` 执行（默认自动备份数据库；仍有学习数据时需要 `--force`），它同样支持只清理“数据库里有身份、内容已不在”的课程。
 
-校验失败时，发布命令不会替换或创建任何文件，也不会推进 generation；完整运维细节见[课程模型与运营手册](docs/COURSE_GUIDE.md)第 7.8 节。
+校验失败时，发布命令不会替换或创建任何文件，也不会推进 generation；课程创建 / 修改 / 删除的完整教程见[课程模型与运营手册](docs/COURSE_GUIDE.md)第 7 节。
 
 ## 数据说明
 

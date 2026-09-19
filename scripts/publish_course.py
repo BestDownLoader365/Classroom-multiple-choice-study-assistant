@@ -5,15 +5,19 @@ change follows the same check-then-publish flow: run the matching
 ``check_<subject>.py`` gate first, and only publish when it exits ``0``::
 
     # 1) check the candidates (read-only; publishes nothing)
-    python scripts/check_question_bank.py --course physical_design candidate.json --db instance/mcq.db
+    python scripts/check_question_bank.py --course physical_design --db instance/mcq.db
     python scripts/check_glossary.py --course physical_design
 
-    # 2) add a new course (writes courses/<id>/course.json and copies content in)
-    python scripts/publish_course.py --course physical_design --title "Physical Design" \\
-        --questions candidate.json --glossary glossary_candidate.json --add
+    # 2) add a new course: put questions_candidate.json (and optionally
+    #    glossary_candidate.json) in courses/<course_id>/ first, then
+    python scripts/publish_course.py --course physical_design --add \
+        --title "Physical Design"
 
-    # publish new content for an existing course
-    python scripts/publish_course.py --course physical_design --questions candidate.json
+    # publish everything the course's default working copies contain
+    python scripts/publish_course.py --course physical_design
+
+    # ... or name the files explicitly (an explicit flag always wins)
+    python scripts/publish_course.py --course physical_design --questions other.json
 
     # publish only the glossary (never affects the learner generation)
     python scripts/publish_course.py --course physical_design --glossary new_glossary.json
@@ -21,6 +25,13 @@ change follows the same check-then-publish flow: run the matching
     # disable / re-enable a course (manifest is the source of truth)
     python scripts/publish_course.py --course physical_design --disable
     python scripts/publish_course.py --course physical_design --enable
+
+``--questions`` defaults to ``courses/<course_id>/questions_candidate.json`` and
+``--glossary`` to ``courses/<course_id>/glossary_candidate.json`` (only for a
+course that declares a glossary).  When no content flag is given the defaults are
+used, so a maintainer who edits only the working copies needs no path arguments;
+a file that does not exist is simply not published, and a command with no content
+at all still refuses to do anything.
 
 Content publication reads the candidate once, validates exactly those frozen
 bytes, archives them under ``versions/<sha256>/`` and switches the manifest over
@@ -48,8 +59,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.models import CourseDefinitionError  # noqa: E402
 from scripts.course_tooling import (  # noqa: E402
+    GLOSSARY_CANDIDATE_NAME,
+    QUESTIONS_CANDIDATE_NAME,
     ToolingError,
     build_loader,
+    default_candidate_path,
     freeze_candidate,
     preflight_baseline,
     publish_glossary,
@@ -64,8 +78,25 @@ from scripts.course_tooling import (  # noqa: E402
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--course", required=True, help="target course_id")
-    parser.add_argument("--questions", type=Path, default=None)
-    parser.add_argument("--glossary", type=Path, default=None)
+    parser.add_argument(
+        "--questions",
+        type=Path,
+        default=None,
+        help=(
+            "candidate question bank to publish (default: "
+            f"<courses-dir>/<course_id>/{QUESTIONS_CANDIDATE_NAME} when it exists)"
+        ),
+    )
+    parser.add_argument(
+        "--glossary",
+        type=Path,
+        default=None,
+        help=(
+            "candidate glossary to publish (default: "
+            f"<courses-dir>/<course_id>/{GLOSSARY_CANDIDATE_NAME} when the course "
+            "declares a glossary and that file exists)"
+        ),
+    )
     parser.add_argument("--add", action="store_true", help="create the course")
     parser.add_argument("--title", default=None)
     parser.add_argument("--title-zh", default="")
@@ -109,6 +140,34 @@ def _run_glossary_check(questions_path: Path, glossary_path: Path) -> int:
     )
 
 
+def _apply_default_candidates(
+    args: argparse.Namespace, course_root: Path, *, declares_glossary: bool
+) -> None:
+    """Fill ``--questions``/``--glossary`` from the course's default working copies.
+
+    Only the flags the caller left unset are filled, so an explicit path is never
+    overridden.  ``declares_glossary`` is ``False`` for an existing course whose
+    manifest says ``glossary: null`` — a glossary candidate is then reported but
+    not published, because enabling a glossary stays an explicit decision.
+    """
+    if args.questions is None:
+        default = default_candidate_path(course_root, QUESTIONS_CANDIDATE_NAME)
+        if default.is_file():
+            args.questions = default
+            print(f"未指定 --questions：使用默认候选 {default}")
+    if args.glossary is None:
+        default = default_candidate_path(course_root, GLOSSARY_CANDIDATE_NAME)
+        if default.is_file():
+            if declares_glossary:
+                args.glossary = default
+                print(f"未指定 --glossary：使用默认候选 {default}")
+            else:
+                print(
+                    f"提示：{default} 存在，但该课程 manifest 的 glossary 为 null；"
+                    "如需启用术语表请显式传 --glossary。"
+                )
+
+
 def _add_course(args: argparse.Namespace) -> int:
     """Create ``courses/<id>/`` with a manifest and the supplied content."""
     from app.models import validate_course_id
@@ -124,8 +183,15 @@ def _add_course(args: argparse.Namespace) -> int:
     if manifest_path.exists():
         print(f"课程已存在：{manifest_path}", file=sys.stderr)
         return 1
+    # A new course may introduce a glossary, so its default candidate counts.
+    _apply_default_candidates(args, target, declares_glossary=True)
     if args.questions is None:
-        print("--add 需要 --questions（新课程必须携带题库）", file=sys.stderr)
+        print(
+            "--add 需要 --questions：请先创建默认候选 "
+            f"{default_candidate_path(target, QUESTIONS_CANDIDATE_NAME)}"
+            "（或显式传 --questions <path>）",
+            file=sys.stderr,
+        )
         return 2
     try:
         payload, digest = freeze_candidate(args.questions.resolve())
@@ -225,9 +291,16 @@ def main(argv: list[str] | None = None) -> int:
         return _set_enabled(args, definition, bool(args.enable))
 
     if args.questions is None and args.glossary is None:
+        _apply_default_candidates(
+            args, definition.root, declares_glossary=definition.declares_glossary
+        )
+
+    if args.questions is None and args.glossary is None:
         print(
-            "未指定 --questions/--glossary：没有需要发布的内容。"
-            "（--add 用于新增课程，--enable/--disable 用于切换状态）",
+            "未指定 --questions/--glossary，也没有默认候选文件：\n"
+            f"  - {default_candidate_path(definition.root, QUESTIONS_CANDIDATE_NAME)}\n"
+            f"  - {default_candidate_path(definition.root, GLOSSARY_CANDIDATE_NAME)}\n"
+            "没有需要发布的内容。（--add 用于新增课程，--enable/--disable 用于切换状态）",
             file=sys.stderr,
         )
         return 2
@@ -284,9 +357,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"候选术语表校验失败，未替换任何文件：\n{exc}", file=sys.stderr)
             return 1
         if not args.skip_preflight:
-            exit_code = _run_glossary_check(
-                definition.questions_path, args.glossary.resolve()
+            # The corpus is the bank this run just published (or the currently
+            # deployed one when only a glossary was named), never an unrelated
+            # file that happens to sit in the course directory.
+            corpus = (
+                args.questions.resolve()
+                if args.questions is not None
+                else definition.questions_path
             )
+            exit_code = _run_glossary_check(corpus, args.glossary.resolve())
             if exit_code != 0:
                 print(
                     f"\n术语表校验返回 {exit_code}：未发布任何内容。",
