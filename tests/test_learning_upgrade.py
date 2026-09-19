@@ -2,12 +2,14 @@ import copy
 import logging
 
 from app import create_app
+
+LEGACY_HOME = "/course/legacy/"
 from app.models import QuizMode
 from tests.test_web import learner_id, make_app, register
 
 
 def current_state(app, user_id, mode):
-    return app.extensions["mcq_services"].progress_repository.get(
+    return app.extensions["mcq_services"].default_services.progress_repository.get(
         user_id, mode
     )[1]
 
@@ -19,19 +21,19 @@ def test_transfer_wrong_becomes_real_wrong_and_resets_verification(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
     )
 
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     original = current_state(app, user_id, QuizMode.REVIEW)
     client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": original["answer_token"], "answers": "2"},
     )
     client.post(
-        "/review/next", data={"answer_token": original["answer_token"]}
+        "/course/legacy/review/next", data={"answer_token": original["answer_token"]}
     )
     transfer = current_state(app, user_id, QuizMode.REVIEW)
     assert transfer["question_ids"][transfer["current_index"]] == "q2"
@@ -41,7 +43,7 @@ def test_transfer_wrong_becomes_real_wrong_and_resets_verification(
     assert services.wrong_question_repository.get_by_id(user_id, "q2") is None
 
     page = client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": transfer["answer_token"], "answers": "b"},
         follow_redirects=True,
     )
@@ -63,21 +65,21 @@ def test_review_transfer_never_changes_normal_fairness_state(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
-    client.post("/quiz/start", data={"quiz_size": "10"})
+    services = app.extensions["mcq_services"].default_services
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "10"})
     normal_before = copy.deepcopy(current_state(app, user_id, QuizMode.NORMAL))
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
     )
 
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     review = current_state(app, user_id, QuizMode.REVIEW)
     client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": review["answer_token"], "answers": "2"},
     )
     client.post(
-        "/review/next", data={"answer_token": review["answer_token"]}
+        "/course/legacy/review/next", data={"answer_token": review["answer_token"]}
     )
 
     normal_after = current_state(app, user_id, QuizMode.NORMAL)
@@ -102,7 +104,7 @@ def test_multi_chapter_question_updates_each_chapter_independently(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     learning = services.wrong_question_service
 
     learning.record_attempt(user_id, "q1", QuizMode.NORMAL, ("1",), False)
@@ -140,7 +142,7 @@ def test_completed_chapter_reopens_after_later_wrong_answer(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     learning = services.wrong_question_service
     learning.record_attempt(user_id, "q1", QuizMode.NORMAL, ("1",), False)
     learning.record_attempt(user_id, "q1", QuizMode.REVIEW, ("2",), True)
@@ -168,11 +170,11 @@ def test_mistakes_page_shows_weak_point_progress_and_completed_state(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     learning = services.wrong_question_service
     learning.record_attempt(user_id, "q1", QuizMode.NORMAL, ("1",), False)
 
-    pending = client.get("/mistakes")
+    pending = client.get("/course/legacy/mistakes")
     assert "薄弱知识点" in pending.text
     assert "0 / 2 道不同题目" in pending.text
     assert "待强化" in pending.text
@@ -183,7 +185,7 @@ def test_mistakes_page_shows_weak_point_progress_and_completed_state(
     learning.record_attempt(
         user_id, "q2", QuizMode.REVIEW, ("a", "c"), True
     )
-    completed = client.get("/mistakes")
+    completed = client.get("/course/legacy/mistakes")
 
     assert "2 / 2 道不同题目" in completed.text
     assert "强化完成" in completed.text
@@ -196,18 +198,18 @@ def test_generated_transfer_is_stable_across_refresh_and_devices(
     first = app.test_client()
     register(first)
     user_id = learner_id(first)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
     )
-    first.post("/review/start")
+    first.post("/course/legacy/review/start")
     original = current_state(app, user_id, QuizMode.REVIEW)
     first.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": original["answer_token"], "answers": "2"},
     )
     first.post(
-        "/review/next", data={"answer_token": original["answer_token"]}
+        "/course/legacy/review/next", data={"answer_token": original["answer_token"]}
     )
     generated = copy.deepcopy(current_state(app, user_id, QuizMode.REVIEW))
 
@@ -216,12 +218,12 @@ def test_generated_transfer_is_stable_across_refresh_and_devices(
     second.post(
         "/login", data={"username": "learner", "password": "secret1"}
     )
-    second.get("/")
+    second.get(LEGACY_HOME)
 
-    assert first.get("/review").data == second.get("/review").data
+    assert first.get("/course/legacy/review").data == second.get("/course/legacy/review").data
     assert current_state(other_app, user_id, QuizMode.REVIEW) == generated
     stale = second.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": original["answer_token"], "answers": ["a", "c"]},
     )
     assert stale.status_code == 400
@@ -235,18 +237,18 @@ def test_old_database_adds_weak_table_and_preserves_learning_data(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
     )
-    client.post("/quiz/start", data={"quiz_size": "10"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "10"})
     database = services.progress_repository.database
     with database.connect() as connection:
         connection.execute("DROP TABLE weak_knowledge_points")
         user_count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
 
     restarted = create_app(dict(app.config))
-    restarted_services = restarted.extensions["mcq_services"]
+    restarted_services = restarted.extensions["mcq_services"].default_services
 
     assert user_count == 1
     assert restarted_services.attempt_repository.count() == 1
@@ -268,13 +270,13 @@ def test_old_review_queue_is_cleared_without_losing_other_learning_state(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
     )
-    client.post("/quiz/start", data={"quiz_size": "10"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "10"})
     normal = copy.deepcopy(current_state(app, user_id, QuizMode.NORMAL))
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     version, old_review = services.progress_repository.get(
         user_id, QuizMode.REVIEW
     )
@@ -283,7 +285,7 @@ def test_old_review_queue_is_cleared_without_losing_other_learning_state(
         user_id, QuizMode.REVIEW, version, old_review
     )
 
-    response = client.get("/review", follow_redirects=True)
+    response = client.get("/course/legacy/review", follow_redirects=True)
 
     assert "当前没有可继续的练习" in response.text
     assert services.progress_repository.get(user_id, QuizMode.REVIEW)[1] is None
@@ -301,20 +303,20 @@ def test_single_question_chapter_stops_with_recoverable_shortage(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
     )
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     review = current_state(app, user_id, QuizMode.REVIEW)
     client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": review["answer_token"], "answers": "2"},
     )
 
     with caplog.at_level(logging.WARNING):
         page = client.post(
-            "/review/next",
+            "/course/legacy/review/next",
             data={"answer_token": review["answer_token"]},
             follow_redirects=True,
         )

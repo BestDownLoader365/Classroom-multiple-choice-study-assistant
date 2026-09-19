@@ -1,8 +1,8 @@
-"""Per-question reconciliation between the loaded bank and learner history.
+"""Per-question reconciliation between one course's bank and its learner history.
 
-The raw-bytes fingerprint of ``questions.json`` still detects *that* the
-file changed, but it no longer decides what happens to learner data.  This
-service diffs the freshly loaded bank against the permanent
+The raw-bytes fingerprint of a course's ``questions.json`` still detects *that*
+the file changed, but it no longer decides what happens to learner data.  This
+service diffs the freshly loaded bank against that course's permanent
 ``question_registry`` by stable ``question.id`` and only touches data that
 truly lost its meaning:
 
@@ -19,12 +19,23 @@ truly lost its meaning:
 - retired IDs stay reserved forever: reusing one for a grading-different
   question fails startup before anything is written.
 
-The whole reconciliation runs inside one ``BEGIN IMMEDIATE`` transaction,
-so concurrent workers observe either the old or the new world, never a
-mixture, and a second worker's diff simply finds nothing to do.
+Everything here is bound to a single ``course_id``.  A course A sync can never
+scan, clear, retire or advance course B: registry bootstrap, historical-orphan
+collection, tombstones, grading compatibility, targeted cleanup, weak/progress
+reconciliation, unfinished-exam reconciliation, and both the placement and
+catalogue baselines are all evaluated inside A's namespace, and only A's
+generation row is written.  At most one generation bump happens per course per
+publication, no matter how many structural changes it contains.
+
+The whole reconciliation runs inside one ``BEGIN IMMEDIATE`` transaction, so
+concurrent workers observe either the old or the new world, never a mixture,
+and a second worker's diff simply finds nothing to do.  Inside that transaction
+the caller can re-confirm the *publication* it preloaded, which closes the
+"worker preloaded old files, then a newer publication landed" race.
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -32,6 +43,7 @@ from app.models import (
     Question,
     QuestionRegistryEntry,
     QuestionRegistryStatus,
+    validate_course_id,
 )
 from app.repositories import (
     AttemptRepository,
@@ -55,6 +67,23 @@ from .question_fingerprint import (
 from .weak_knowledge_point_service import WeakKnowledgePointService
 
 LOGGER = logging.getLogger(__name__)
+
+
+class CoursePublicationChangedError(RuntimeError):
+    """Raised when a worker's preloaded publication is no longer current.
+
+    The caller must discard the preload, reload the course content, and retry:
+    syncing the stale snapshot back into the database would resurrect content
+    the operator already replaced.
+    """
+
+    def __init__(self, course_id: str) -> None:
+        self.course_id = course_id
+        super().__init__(
+            f'Course "{course_id}" was published again while this worker was '
+            "starting up; the preloaded snapshot was discarded."
+        )
+
 
 
 @dataclass(frozen=True)
@@ -214,12 +243,13 @@ def needs_placement_backfill(
 
 
 class QuestionBankSyncService:
-    """Reconcile the loaded question bank with persistent learner data."""
+    """Reconcile one course's loaded question bank with its learner data."""
 
     def __init__(
         self,
         *,
         database: Database,
+        course_id: str,
         state_repository: QuestionBankStateRepository,
         registry_repository: QuestionRegistryRepository,
         question_repository: QuestionRepository,
@@ -229,6 +259,7 @@ class QuestionBankSyncService:
         progress_repository: ProgressRepository,
         exam_service: ExamService,
     ) -> None:
+        self.course_id = validate_course_id(course_id)
         self.database = database
         self.state_repository = state_repository
         self.registry_repository = registry_repository
@@ -238,16 +269,66 @@ class QuestionBankSyncService:
         self.weak_knowledge_point_service = weak_knowledge_point_service
         self.progress_repository = progress_repository
         self.exam_service = exam_service
+        self._assert_scope()
 
-    def synchronize(self, bank_version: str) -> int:
-        """Reconcile learner data once per bank change; return the generation.
+    def _assert_scope(self) -> None:
+        """Refuse to run when any dependency is bound to another course.
 
-        The raw ``bank_version`` is recorded for diagnostics only.  The
-        returned generation advances exclusively on structural changes: the
-        question set, a grading identity, a question's chapter/source
+        A mis-wired service would otherwise reconcile one course's bank against
+        another course's history — exactly the failure this refactor exists to
+        prevent — so the mismatch is a loud startup error.
+        """
+        for name in (
+            "state_repository",
+            "registry_repository",
+            "attempt_repository",
+            "wrong_question_repository",
+            "progress_repository",
+        ):
+            bound = getattr(getattr(self, name), "course_id", None)
+            if bound != self.course_id:
+                raise ValueError(
+                    f'QuestionBankSyncService for "{self.course_id}" received a '
+                    f'{name} bound to "{bound}".'
+                )
+        exam_bound = getattr(self.exam_service.exam_repository, "course_id", None)
+        if exam_bound != self.course_id:
+            raise ValueError(
+                f'QuestionBankSyncService for "{self.course_id}" received an '
+                f'exam service bound to "{exam_bound}".'
+            )
+        weak_bound = getattr(
+            self.weak_knowledge_point_service.repository, "course_id", None
+        )
+        if weak_bound != self.course_id:
+            raise ValueError(
+                f'QuestionBankSyncService for "{self.course_id}" received a '
+                f'weak-knowledge service bound to "{weak_bound}".'
+            )
+
+
+    def synchronize(
+        self,
+        bank_version: str,
+        *,
+        expected_publication: str | None = None,
+        publication_identity: Callable[[], str] | None = None,
+    ) -> int:
+        """Reconcile this course's learner data once per bank change.
+
+        The raw ``bank_version`` is recorded for diagnostics only.  The returned
+        generation advances exclusively on structural changes of *this* course:
+        the question set, a grading identity, a question's chapter/source
         placement, or the shape of the course catalogue.  Cosmetic edits —
         including source/chapter titles — never invalidate sibling workers and
         never touch learner data.
+
+        When ``expected_publication`` and ``publication_identity`` are given,
+        the on-disk publication is re-hashed *after* the write lock is taken.
+        A mismatch means another publication landed while this worker was
+        preloading, so the stale snapshot is discarded and
+        :class:`CoursePublicationChangedError` is raised instead of being
+        written back into the database.
         """
         now = srs.utc_now()
         questions = self.question_repository.get_all()
@@ -256,6 +337,14 @@ class QuestionBankSyncService:
             self.question_repository.get_chapters(),
         )
         with self.database.transaction():
+            if expected_publication is not None and publication_identity is not None:
+                if publication_identity() != expected_publication:
+                    LOGGER.warning(
+                        'Course "%s" was published again during startup; '
+                        "discarding the preloaded question bank.",
+                        self.course_id,
+                    )
+                    raise CoursePublicationChangedError(self.course_id)
             registry = self.registry_repository.get_all()
             state = self.state_repository.get_state()
             stored_catalogue = self.state_repository.get_catalogue_fingerprint()
@@ -270,9 +359,9 @@ class QuestionBankSyncService:
             diff = diff_questions(questions, registry)
             if diff.violations:
                 raise QuestionBankError(
-                    "Question bank reuses retired question IDs for different "
-                    f"questions: {', '.join(diff.violations)}. Retired IDs are "
-                    "reserved permanently; assign fresh IDs instead."
+                    f'Course "{self.course_id}" reuses retired question IDs for '
+                    f"different questions: {', '.join(diff.violations)}. Retired "
+                    "IDs are reserved permanently; assign fresh IDs instead."
                 )
             # A stored ``None`` means the shape predates catalogue tracking (or
             # this worker is the first after the upgrade): adopt it as the
@@ -285,9 +374,10 @@ class QuestionBankSyncService:
             if diff.has_changes or backfill:
                 self._apply(diff, registry, questions, now, backfill_ids=backfill)
                 LOGGER.info(
-                    "Question bank reconciled: %d new, %d content-only, "
+                    'Course "%s" bank reconciled: %d new, %d content-only, '
                     "%d grading-changed, %d placement-changed, %d deleted, "
                     "%d resurrected, %d placement-backfilled.",
+                    self.course_id,
                     len(diff.new_ids),
                     len(diff.content_changed_ids),
                     len(diff.grading_changed_ids),
@@ -298,11 +388,13 @@ class QuestionBankSyncService:
                 )
             if catalogue_changed:
                 # Menus and filter validation are per-worker, so a changed
-                # catalogue shape has to fence sibling workers exactly like a
-                # question-set change, even though no learner data is touched.
+                # catalogue shape has to fence the sibling workers of this
+                # course exactly like a question-set change, even though no
+                # learner data is touched.
                 LOGGER.info(
-                    "Question bank catalogue changed: sources/chapters added, "
-                    "removed, reordered or re-assigned; bumping the generation."
+                    'Course "%s" catalogue changed: sources/chapters added, '
+                    "removed, reordered or re-assigned; bumping the generation.",
+                    self.course_id,
                 )
             if (
                 diff.has_changes

@@ -1,13 +1,9 @@
-from pathlib import Path
-
 from app.repositories import GlossaryLoader, GlossaryRepository
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from tests.conftest import bundled_glossary_file
 
 
 def test_bundled_glossary_is_valid_and_has_no_label_collisions():
-    glossary = GlossaryLoader(PROJECT_ROOT / "glossary.json").load()
+    glossary = GlossaryLoader(bundled_glossary_file()).load()
     repository = GlossaryRepository(glossary)
 
     assert len(glossary.terms) >= 150

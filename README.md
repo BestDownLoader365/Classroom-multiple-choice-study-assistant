@@ -1,10 +1,10 @@
 # 课堂选择题学习助手
 
-一个本地运行、由 `questions.json` 题库和 `glossary.json` 专业术语库驱动的 MCQ 学习工具。支持个人账号、公平随机练习、个人错题纠正、同章节迁移验证、基于固定间隔的错题间隔重复复习（SRS）、中英双语辅助、全文术语释义和独立词汇学习页。
+一个本地运行的**多课程** MCQ 学习工具：每门课程由自己的 `courses/<course_id>/questions.json` 题库与可选 `glossary.json` 术语库驱动，课程之间完全隔离（题目/章节/课件 ID 都是课程内本地 ID）。支持个人账号、公平随机练习、个人错题纠正、同章节迁移验证、基于固定间隔的错题间隔重复复习（SRS）、中英双语辅助、全文术语释义和独立词汇学习页。
 
 ## Development
 
-将自己的 `questions.json` 和 `glossary.json` 放在 `run.py` 旁边，然后运行：
+推荐的多课程布局是 `courses/<course_id>/course.json` + `questions.json`（可选 `glossary.json`）；本仓库已按该布局放好一门课程（`courses/eek5106/`）。旧版的根目录 `questions.json`/`glossary.json` 仍然支持：没有 manifest 时会作为 `legacy` 课程加载。然后运行：
 
 ```powershell
 python -m venv .venv
@@ -26,9 +26,9 @@ python run.py
 
 `run.py` 使用 Flask 开发服务器，只用于开发，不适合长期运行。
 
-程序在启动时分别读取并校验题库和术语库。修改任一 JSON 后都需要重启。`questions.json` 的维护按 `question.id` 逐题增量生效，不会再清空全站学习数据：修改题干、翻译、解析、选项文案或顺序、`section`/`pages`、JSON 格式等普通维护会完整保留所有账号的答题历史、错题纠正状态、SRS 排期、薄弱知识点状态和练习/考试进度；修改某题的题型、正确答案集合，或删除/重命名已有选项 ID 时，只清理这一道题受影响的记录；删除题目会保留其历史作答，但静默移除它的错题/SRS 状态和相关复习引用。注意“保留历史作答”不等于“统计数字不变”：页面统计只统计仍在题库中的题目，因此删除题目后累计答题数可能下降、正确率可能变化，题目恢复后这些历史作答又会重新计入。无效题库会阻止应用启动。`glossary.json` 不参与题库同步，单独修改它不会影响学习记录。
+程序在启动时加载并校验**每一门启用课程**的题库与术语库；发布内容后需要重启 worker 才能激活（文件系统发布与数据库激活不是同一个事务）。`questions.json` 的维护按 `question.id` 逐题增量生效，不会再清空全站学习数据：修改题干、翻译、解析、选项文案或顺序、`section`/`pages`、JSON 格式等普通维护会完整保留所有账号的答题历史、错题纠正状态、SRS 排期、薄弱知识点状态和练习/考试进度；修改某题的题型、正确答案集合，或删除/重命名已有选项 ID 时，只清理这一道题受影响的记录；删除题目会保留其历史作答，但静默移除它的错题/SRS 状态和相关复习引用。注意“保留历史作答”不等于“统计数字不变”：页面统计只统计仍在题库中的题目，因此删除题目后累计答题数可能下降、正确率可能变化，题目恢复后这些历史作答又会重新计入。单门课程的无效题库不会阻止应用启动：该课程变为 `unavailable`，历史状态原样保留，其他课程继续服务；只有重复 `course_id` 这类全局歧义才会让应用装配失败。`glossary.json` 不参与题库同步，单独修改它不会影响学习记录。
 
-数据库为每个题目 ID 永久保存注册信息：被删除题目的 ID 会永久退役，不能再分配给不同的新题（误判复用会阻止启动，可先用 `python scripts/check_question_bank.py` 预检）；误删的题目按原 ID 原判题规则加回即可自动恢复。`chapter_ids` 或 `source_id` 的修改会改变题目归属（影响章节筛选、Review 与章节进度），课件/章节的**增删、顺序或归属变化**会改变各 worker 的章节菜单与筛选校验，因此它们与增删题目、判题规则变化一样属于**结构性变化**：题库 generation 会 +1，运行旧题库的工作进程在学习页面（含 `/stats`）统一返回 503，直到**所有 worker 一起重启**；纯文案修改（题库标题、课件/章节标题、lecture/filename、JSON 格式）不会打断运行中的工作进程，只会让不同 worker 的标签文案在重启前短暂不同。发布题库文件必须使用原子替换（推荐 `python scripts/swap_question_bank.py candidate.json`），不要直接 `cp` 覆盖正在使用的文件，也不要用编辑器原地保存：写入中断时 worker 可能读到半截 JSON，报出误导性的 `Invalid JSON in question bank at line 1, column N`。预检脚本会分别报告 `catalogue-changed`（需要统一重启）与 `presentation-only`（仅文案，无需为此重启）。这两个标记是从“文件字节是否变化 + 各类指纹是否变化”反推的分类，因此 `presentation-only: no` 并不代表文案没变（例如同一次发布里还改了题干或章节目录），判断是否需要统一重启请以 `catalogue-changed` 与题目级各行为准。
+数据库为**每门课程的每个题目 ID** 永久保存注册信息：被删除题目的 ID 在该课程内永久退役，不能再分配给不同的新题（误判复用会让该课程变为 `unavailable`，可先用 `python scripts/check_question_bank.py --course <course_id>` 预检）；误删的题目按原 ID 原判题规则加回即可自动恢复。`chapter_ids` 或 `source_id` 的修改会改变题目归属（影响章节筛选、Review 与章节进度），该课程课件/章节的**增删、顺序或归属变化**会改变 worker 的章节菜单与筛选校验，因此它们与增删题目、判题规则变化一样属于**结构性变化**：**该课程**的 generation 会 +1，运行旧内容的 worker 在该课程的学习页面（含 `/stats`）返回 503，直到 worker 重启；**其他课程完全不受影响**（generation、数据与请求行为都不变）；纯文案修改（题库标题、课件/章节标题、lecture/filename、JSON 格式）不会打断运行中的工作进程，只会让不同 worker 的标签文案在重启前短暂不同。发布题库文件必须使用原子替换（推荐 `python scripts/swap_question_bank.py --course <course_id> candidate.json`），不要直接 `cp` 覆盖正在使用的文件，也不要用编辑器原地保存：写入中断时 worker 可能读到半截 JSON，报出误导性的 `Invalid JSON in question bank at line 1, column N`。预检脚本会分别报告 `catalogue-changed`（需要统一重启）与 `presentation-only`（仅文案，无需为此重启）。这两个标记是从“文件字节是否变化 + 各类指纹是否变化”反推的分类，因此 `presentation-only: no` 并不代表文案没变（例如同一次发布里还改了题干或章节目录），判断是否需要统一重启请以 `catalogue-changed` 与题目级各行为准。
 
 ## 主要功能
 
@@ -82,10 +82,12 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 ## JSON 格式
 
-两个数据文件都有与当前 Loader 同步的独立指南：
+题库与术语库各有与当前 Loader 同步的独立指南，多课程运营请看课程手册：
 
-- [`questions.json` 题库编写指南](docs/QUESTION_JSON_GUIDE.md)：题目、目录、多章节归属、内容质量、校验与迁移；
-- [`glossary.json` 专业术语库编写指南](docs/GLOSSARY_JSON_GUIDE.md)：术语、别名、翻译、定义、分类、匹配规则、覆盖审计与验收。
+- [`questions.json` 题库编写指南](docs/QUESTION_GUIDE.md)：题目、目录、多章节归属、内容质量、校验与迁移；
+- [`glossary.json` 专业术语库编写指南](docs/GLOSSARY_GUIDE.md)：术语、别名、翻译、定义、分类、匹配规则、覆盖审计与验收；
+- [课程模型与运营手册](docs/COURSE_GUIDE.md)：课程 manifest、URL、切课、就绪检查、按课程发布与故障隔离；
+- [多课程迁移与回滚手册](docs/MULTI_COURSE_MIGRATION.md)：命名空间迁移、字段级验证、故障注入与回滚。
 
 ```json
 {
@@ -151,17 +153,18 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 
 中文字段 `title_zh`、`text_zh` 和 `explanation_zh` 用于双语辅助显示。题目仍以英文原文为准；这些中文字段可以省略，省略后页面不会显示相应翻译。
 
-题干、选项和解析文本支持用 `\n` 换行；罗马数字分点题干（`I.`、`II.`、`III.` 开头的行）中的陈述行会以较小字号显示，详见 [`docs/QUESTION_JSON_GUIDE.md`](docs/QUESTION_JSON_GUIDE.md) 第 6.4 节。
+题干、选项和解析文本支持用 `\n` 换行；罗马数字分点题干（`I.`、`II.`、`III.` 开头的行）中的陈述行会以较小字号显示，详见 [`docs/QUESTION_GUIDE.md`](docs/QUESTION_GUIDE.md) 第 6.4 节。
 
 ## 将专业词汇系统用于其他课程
 
-专业词汇是独立、通用的数据子系统。`questions.json` 定义要练习的题目，根目录的 `glossary.json` 定义当前课程需要识别和学习的词汇；浏览器不会直接请求该文件，应用会在启动时完成校验并通过模板安全下发。完整字段和匹配规则见 [`docs/GLOSSARY_JSON_GUIDE.md`](docs/GLOSSARY_JSON_GUIDE.md)。
+专业词汇是独立、通用的数据子系统，并且**按课程隔离**。`questions.json` 定义该课程要练习的题目，该课程的 `glossary.json` 定义它需要识别和学习的词汇；浏览器不会直接请求该文件，应用会在启动时完成校验并通过模板安全下发**当前课程**的 payload（没有术语表的课程只下发空 payload，绝不会混入其他课程的术语）。完整字段和匹配规则见 [`docs/GLOSSARY_GUIDE.md`](docs/GLOSSARY_GUIDE.md)。
 
 更换课程只需要：
 
-1. 把新题库写入独立候选文件，先运行 `python scripts/check_question_bank.py candidate.json --db instance/mcq.db` 预检（加 `--strict` 可让“会清理学习状态”的更新直接返回非 0），再用 `python scripts/swap_question_bank.py candidate.json` 原子替换 `questions.json`。
-2. 提供符合 schema version 1 的新 `glossary.json`。
-3. 统一重启全部应用 worker，并用 `/ready` 确认所有 worker 都加载了新题库。
+1. 为这门课写入独立候选文件，先运行 `python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` 预检（加 `--strict` 可让“会清理学习状态”的更新直接返回非 0），再用 `python scripts/swap_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` 原子发布。
+2. 如需术语表，提供符合 schema version 1 的 `glossary.json`（或在 manifest 中写 `"glossary": null` 明确表示没有）。
+3. 新增课程用 `python scripts/publish_course.py --course <course_id> --add ...`；停用/启用用 `--disable` / `--enable`。
+4. 统一重启应用 worker，并用 `/ready/<course_id>` 确认该课程已激活。
 
 无需修改 Python、Jinja template、JavaScript、CSS 或数据库 schema。`glossary.json` 不参与 question-bank fingerprint；单独修改术语、翻译或定义不会清空答题记录、错题、纠正/强化状态或练习进度。
 
@@ -193,13 +196,16 @@ Root 必填字段为 `schema_version`、`title`、`title_zh`、`terms`；`descri
 Loader 会拒绝重复 ID、标准化后重复的 canonical term、空 alias、term/alias 冲突和同一 alias 指向多个词条。发布前可运行通用审计：
 
 ```bash
-python scripts/audit_glossary.py
-python scripts/audit_glossary.py --questions path/to/questions.json --glossary path/to/glossary.json
+python scripts/audit_glossary.py --course physical_design   # 审核某门课的术语表
+python scripts/audit_glossary.py --all                       # 审核全部启用课程
+python scripts/audit_glossary.py --questions path/to/questions.json --glossary path/to/glossary.json  # 显式离线
 ```
 
-审计会验证 schema、报告未在学习语料中出现的 orphan entries，并给出大写缩写、括号缩写和连字符 token 等“可能遗漏候选”；候选只供人工复核，不会自动写入 glossary 或生成翻译。
+审计只读取内容，不会修改 `question_registry`、generation 或任何学习数据。审计会验证 schema、报告未在学习语料中出现的 orphan entries，并给出大写缩写、括号缩写和连字符 token 等“可能遗漏候选”；候选只供人工复核，不会自动写入 glossary 或生成翻译。
 
-`sources` 和 `chapters` 是题库内唯一的课程目录；题目通过 `chapter_ids` 可以同时属于同一份课程资料下的一个或多个章节，筛选任一所属章节都能找到该题。当前随附题库包含 225 道题，按 5 份原始课件划分为 38 个可练习主题；术语库包含 220 个规范词条、150 个 aliases 和 13 个动态分类。`section` 和 `pages` 提供更精确的回溯位置。旧题库可以继续加载：旧的单值 `chapter_id` 会自动转换成单元素章节集合；未提供课程目录时，题目自动归入 `Uncategorized`。
+`sources` 和 `chapters` 是**该课程**题库内唯一的课程目录；题目通过 `chapter_ids` 可以同时属于同一份课程资料下的一个或多个章节，筛选任一所属章节都能找到该题。
+
+当前随附的课程是 `eek5106`（EEK5106 半导体良率与失效分析），位于 `courses/eek5106/`：题库包含 225 道题，按 5 份原始课件（`eek5106-week1`…`week5`）划分为 38 个可练习主题；同目录的术语库包含 220 个规范词条、150 个 aliases 和 13 个动态分类。`section` 和 `pages` 提供更精确的回溯位置。旧题库可以继续加载：旧的单值 `chapter_id` 会自动转换成单元素章节集合；未提供课程目录时，题目自动归入 `Uncategorized`。
 
 基础校验规则：
 
@@ -222,7 +228,8 @@ python scripts/audit_glossary.py --questions path/to/questions.json --glossary p
 - 每个账号以 chapter 为单位的薄弱状态、Review 中已验证的不同 question IDs 和强化进度；
 - 每个账号正常练习、错题巩固的题目队列、Review item role、当前位置、选项顺序、反馈和本轮统计，以及 Normal coverage bag；
 - 每个账号的模拟考试场次（题量、时限、状态、成绩、用时）和每场考试的固定题目集合与保存的作答；
-- 题库注册信息与题库状态：每个题目 ID 的判题身份、内容指纹、归属指纹和退役状态（`question_registry`），以及当前 `bank_version`、结构性 generation 和目录指纹（`question_bank_state`）；这些表只保存指纹与状态，不保存题目正文；
+- 永久课程身份与已接受元数据（`courses`）以及 schema/legacy 归属记录（`schema_meta`）；
+- 题库注册信息与题库状态：**每门课程的**每个题目 ID 的判题身份、内容指纹、归属指纹和退役状态（`question_registry`，PK 为 `(course_id, question_id)`），以及该课程当前的 `bank_version`、结构性 generation 和目录指纹（`question_bank_state`，PK 为 `course_id`）；这些表只保存指纹与状态，不保存题目正文；
 - 登录/注册失败的限流窗口（`auth_rate_limits`），用于阻止暴力尝试，过期记录会被清理。
 
 ### 换设备继续做题
@@ -368,7 +375,7 @@ curl -i http://127.0.0.1:8080/health
 curl -i http://127.0.0.1:8080/ready
 ```
 
-`/health` 只表示进程活着（旧题库的 worker 也会返回 200，因为它仍要能登录/登出）；`/ready` 只有在当前 worker 的题库 generation 与数据库一致时才返回 200，否则返回 503 与 `{"status":"stale","worker_generation":N,"database_generation":M}`。监控与启动脚本应使用 `/ready`。
+`/health` 只表示进程活着（旧内容的 worker 也会返回 200，因为它仍要能登录/登出）；`/ready` 汇总本 worker **声明且启用**的课程，只要有一门不是 `ready` 就返回 503 与每门课程的 `status`/`worker_generation`/`database_generation`/`reason`；`/ready/<course_id>` 报告单门课程。**汇总失败只表示"至少一门课程不可服务"，不会让健康课程的路由失败。** 监控与启动脚本应使用这两个端点。
 
 在 Windows PowerShell 中：
 
@@ -391,6 +398,7 @@ Local HTTP URL: http://127.0.0.1:8080
 ### 故障排查
 
 - `502 Bad Gateway`：先执行 `systemctl status mcq-template`，再用 `curl http://127.0.0.1:8001/health` 检查 Gunicorn，最后查看 `journalctl -u mcq-template` 和 Nginx error log。
-- `503 题库正在更新`：当前 worker 仍在使用旧题库（日志中会出现 `Question bank generation mismatch: worker=… db=… path=…`），或数据库被恢复到较旧备份。按上文流程统一重启 `mcq-template.service`，然后用 `curl http://127.0.0.1:8001/ready` 确认返回 200；不要手工修改 `question_bank_state.generation` 绕过检查。用户在 503 页面上仍可正常退出登录，登录/注册后也会被送到术语表并看到提示（不会落回 503）。
+- `503 题库正在更新`：当前 worker 仍在使用该课程的旧内容（日志中会出现 `Course "<id>" is stale on this worker (worker=… db=…)`），或数据库被恢复到较旧备份。先 `curl http://127.0.0.1:8001/ready` 找到受影响课程，再统一重启 `mcq-template.service`，最后用 `curl http://127.0.0.1:8001/ready/<course_id>` 确认返回 200；不要手工修改 `question_bank_state.generation` 绕过检查。其余课程在此期间仍可正常学习。
+- `503 该课程暂时不可用`：该课程内容加载失败（日志中会出现 `Course "<id>" is unavailable: …`），通常是因为 manifest 声明的文件缺失、题目/术语表校验失败。用 `python scripts/check_courses.py` 复核；修复后重启 worker。
 - `Connection refused`：依次检查 Sakura FRP 的本地目标、Windows 的 `curl.exe http://localhost:8080/health`、`systemctl status nginx`、`systemctl status mcq-template`。
 - `500 Internal Server Error`：查看 `journalctl -u mcq-template -n 100 --no-pager`；Flask 异常由 Gunicorn 写入该 journal。随后查看 `/var/log/nginx/mcq-template.error.log` 以关联代理请求。

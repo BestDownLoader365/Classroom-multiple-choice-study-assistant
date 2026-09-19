@@ -4,21 +4,45 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <title>{% block title %}{{ bank_title_zh or bank_title }}{% endblock %}</title>
+    <title>{% block title %}{{ bank_title_zh or bank_title or "课程选择" }}{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
     <header class="site-header">
-        {% set brand_target = url_for('web.home') if g.user else url_for('web.login') %}
-        {% if error_code is defined and error_code == 503 and g.user %}
-        {# The bank is being replaced: every learning page answers 503 until the
-           service restarts, so the brand must not link back into that loop. #}
-        {% set brand_target = url_for('web.glossary') %}
+        {% if current_course %}
+        {% set brand_target = url_for('web.home') %}
+        {% else %}
+        {% set brand_target = url_for('web.courses') if g.user else url_for('web.login') %}
         {% endif %}
         <a class="brand" href="{{ brand_target }}">
             课堂选择题
         </a>
+        {% if current_course %}
+        <nav class="course-switcher" aria-label="当前课程">
+            <span class="course-current" data-current-course
+                  data-course-id="{{ current_course.course_id }}">
+                <span class="course-current-label">当前课程</span>
+                <strong>{{ current_course.title_zh or current_course.title }}</strong>
+            </span>
+            <details class="course-menu">
+                <summary class="course-menu-trigger">切换课程</summary>
+                <ul class="course-menu-list">
+                    {% for state in course_states %}{% if state.declared and state.course.enabled %}
+                    <li>
+                        <a class="course-menu-link{% if state.course_id == current_course.course_id %} is-current{% endif %}"
+                           href="{{ url_for('web.home', course_id=state.course_id) }}"
+                           {% if state.course_id == current_course.course_id %}aria-current="page"{% endif %}>
+                            {{ state.course.title_zh or state.course.title }}
+                            {% if not state.servable %}<span class="course-status">（{{ state.status.value }}）</span>{% endif %}
+                        </a>
+                    </li>
+                    {% endif %}{% endfor %}
+                    <li><a class="course-menu-link" href="{{ url_for('web.courses') }}">全部课程</a></li>
+                </ul>
+            </details>
+        </nav>
+        {% endif %}
         <div class="header-actions">
             <button class="language-toggle" type="button" data-bilingual-toggle hidden
                     title="中文为辅助翻译，学习时请以英文原文为准">显示中英双语</button>
@@ -40,6 +64,13 @@
         {% block content %}{% endblock %}
     </main>
     {% if g.user %}
+    <script id="course-data" type="application/json"
+            data-course-id="{{ current_course.course_id if current_course else '' }}">{{ {
+                "course_id": current_course.course_id if current_course else "",
+                "courses": course_summaries,
+            } | tojson }}</script>
+    {# Only the *current* course's glossary is ever sent to the browser: a course
+       without a glossary gets an empty payload, never another course's terms. #}
     <script id="glossary-data" type="application/json">{{ glossary_data | tojson }}</script>
     {% endif %}
     <script src="{{ url_for('static', filename='js/app.js') }}" defer></script>
@@ -48,3 +79,4 @@
     {% endif %}
 </body>
 </html>
+

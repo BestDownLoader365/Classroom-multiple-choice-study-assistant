@@ -77,14 +77,11 @@ def candidates(corpus: str) -> list[tuple[str, int]]:
     )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--questions", type=Path, default=PROJECT_ROOT / "questions.json")
-    parser.add_argument("--glossary", type=Path, default=PROJECT_ROOT / "glossary.json")
-    args = parser.parse_args()
+def audit_one(questions_path: Path, glossary_path: Path) -> int:
+    """Audit one (questions, glossary) pair and print its report."""
     try:
-        glossary = GlossaryLoader(args.glossary.resolve()).load()
-        question_payload = json.loads(args.questions.read_text(encoding="utf-8"))
+        glossary = GlossaryLoader(glossary_path.resolve()).load()
+        question_payload = json.loads(questions_path.read_text(encoding="utf-8"))
     except (GlossaryError, OSError, UnicodeError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -128,5 +125,85 @@ def main() -> int:
     return 0
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--course",
+        default=None,
+        help="course_id whose glossary should be audited against its own bank",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="audit every declared, enabled course",
+    )
+    parser.add_argument(
+        "--courses-dir",
+        default=PROJECT_ROOT / "courses",
+        type=Path,
+        help="directory holding one sub-directory per course (default: ./courses)",
+    )
+    parser.add_argument(
+        "--question-file",
+        default=PROJECT_ROOT / "questions.json",
+        type=Path,
+        help="root questions.json for the legacy adapter or explicit offline mode",
+    )
+    parser.add_argument(
+        "--questions",
+        type=Path,
+        default=None,
+        help="explicit offline question bank (bypasses the course catalogue)",
+    )
+    parser.add_argument(
+        "--glossary",
+        type=Path,
+        default=None,
+        help="explicit offline glossary (bypasses the course catalogue)",
+    )
+    args = parser.parse_args(argv)
+
+    from scripts.course_tooling import (
+        ToolingError,
+        build_loader,
+        resolve_definition,
+    )
+
+    if args.questions is not None or args.glossary is not None:
+        # Explicit offline mode: no catalogue, no database, no registry writes.
+        questions = (args.questions or args.question_file).resolve()
+        glossary = (args.glossary or PROJECT_ROOT / "glossary.json").resolve()
+        print(f"offline: {questions} + {glossary}")
+        return audit_one(questions, glossary)
+
+    loader = build_loader(args.courses_dir, args.question_file, args.question_file.parent / "glossary.json")
+    try:
+        if args.all:
+            definitions = loader.enabled_definitions()
+        else:
+            definitions = [resolve_definition(loader, args.course)]
+    except ToolingError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if not definitions:
+        print("ERROR: no enabled course is declared.", file=sys.stderr)
+        return 1
+
+    exit_code = 0
+    for definition in definitions:
+        print(f"\n=== {definition.course_id} ===")
+        if definition.glossary_path is None:
+            print("该课程没有配置术语表（glossary: null），跳过审核。")
+            continue
+        exit_code = max(
+            exit_code, audit_one(definition.questions_path, definition.glossary_path)
+        )
+    print(
+        "\n审核只读取内容，不修改 question_registry、generation 或任何学习数据。"
+    )
+    return exit_code
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
+

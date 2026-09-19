@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "title": "Semiconductor Yield and Failure Analysis Glossary",
-  "title_zh": "半导体良率与失效分析专业词汇",
+  "title": "EEK5106 Semiconductor Yield and Failure Analysis Glossary",
+  "title_zh": "EEK5106 半导体良率与失效分析专业词汇",
   "description": "Technical vocabulary used throughout the active course question bank.",
   "description_zh": "本课程题库涉及的核心专业术语，用于查阅与主动回忆。",
   "terms": [

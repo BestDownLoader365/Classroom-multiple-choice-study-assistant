@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.models import LEGACY_COURSE_ID
 from app.models import Attempt, Chapter, Option, Question, QuizMode, SourceDocument
 from app.repositories import (
     AttemptRepository,
@@ -55,7 +56,7 @@ def stats_context(tmp_path):
             Chapter(id="chapter-c", source_id="source-a", title="Chapter C", order=3),
         ),
     )
-    attempts = AttemptRepository(database)
+    attempts = AttemptRepository(database, course_id=LEGACY_COURSE_ID)
     users = UserRepository(database)
     service = GlobalStatisticsService(
         attempt_repository=attempts,

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "title": "Semiconductor Yield and Failure Analysis Question Bank",
-  "title_zh": "半导体良率与失效分析题库",
+  "title": "EEK5106 Semiconductor Yield and Failure Analysis",
+  "title_zh": "EEK5106 半导体良率与失效分析",
   "sources": [
     {
       "id": "eek5106-week1",

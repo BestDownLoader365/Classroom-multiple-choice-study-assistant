@@ -1,76 +1,69 @@
-"""Flask application factory for the local MCQ practice tool."""
+"""Flask application factory for the multi-course MCQ practice tool.
+
+The factory does four things and nothing else:
+
+1. read deployment configuration;
+2. create/migrate the shared SQLite database (course namespace migration is a
+   separate, transactional step inside ``Database.initialize``);
+3. build the read-only :class:`~app.course_runtime.CourseRegistry` by loading
+   and reconciling every *enabled* course once;
+4. register the web blueprint and the ``/health``, ``/ready`` endpoints.
+
+Nothing here reloads configuration while serving, writes a content file, or
+keeps a process-wide "current course": a request's course always comes from its
+URL.  Switching courses at runtime is plain navigation.
+
+Failure isolation is per course.  A broken course becomes ``unavailable`` and
+keeps its historical learner state untouched, while the other courses keep
+serving.  Only *global* ambiguities (a duplicate ``course_id``, an unreadable
+manifest) abort assembly.
+"""
 
 import os
 import secrets
-from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from flask import Flask, request
 
+from app.course_runtime import (
+    AppServices,
+    CourseRegistry,
+    CourseStatus,
+    build_course_registry,
+)
 from app.repositories import (
-    AttemptRepository,
+    CourseLoader,
+    CourseRepository,
+    CrossCourseQueries,
     Database,
-    ExamRepository,
-    GlossaryLoader,
-    GlossaryRepository,
-    ProgressRepository,
-    QuestionBankStateRepository,
-    QuestionLoader,
-    QuestionRegistryRepository,
-    QuestionRepository,
     RateLimitRepository,
     UserRepository,
-    WeakKnowledgePointRepository,
-    WrongQuestionRepository,
 )
 from app.routes import create_web_blueprint
-from app.services import (
-    ExamService,
-    GlobalStatisticsService,
-    GradingService,
-    QuestionBankSyncService,
-    QuizService,
-    StatisticsService,
-    WeakKnowledgePointService,
-    WrongQuestionService,
-    resolve_display_timezone,
-)
+from app.services import resolve_display_timezone
+from app.web.course_context import build_form_serializer
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 QUESTION_FILE = PROJECT_ROOT / "questions.json"
 GLOSSARY_FILE = PROJECT_ROOT / "glossary.json"
+COURSES_DIR = PROJECT_ROOT / "courses"
 DATABASE_FILE = PROJECT_ROOT / "instance" / "mcq.db"
 KNOWLEDGE_VERIFICATION_TARGET = 2
 
-
-@dataclass(frozen=True)
-class AppServices:
-    """Visible dependency container useful for integration and diagnostics."""
-
-    question_repository: QuestionRepository
-    glossary_repository: GlossaryRepository
-    user_repository: UserRepository
-    attempt_repository: AttemptRepository
-    wrong_question_repository: WrongQuestionRepository
-    weak_knowledge_point_repository: WeakKnowledgePointRepository
-    grading_service: GradingService
-    weak_knowledge_point_service: WeakKnowledgePointService
-    wrong_question_service: WrongQuestionService
-    progress_repository: ProgressRepository
-    quiz_service: QuizService
-    exam_repository: ExamRepository
-    exam_service: ExamService
-    statistics_service: StatisticsService
-    global_statistics_service: GlobalStatisticsService
-    question_bank_state_repository: QuestionBankStateRepository
-    question_registry_repository: QuestionRegistryRepository
-    question_bank_sync_service: QuestionBankSyncService
+__all__ = [
+    "AppServices",
+    "COURSES_DIR",
+    "DATABASE_FILE",
+    "GLOSSARY_FILE",
+    "QUESTION_FILE",
+    "create_app",
+]
 
 
 def create_app(test_config: dict[str, Any] | None = None) -> Flask:
-    """Load course content, initialize SQLite, and assemble the web app."""
+    """Load every course, initialize SQLite, and assemble the web app."""
     instance_path = str(PROJECT_ROOT / "instance")
     app = Flask(__name__, instance_path=instance_path, instance_relative_config=False)
     configured_secret = os.environ.get("MCQ_SECRET_KEY")
@@ -78,7 +71,11 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         SECRET_KEY=configured_secret or secrets.token_hex(32),
         QUESTION_FILE=QUESTION_FILE,
         GLOSSARY_FILE=GLOSSARY_FILE,
+        COURSES_DIR=COURSES_DIR,
         DATABASE=DATABASE_FILE,
+        # A navigation *preference* only: it decides where a browser without an
+        # explicit course URL lands, and never re-owns historical data.
+        DEFAULT_COURSE_ID=os.environ.get("MCQ_DEFAULT_COURSE"),
         KNOWLEDGE_VERIFICATION_TARGET=KNOWLEDGE_VERIFICATION_TARGET,
         DISPLAY_TIMEZONE=os.environ.get("MCQ_DISPLAY_TIMEZONE"),
         PERMANENT_SESSION_LIFETIME=timedelta(days=30),
@@ -104,177 +101,127 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
             "MCQ_SECRET_KEY is not set; using an ephemeral development secret."
         )
 
-    question_file = Path(app.config["QUESTION_FILE"]).resolve()
-    question_loader = QuestionLoader(question_file)
-    questions = question_loader.load()
-    question_bank_version = question_loader.source_fingerprint
-    if question_bank_version is None:
-        raise RuntimeError("Question bank fingerprint was not generated.")
     display_timezone = resolve_display_timezone(app.config["DISPLAY_TIMEZONE"])
-    question_repository = QuestionRepository(
-        questions,
-        title=question_loader.title,
-        title_zh=question_loader.title_zh,
-        sources=question_loader.sources,
-        chapters=question_loader.chapters,
-    )
+    question_file = Path(app.config["QUESTION_FILE"]).resolve()
+    glossary_file = Path(app.config["GLOSSARY_FILE"]).resolve()
+    courses_dir = Path(app.config["COURSES_DIR"]).resolve()
 
-    glossary = GlossaryLoader(Path(app.config["GLOSSARY_FILE"]).resolve()).load()
-    glossary_repository = GlossaryRepository(glossary)
+    loader = CourseLoader(
+        courses_dir,
+        legacy_directory=question_file.parent,
+        legacy_questions_name=question_file.name,
+        legacy_glossary_name=glossary_file.name,
+    )
 
     database = Database(Path(app.config["DATABASE"]).resolve())
     database.initialize()
-    question_bank_state_repository = QuestionBankStateRepository(database)
-    question_registry_repository = QuestionRegistryRepository(database)
-    rate_limit_repository = RateLimitRepository(database)
-    progress_repository = ProgressRepository(database)
     user_repository = UserRepository(database)
-    attempt_repository = AttemptRepository(database)
-    wrong_question_repository = WrongQuestionRepository(database)
-    weak_knowledge_point_repository = WeakKnowledgePointRepository(database)
-    grading_service = GradingService()
-    weak_knowledge_point_service = WeakKnowledgePointService(
-        repository=weak_knowledge_point_repository,
-        question_repository=question_repository,
-        wrong_question_repository=wrong_question_repository,
-        verification_target=int(app.config["KNOWLEDGE_VERIFICATION_TARGET"]),
-    )
-    wrong_question_service = WrongQuestionService(
-        attempt_repository=attempt_repository,
-        wrong_question_repository=wrong_question_repository,
-        question_repository=question_repository,
-        weak_knowledge_point_service=weak_knowledge_point_service,
-    )
-    quiz_service = QuizService(
-        question_repository=question_repository,
-        grading_service=grading_service,
-        wrong_question_service=wrong_question_service,
-        weak_knowledge_point_service=weak_knowledge_point_service,
-    )
-    exam_repository = ExamRepository(database)
-    exam_service = ExamService(
-        exam_repository=exam_repository,
-        question_repository=question_repository,
-        grading_service=grading_service,
-        wrong_question_service=wrong_question_service,
-    )
-    # Reconcile the freshly loaded bank against learner data before any
-    # request can be served; only then backfill weak chapters for the
-    # surviving wrong-question rows.
-    question_bank_sync_service = QuestionBankSyncService(
+    rate_limit_repository = RateLimitRepository(database)
+    course_repository = CourseRepository(database)
+    cross_course = CrossCourseQueries(database)
+
+    course_registry = build_course_registry(
+        loader=loader,
         database=database,
-        state_repository=question_bank_state_repository,
-        registry_repository=question_registry_repository,
-        question_repository=question_repository,
-        attempt_repository=attempt_repository,
-        wrong_question_repository=wrong_question_repository,
-        weak_knowledge_point_service=weak_knowledge_point_service,
-        progress_repository=progress_repository,
-        exam_service=exam_service,
-    )
-    bank_generation = question_bank_sync_service.synchronize(question_bank_version)
-    weak_knowledge_point_service.backfill_existing_wrong_questions()
-    statistics_service = StatisticsService(
-        attempt_repository=attempt_repository,
-        question_repository=question_repository,
-        wrong_question_service=wrong_question_service,
-        display_tz=display_timezone,
-    )
-    global_statistics_service = GlobalStatisticsService(
-        attempt_repository=attempt_repository,
+        course_repository=course_repository,
+        knowledge_verification_target=int(app.config["KNOWLEDGE_VERIFICATION_TARGET"]),
+        display_timezone=display_timezone,
         user_repository=user_repository,
-        question_repository=question_repository,
-        display_tz=display_timezone,
+        default_course_id=app.config.get("DEFAULT_COURSE_ID"),
     )
 
+    form_serializer = build_form_serializer(app.config["SECRET_KEY"])
     services = AppServices(
-        question_repository=question_repository,
-        glossary_repository=glossary_repository,
+        database=database,
         user_repository=user_repository,
-        attempt_repository=attempt_repository,
-        wrong_question_repository=wrong_question_repository,
-        weak_knowledge_point_repository=weak_knowledge_point_repository,
-        grading_service=grading_service,
-        weak_knowledge_point_service=weak_knowledge_point_service,
-        wrong_question_service=wrong_question_service,
-        quiz_service=quiz_service,
-        progress_repository=progress_repository,
-        exam_repository=exam_repository,
-        exam_service=exam_service,
-        statistics_service=statistics_service,
-        global_statistics_service=global_statistics_service,
-        question_bank_state_repository=question_bank_state_repository,
-        question_registry_repository=question_registry_repository,
-        question_bank_sync_service=question_bank_sync_service,
+        rate_limit_repository=rate_limit_repository,
+        course_repository=course_repository,
+        course_registry=course_registry,
+        display_timezone=display_timezone,
+        legacy_course_id=course_repository.legacy_course_id(),
     )
     app.extensions["mcq_services"] = services
+    app.extensions["mcq_form_serializer"] = form_serializer
+    app.extensions["mcq_course_loader"] = loader
+    app.extensions["mcq_cross_course"] = cross_course
 
-    @app.get("/health")
-    def health() -> tuple[dict[str, str], int]:
-        """Liveness: the process is up and its application is assembled.
-
-        Deliberately independent of the question-bank generation: a stale
-        worker is still alive and, for example, must still let learners sign
-        out.  Use ``/ready`` to find out whether it may serve learning traffic.
-        """
-        return {"status": "ok"}, 200
-
-    @app.get("/ready")
-    def ready() -> tuple[dict[str, Any], int]:
-        """Readiness: this worker serves the bank the database considers live.
-
-        A ``stale`` worker answers 503 for every learning page until the whole
-        service is restarted with the new bank, so monitoring must be able to
-        tell it apart from a healthy one.
-        """
-        database_generation = question_bank_state_repository.get_generation()
-        if database_generation == bank_generation:
-            return {"status": "ready"}, 200
-        return (
-            {
-                "status": "stale",
-                "worker_generation": bank_generation,
-                "database_generation": database_generation,
-            },
-            503,
-        )
+    _register_readiness_endpoints(app, course_registry)
 
     @app.after_request
     def add_security_headers(response):
         """Apply browser protections to public and authenticated responses alike."""
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
-        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        response.headers.setdefault(
+            "Referrer-Policy", "strict-origin-when-cross-origin"
+        )
+        response.headers.setdefault(
+            "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+        )
         if request.is_secure:
             response.headers.setdefault(
                 "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
             )
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
-            "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "default-src 'self'; base-uri 'self'; object-src 'none'; "
+            "frame-ancestors 'none'; script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
             "form-action 'self'",
         )
         return response
 
     app.register_blueprint(
         create_web_blueprint(
-            question_repository=question_repository,
-            glossary_repository=glossary_repository,
             user_repository=user_repository,
-            quiz_service=quiz_service,
-            progress_repository=progress_repository,
             rate_limit_repository=rate_limit_repository,
-            wrong_question_service=wrong_question_service,
-            weak_knowledge_point_service=weak_knowledge_point_service,
-            exam_service=exam_service,
-            statistics_service=statistics_service,
-            global_statistics_service=global_statistics_service,
+            course_repository=course_repository,
+            course_registry=course_registry,
+            cross_course=cross_course,
             display_timezone=display_timezone,
-            question_bank_version=question_bank_version,
-            bank_generation=bank_generation,
-            bank_state_repository=question_bank_state_repository,
+            form_serializer=form_serializer,
         )
     )
     return app
+
+
+def _register_readiness_endpoints(
+    app: Flask, course_registry: CourseRegistry
+) -> None:
+    """Register ``/health``, ``/ready`` and ``/ready/<course_id>``.
+
+    ``/health`` is liveness only: a stale worker is still alive and must still
+    let a learner sign out.  ``/ready`` is this worker's aggregate signal over
+    its declared, enabled courses, and ``/ready/<course_id>`` reports one course.
+    Aggregate failure is a *monitoring* signal: it never makes a healthy
+    course's route answer 503.
+    """
+
+    @app.get("/health")
+    def health() -> tuple[dict[str, str], int]:
+        return {"status": "ok"}, 200
+
+    @app.get("/ready")
+    def ready() -> tuple[dict[str, Any], int]:
+        ok, payload = course_registry.readiness()
+        return payload, 200 if ok else 503
+
+    @app.get("/ready/<course_id>")
+    def ready_course(course_id: str) -> tuple[dict[str, Any], int]:
+        ok, payload = course_registry.course_readiness(course_id)
+        if payload.get("status") == "unknown":
+            payload = {
+                **payload,
+                "course_id": course_id,
+                "known_courses": [
+                    state.course_id
+                    for state in course_registry.states()
+                    if state.declared
+                ],
+            }
+            return payload, 404
+        state = course_registry.state(course_id)
+        if state is not None and state.status is CourseStatus.DISABLED:
+            return payload, 503
+        return payload, 200 if ok else 503
+

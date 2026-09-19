@@ -1,12 +1,31 @@
-"""SQLite connection and schema management."""
+"""SQLite connection and schema management.
+
+The database is one shared SQLite file for the whole deployment — courses are a
+*namespace inside it*, not one file per course.  This module owns three things
+and nothing else:
+
+* opening short-lived, correctly configured connections;
+* running the transactional namespace migration exactly once
+  (``schema_migrations.ensure_schema``);
+* the per-``(learner_id, course_id, question_id)`` attempt-retention sweep,
+  which is a *separate* step from the migration on purpose.
+
+Course-scoped repositories bind a ``course_id`` at construction and never see
+this module's cross-course seams.
+"""
 
 import os
 import sqlite3
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterator
 
+from app.models import Course, LEGACY_COURSE_ID
+
+from . import schema_migrations
+
+#: Retained answer window per learner and question, shared across every mode.
 MAX_ATTEMPTS_PER_QUESTION = 10
 
 
@@ -14,131 +33,79 @@ class Database:
     """Create short-lived SQLite connections for repository operations."""
 
     def __init__(self, database_path: Path) -> None:
-        self.database_path = database_path
+        self.database_path = Path(database_path)
         self._transaction_connection = ContextVar("mcq_connection", default=None)
+        self.schema_info: schema_migrations.SchemaInfo | None = None
 
-    def initialize(self) -> None:
-        """Create the local database and tables on first startup."""
+    # -------------------------------------------------------------- initialization
+
+    def initialize(
+        self,
+        *,
+        courses: Iterable[Course] = (),
+        legacy_course_id: str = LEGACY_COURSE_ID,
+        failpoint=None,
+    ) -> schema_migrations.SchemaInfo:
+        """Create or migrate the database, then register accepted courses.
+
+        Ordering matters: the namespace migration runs first and touches no
+        learner semantics, then the retention sweep runs as its own step, then
+        the accepted course metadata is recorded.
+
+        The legacy namespace row always exists because ``legacy_course_id`` is
+        part of the schema this build writes: learner tables declare a
+        restrictive foreign key onto ``courses``, and rows written under the
+        legacy namespace must always have an owner.
+        """
         parent_existed = self.database_path.parent.exists()
         self.database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not parent_existed:
             os.chmod(self.database_path.parent, 0o700)
-        with self.connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id TEXT PRIMARY KEY,
-                    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                    password_hash TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
+        self.schema_info = schema_migrations.ensure_schema(
+            self.database_path,
+            legacy_course_id=legacy_course_id,
+            failpoint=failpoint,
+        )
+        self.enforce_attempt_retention()
+        self.register_courses(courses)
+        return self.schema_info
 
-                CREATE TABLE IF NOT EXISTS quiz_progress (
-                    learner_id TEXT NOT NULL,
-                    mode TEXT NOT NULL CHECK (mode IN ('normal', 'review')),
-                    bank_version TEXT NOT NULL,
-                    state TEXT,
-                    PRIMARY KEY (learner_id, mode)
-                );
+    def register_courses(self, courses: Iterable[Course]) -> None:
+        """Record accepted course metadata without re-owning any history.
 
-                CREATE TABLE IF NOT EXISTS attempts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    learner_id TEXT NOT NULL,
-                    question_id TEXT NOT NULL,
-                    mode TEXT NOT NULL CHECK (mode IN ('normal', 'review', 'mock_exam')),
-                    selected_answers TEXT NOT NULL,
-                    is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
-                    answered_at TEXT NOT NULL
-                );
+        The *persisted* ``legacy_course_id`` is used, not the module default: an
+        operator may have renamed that namespace (``scripts/rename_course.py``),
+        and re-inserting the default id would recreate a phantom, history-less
+        course row on every startup.  An existing row keeps its metadata, so the
+        recorded title is never overwritten from here.
+        """
+        from .course_repository import CourseRepository
 
-                CREATE TABLE IF NOT EXISTS wrong_questions (
-                    learner_id TEXT NOT NULL,
-                    question_id TEXT NOT NULL,
-                    wrong_count INTEGER NOT NULL DEFAULT 1,
-                    review_streak INTEGER NOT NULL DEFAULT 0,
-                    mastered INTEGER NOT NULL DEFAULT 0 CHECK (mastered IN (0, 1)),
-                    srs_level INTEGER NOT NULL DEFAULT 0,
-                    next_review_at TEXT,
-                    last_wrong_at TEXT NOT NULL,
-                    last_reviewed_at TEXT,
-                    PRIMARY KEY (learner_id, question_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS weak_knowledge_points (
-                    learner_id TEXT NOT NULL,
-                    chapter_id TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
-                    verified_question_ids TEXT NOT NULL DEFAULT '[]',
-                    last_wrong_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (learner_id, chapter_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS auth_rate_limits (
-                    scope TEXT NOT NULL,
-                    identifier_hash TEXT NOT NULL,
-                    window_started_at INTEGER NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    attempt_count INTEGER NOT NULL,
-                    PRIMARY KEY (scope, identifier_hash)
-                );
-
-                CREATE TABLE IF NOT EXISTS exam_sessions (
-                    id TEXT PRIMARY KEY,
-                    learner_id TEXT NOT NULL,
-                    status TEXT NOT NULL
-                        CHECK (status IN ('in_progress', 'submitted', 'expired')),
-                    question_count INTEGER NOT NULL,
-                    time_limit_seconds INTEGER,
-                    option_seed TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    started_at TEXT NOT NULL,
-                    deadline_at TEXT,
-                    submitted_at TEXT,
-                    current_position INTEGER NOT NULL DEFAULT 0,
-                    correct_count INTEGER,
-                    duration_seconds INTEGER
-                );
-
-                CREATE TABLE IF NOT EXISTS exam_questions (
-                    exam_id TEXT NOT NULL,
-                    position INTEGER NOT NULL,
-                    question_id TEXT NOT NULL,
-                    selected_answers TEXT,
-                    is_correct INTEGER CHECK (is_correct IN (0, 1)),
-                    answered_at TEXT,
-                    grading_fingerprint TEXT,
-                    PRIMARY KEY (exam_id, position),
-                    UNIQUE (exam_id, question_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS question_bank_state (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    bank_version TEXT NOT NULL,
-                    generation INTEGER NOT NULL,
-                    catalogue_fingerprint TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS question_registry (
-                    question_id TEXT PRIMARY KEY,
-                    status TEXT NOT NULL CHECK (status IN ('active', 'retired')),
-                    question_type TEXT NOT NULL,
-                    option_ids TEXT NOT NULL,
-                    correct_answers TEXT NOT NULL,
-                    content_fingerprint TEXT NOT NULL,
-                    placement_fingerprint TEXT,
-                    first_seen_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    retired_at TEXT
-                );
-                """
+        repository = CourseRepository(self)
+        legacy_course_id = repository.legacy_course_id()
+        existing = repository.get(legacy_course_id)
+        if existing is None:
+            repository.accept(
+                Course(
+                    course_id=legacy_course_id,
+                    title="Legacy course namespace",
+                    title_zh="旧版课程命名空间",
+                    enabled=True,
+                    order=-1_000_001,
+                )
             )
-            self._migrate_wrong_question_srs_columns(connection)
-            self._migrate_attempt_mode_constraint(connection)
-            self._migrate_exam_question_fingerprint(connection)
-            self._migrate_registry_placement_fingerprint(connection)
-            self._migrate_bank_state_catalogue_fingerprint(connection)
-            connection.execute(
+        for course in courses:
+            repository.accept(course)
+
+    def enforce_attempt_retention(self) -> int:
+        """Trim each learner's per-course, per-question answer window.
+
+        The window is ``(learner_id, course_id, question_id)`` and stays shared
+        across ``normal``/``review``/``mock_exam``, exactly as before the
+        refactor; only the partition gained the course namespace.
+        """
+        with self.connect() as connection:
+            cursor = connection.execute(
                 """
                 DELETE FROM attempts
                 WHERE id IN (
@@ -147,7 +114,7 @@ class Database:
                         SELECT
                             id,
                             ROW_NUMBER() OVER (
-                                PARTITION BY learner_id, question_id
+                                PARTITION BY learner_id, course_id, question_id
                                 ORDER BY answered_at DESC, id DESC
                             ) AS retention_rank
                         FROM attempts
@@ -157,135 +124,10 @@ class Database:
                 """,
                 (MAX_ATTEMPTS_PER_QUESTION,),
             )
-            connection.executescript(
-                """
-                CREATE INDEX IF NOT EXISTS idx_attempts_learner_question
-                    ON attempts(learner_id, question_id);
-                CREATE INDEX IF NOT EXISTS idx_wrong_questions_learner_mastered
-                    ON wrong_questions(learner_id, mastered);
-                CREATE INDEX IF NOT EXISTS idx_weak_points_learner_active
-                    ON weak_knowledge_points(learner_id, active);
-                CREATE INDEX IF NOT EXISTS idx_exam_sessions_learner
-                    ON exam_sessions(learner_id, created_at);
-                """
-            )
-        os.chmod(self.database_path, 0o600)
+        return int(cursor.rowcount or 0)
 
-    @staticmethod
-    def _migrate_wrong_question_srs_columns(connection: sqlite3.Connection) -> None:
-        """Add SRS scheduling columns to databases created before this feature.
 
-        The ``CREATE TABLE`` above already covers fresh databases; these
-        guarded ``ALTER TABLE`` statements upgrade existing ones in place.
-        Legacy rows keep ``srs_level = 0`` and ``next_review_at = NULL``, so
-        they are never scheduled until they are corrected again.
-        """
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(wrong_questions)")
-        }
-        if "srs_level" not in columns:
-            connection.execute(
-                "ALTER TABLE wrong_questions "
-                "ADD COLUMN srs_level INTEGER NOT NULL DEFAULT 0"
-            )
-        if "next_review_at" not in columns:
-            connection.execute(
-                "ALTER TABLE wrong_questions ADD COLUMN next_review_at TEXT"
-            )
-
-    @staticmethod
-    def _migrate_attempt_mode_constraint(connection: sqlite3.Connection) -> None:
-        """Allow the ``mock_exam`` attempt mode in pre-mock-exam databases.
-
-        SQLite cannot alter a ``CHECK`` constraint, so databases created
-        before mock exams are rebuilt in place. Fresh databases already carry
-        the widened constraint and skip the rebuild. All rows and their ids
-        are preserved, and the learner/question index is recreated below.
-        """
-        row = connection.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attempts'"
-        ).fetchone()
-        if row is None or "mock_exam" in row["sql"]:
-            return
-        connection.execute(
-            """
-            CREATE TABLE attempts_mode_migration (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                learner_id TEXT NOT NULL,
-                question_id TEXT NOT NULL,
-                mode TEXT NOT NULL CHECK (mode IN ('normal', 'review', 'mock_exam')),
-                selected_answers TEXT NOT NULL,
-                is_correct INTEGER NOT NULL CHECK (is_correct IN (0, 1)),
-                answered_at TEXT NOT NULL
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO attempts_mode_migration (
-                id, learner_id, question_id, mode, selected_answers,
-                is_correct, answered_at
-            )
-            SELECT id, learner_id, question_id, mode, selected_answers,
-                   is_correct, answered_at
-            FROM attempts
-            """
-        )
-        connection.execute("DROP TABLE attempts")
-        connection.execute(
-            "ALTER TABLE attempts_mode_migration RENAME TO attempts"
-        )
-
-    @staticmethod
-    def _migrate_exam_question_fingerprint(connection: sqlite3.Connection) -> None:
-        """Add the grading-fingerprint column to pre-tracking exam slots.
-
-        Existing slots keep ``NULL``: their exams predate grading-identity
-        tracking, so historical reports render them as recorded.
-        """
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(exam_questions)")
-        }
-        if "grading_fingerprint" not in columns:
-            connection.execute(
-                "ALTER TABLE exam_questions ADD COLUMN grading_fingerprint TEXT"
-            )
-
-    @staticmethod
-    def _migrate_registry_placement_fingerprint(connection: sqlite3.Connection) -> None:
-        """Add the chapter/source placement column to a pre-placement registry.
-
-        Existing rows keep ``NULL``: their placement identity was never
-        recorded, so the next startup adopts (backfills) it without bumping
-        the bank generation.  Only later moves are treated as structural.
-        """
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(question_registry)")
-        }
-        if "placement_fingerprint" not in columns:
-            connection.execute(
-                "ALTER TABLE question_registry ADD COLUMN placement_fingerprint TEXT"
-            )
-
-    @staticmethod
-    def _migrate_bank_state_catalogue_fingerprint(connection: sqlite3.Connection) -> None:
-        """Add the catalogue-shape column to a pre-catalogue bank state row.
-
-        Existing rows keep ``NULL``: the catalogue shape was never recorded, so
-        the next startup adopts (backfills) it without bumping the bank
-        generation.  Only later catalogue changes are treated as structural.
-        """
-        columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(question_bank_state)")
-        }
-        if "catalogue_fingerprint" not in columns:
-            connection.execute(
-                "ALTER TABLE question_bank_state ADD COLUMN catalogue_fingerprint TEXT"
-            )
+    # ------------------------------------------------------------------ connections
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -296,6 +138,7 @@ class Database:
             return
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         try:
             yield connection
             connection.commit()
@@ -307,7 +150,13 @@ class Database:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        """Serialize progress changes across workers and share all learner writes."""
+        """Serialize learner writes across workers inside one ``BEGIN IMMEDIATE``.
+
+        Repositories called inside this block transparently share the single
+        connection, so a services call that touches several tables is one
+        atomic unit and SQLite's writer lock coordinates sibling Gunicorn
+        workers.
+        """
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             token = self._transaction_connection.set(connection)
@@ -315,3 +164,71 @@ class Database:
                 yield connection
             finally:
                 self._transaction_connection.reset(token)
+
+
+class CrossCourseQueries:
+    """Explicit cross-course access for administration, migration, and tooling.
+
+    Course-bound repositories deliberately cannot escape their namespace.  The
+    few operations that genuinely have to look across courses (resolving which
+    course owns a bare ``exam_id``, counting rows per course for a migration
+    report) live here so an accidental cross-course read is always a visible,
+    reviewed choice rather than an implicit default of a repository method.
+    """
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def find_course_for_exam(self, exam_id: str) -> str | None:
+        """Return the course that owns ``exam_id``, or ``None`` when unknown."""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT course_id FROM exam_sessions WHERE id = ?", (exam_id,)
+            ).fetchone()
+        return None if row is None else str(row["course_id"])
+
+    def find_course_for_exam_of_learner(
+        self, exam_id: str, learner_id: str
+    ) -> str | None:
+        """Return the owning course only when the exam belongs to ``learner_id``.
+
+        This backs the legacy ``/exam/<id>/report`` compatibility redirect: the
+        redirect target must be derived from the exam's real namespace, never
+        from whichever course the browser last looked at.
+        """
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT course_id FROM exam_sessions WHERE id = ? AND learner_id = ?",
+                (exam_id, learner_id),
+            ).fetchone()
+        return None if row is None else str(row["course_id"])
+
+    def row_counts(self) -> dict[str, int]:
+        """Return the total row count per table (diagnostics and tests)."""
+        counts: dict[str, int] = {}
+        with self.database.connect() as connection:
+            tables = [
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            ]
+            for table in tables:
+                counts[table] = int(
+                    connection.execute(
+                        f'SELECT COUNT(*) AS total FROM "{table}"'
+                    ).fetchone()["total"]
+                )
+        return counts
+
+    def question_ids_for_course(self, table: str, course_id: str) -> set[str]:
+        """Return the question IDs one learner table holds for one course."""
+        if table not in {"attempts", "wrong_questions"}:
+            raise ValueError(f'Unsupported table for this lookup: "{table}"')
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                f"SELECT DISTINCT question_id FROM {table} WHERE course_id = ?",
+                (course_id,),
+            ).fetchall()
+        return {row["question_id"] for row in rows}

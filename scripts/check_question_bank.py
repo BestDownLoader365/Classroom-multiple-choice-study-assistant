@@ -1,14 +1,21 @@
-"""Pre-deploy question-bank check: validate and diff against a database.
+"""Pre-deploy, per-course question-bank check: validate and diff against a DB.
 
-Run this before restarting the service with a new ``questions.json`` to see
-exactly what the startup reconciliation would do — and to catch retired-ID
-reuse *before* it can take the deployment down::
+Run this before publishing a new ``questions.json`` for one course to see exactly
+what the startup reconciliation would do — and to catch retired-ID reuse *before*
+it can take a course down::
 
-    python scripts/check_question_bank.py
-    python scripts/check_question_bank.py path/to/questions.json --db instance/mcq.db
-    python scripts/check_question_bank.py --strict
+    python scripts/check_question_bank.py --course physical_design candidate.json --db instance/mcq.db
+    python scripts/check_question_bank.py --course physical_design --strict
+    python scripts/check_question_bank.py --course physical_design --simulate
 
-The database is opened read-only and never modified.
+Everything is scoped to one course: the course's own registry, its own bank
+state row and its own generation.  A course A check never reads or reports
+course B's history.
+
+The database is opened **read-only** and never modified.  ``--simulate`` copies
+it to a temporary file first and runs the real reconciliation there, so the
+impact figures are produced by the production code path without touching live
+learner data.
 
 Exit codes:
 
@@ -17,61 +24,141 @@ Exit codes:
     data-affecting way, or the changes only add/move content while keeping
     every learner record.
 ``1``
-    The bank itself fails validation (bad JSON, bad schema, duplicate IDs...).
+    The candidate bank fails validation (bad JSON, bad schema, duplicate IDs).
 ``2``
-    Blocking: a retired question ID is reused for a different question.
-    Startup would refuse to run; assign fresh IDs instead.
+    Blocking: a retired question ID is reused for a different question.  The
+    course would be reported ``unavailable``; assign fresh IDs instead.
 ``3``
-    ``--strict`` only: the update is allowed but would clear parts of
-    learners' stored state (grading-changed or deleted questions).
+    ``--strict`` only: the update is allowed but would clear parts of learners'
+    stored state (grading-changed or deleted questions).
+``4``
+    The request cannot be answered safely: unknown course, ambiguous course, or
+    a database that has not been migrated and therefore cannot map a non-legacy
+    candidate to the history it would be compared against.
 
-Clearing learner state is *not* a deployment blocker on its own, so the
-default run still exits ``0`` for it — but it always reports exactly which
-questions lose their attempts/wrong-question/SRS state and never claims the
-deploy is data-loss-free.
-
-The report separates bank-level changes too: ``catalogue-changed`` (sources or
-chapters added, removed, re-ordered or re-assigned) bumps the bank generation
-and therefore needs the coordinated restart, while ``presentation-only``
-(bank/source/chapter labels, ``lecture``/``filename``, JSON formatting — i.e.
-bytes changed with no fingerprint-visible change) does not fence workers, so
-labels may differ between workers until the next restart.
+Clearing learner state is *not* a deployment blocker on its own, so the default
+run still exits ``0`` for it — but it always reports exactly which questions
+lose their attempts/wrong-question/SRS state and never claims the deploy is
+data-loss-free.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.models import QuestionRegistryEntry, QuestionRegistryStatus  # noqa: E402
-from app.repositories import QuestionBankError, QuestionLoader  # noqa: E402
+from app.models import (  # noqa: E402
+    LEGACY_COURSE_ID,
+    CourseDefinition,
+    CourseDefinitionError,
+    CourseLoadError,
+    QuestionRegistryEntry,
+    QuestionRegistryStatus,
+)
+from app.repositories import (  # noqa: E402
+    CourseLoader,
+    Database,
+    QuestionBankError,
+    QuestionLoader,
+    ensure_schema,
+    read_meta,
+)
+from app.repositories.schema_migrations import (  # noqa: E402
+    LEGACY_COURSE_KEY,
+    SCHEMA_VERSION,
+    SCHEMA_VERSION_KEY,
+)
 from app.services import catalogue_fingerprint, diff_questions  # noqa: E402
 
+MIGRATION_TABLE_SUFFIX = "__course_migration"
 
-def _load_registry(database_path: Path) -> dict[str, QuestionRegistryEntry] | None:
-    """Read the registry from a database, or ``None`` when it is absent."""
+
+class ScriptError(RuntimeError):
+    """Raised when the request cannot be answered safely (exit code 4)."""
+
+
+# --------------------------------------------------------------- database reads
+
+
+def _open_read_only(database_path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _has_table(connection: sqlite3.Connection, name: str) -> bool:
+    return (
+        connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        is not None
+    )
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in connection.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _require_course_mapping(
+    connection: sqlite3.Connection, course_id: str, database_path: Path
+) -> None:
+    """Refuse to diff a non-legacy course against an unmigrated database.
+
+    A pre-multi-course database has exactly one namespace and no ``course_id``
+    column at all.  Comparing any other course's candidate against "the whole
+    database's history" would silently report that course's questions as new
+    while hiding the real owner of those rows, so the check refuses instead.
+    """
+    columns = _columns(connection, "question_registry")
+    if "course_id" in columns:
+        return
+    legacy = read_meta(connection, LEGACY_COURSE_KEY) or LEGACY_COURSE_ID
+    if course_id != legacy:
+        raise ScriptError(
+            f"{database_path} has not been migrated to the multi-course schema "
+            f'(question_registry has no "course_id"), so it can only be mapped to '
+            f"the legacy course (currently {legacy!r}). Run "
+            "scripts/migrate_courses.py first, then check each course."
+        )
+
+
+def _load_registry(
+    database_path: Path, course_id: str
+) -> dict[str, QuestionRegistryEntry] | None:
+    """Read one course's registry, or ``None`` when the table has no rows.
+
+    Pre-multi-course databases have no ``course_id`` column; their rows are read
+    as the legacy namespace, and :func:`_require_course_mapping` has already
+    refused any other course.
+    """
     if not database_path.is_file():
         return None
-    connection = sqlite3.connect(
-        f"file:{database_path}?mode=ro", uri=True
-    )
-    connection.row_factory = sqlite3.Row
+    connection = _open_read_only(database_path)
     try:
-        table = connection.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'question_registry'"
-        ).fetchone()
-        if table is None:
+        if not _has_table(connection, "question_registry"):
             return None
-        rows = connection.execute("SELECT * FROM question_registry").fetchall()
+        _require_course_mapping(connection, course_id, database_path)
+        columns = _columns(connection, "question_registry")
+        if "course_id" in columns:
+            rows = connection.execute(
+                "SELECT * FROM question_registry WHERE course_id = ?",
+                (course_id,),
+            ).fetchall()
+        else:
+            rows = connection.execute("SELECT * FROM question_registry").fetchall()
     finally:
         connection.close()
+    if not rows:
+        return None
     return {
         row["question_id"]: QuestionRegistryEntry(
             question_id=row["question_id"],
@@ -83,9 +170,6 @@ def _load_registry(database_path: Path) -> dict[str, QuestionRegistryEntry] | No
             first_seen_at=row["first_seen_at"],
             last_seen_at=row["last_seen_at"],
             retired_at=row["retired_at"],
-            # Databases created before placement tracking have no column: the
-            # sync adopts the current mapping on the next startup, so the
-            # preflight cannot (and must not) report a move either.
             placement_fingerprint=_placement_of(row),
         )
         for row in rows
@@ -99,28 +183,31 @@ def _placement_of(row: sqlite3.Row) -> str:
     return row["placement_fingerprint"] or ""
 
 
-def _load_state(database_path: Path) -> tuple[str, str | None] | None:
-    """Read ``(bank_version, catalogue_fingerprint)`` from the live database.
+def _load_state(
+    database_path: Path, course_id: str
+) -> tuple[int, str, str | None] | None:
+    """Read this course's ``(generation, bank_version, catalogue_fingerprint)``.
 
-    Returns ``None`` when the state row or table is missing.  A missing
-    catalogue fingerprint means the deployed database predates catalogue
-    tracking, so the sync adopts the candidate shape as its baseline instead of
-    reporting a change.
+    ``None`` means the course has no recorded bank state at all, which is
+    distinct from a recorded generation of ``0``.
     """
     if not database_path.is_file():
         return None
-    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
+    connection = _open_read_only(database_path)
     try:
-        table = connection.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type = 'table' AND name = 'question_bank_state'"
-        ).fetchone()
-        if table is None:
+        if not _has_table(connection, "question_bank_state"):
             return None
-        row = connection.execute(
-            "SELECT * FROM question_bank_state WHERE id = 1"
-        ).fetchone()
+        columns = _columns(connection, "question_bank_state")
+        if "course_id" in columns:
+            row = connection.execute(
+                "SELECT * FROM question_bank_state WHERE course_id = ?", (course_id,)
+            ).fetchone()
+        elif course_id == (read_meta(connection, LEGACY_COURSE_KEY) or LEGACY_COURSE_ID):
+            row = connection.execute(
+                "SELECT * FROM question_bank_state LIMIT 1"
+            ).fetchone()
+        else:
+            return None
     finally:
         connection.close()
     if row is None:
@@ -130,7 +217,83 @@ def _load_state(database_path: Path) -> tuple[str, str | None] | None:
         if "catalogue_fingerprint" in row.keys()
         else ""
     )
-    return row["bank_version"], catalogue or None
+    return int(row["generation"]), row["bank_version"], catalogue or None
+
+
+
+def _impact(
+    database_path: Path, course_id: str, unusable_ids: tuple[str, ...]
+) -> dict[str, int]:
+    """Count the learner state a destructive diff would clear in this course.
+
+    The intent is a report, never a mutation: the database stays read-only.
+    """
+    impact = {
+        "attempts": 0,
+        "wrong_questions": 0,
+        "weak_points": 0,
+        "progress_rows": 0,
+        "progress_touched": 0,
+        "in_progress_exams": 0,
+    }
+    if not database_path.is_file() or not unusable_ids:
+        return impact
+    placeholders = ", ".join("?" for _ in unusable_ids)
+    markers = [f'%"{question_id}"%' for question_id in unusable_ids]
+    weak_clause = " OR ".join("verified_question_ids LIKE ?" for _ in markers)
+    progress_clause = " OR ".join("state LIKE ?" for _ in markers)
+    connection = _open_read_only(database_path)
+    try:
+        for key, table in (
+            ("attempts", "attempts"),
+            ("wrong_questions", "wrong_questions"),
+        ):
+            if not _has_table(connection, table):
+                continue
+            impact[key] = int(
+                connection.execute(
+                    f"SELECT COUNT(*) AS total FROM {table} "
+                    f"WHERE course_id = ? AND question_id IN ({placeholders})",
+                    (course_id, *unusable_ids),
+                ).fetchone()["total"]
+            )
+        if _has_table(connection, "weak_knowledge_points"):
+            impact["weak_points"] = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS total FROM weak_knowledge_points "
+                    f"WHERE course_id = ? AND ({weak_clause})",
+                    (course_id, *markers),
+                ).fetchone()["total"]
+            )
+        if _has_table(connection, "quiz_progress"):
+            impact["progress_rows"] = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS total FROM quiz_progress WHERE course_id = ?",
+                    (course_id,),
+                ).fetchone()["total"]
+            )
+            impact["progress_touched"] = int(
+                connection.execute(
+                    "SELECT COUNT(*) AS total FROM quiz_progress "
+                    f"WHERE course_id = ? AND ({progress_clause})",
+                    (course_id, *markers),
+                ).fetchone()["total"]
+            )
+        if _has_table(connection, "exam_sessions") and _has_table(
+            connection, "exam_questions"
+        ):
+            impact["in_progress_exams"] = int(
+                connection.execute(
+                    "SELECT COUNT(DISTINCT s.id) AS total FROM exam_sessions s "
+                    "JOIN exam_questions q ON q.exam_id = s.id "
+                    "WHERE s.course_id = ? AND s.status = 'in_progress' "
+                    f"AND q.question_id IN ({placeholders})",
+                    (course_id, *unusable_ids),
+                ).fetchone()["total"]
+            )
+    finally:
+        connection.close()
+    return impact
 
 
 def _legacy_tombstones(
@@ -138,10 +301,10 @@ def _legacy_tombstones(
 ) -> tuple[str, ...]:
     """Retired IDs without a recorded grading identity.
 
-    They come from pre-registry databases (the ID only ever appeared in
-    learner history) and are adopted instead of rejected if they reappear,
-    which means a *different* question could inherit their old history.  The
-    check lists them so maintainers can decide to rename the content instead.
+    They come from pre-registry databases (the ID only ever appeared in learner
+    history) and are adopted instead of rejected if they reappear, which means a
+    *different* question could inherit their old history.  The check lists them
+    so maintainers can decide to rename the content instead.
     """
     return tuple(
         sorted(
@@ -172,21 +335,209 @@ def _warning(title: str, ids: tuple[str, ...], detail: str) -> None:
     print(f"  {detail}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
+
+# --------------------------------------------------------------- course resolve
+
+
+def _synthetic_legacy_definition(
+    args: argparse.Namespace, candidate: Path
+) -> CourseDefinition:
+    """Describe a candidate that lives outside every declared course.
+
+    ``scripts/check_question_bank.py candidate.json`` is the documented
+    single-course flow: the candidate's directory *is* the deployment's root
+    content location, and the namespace to diff against is the **persisted**
+    ``legacy_course_id`` (so a deployment whose legacy namespace was renamed
+    still compares against its own history).
+    """
+    from app.models import LEGACY_COURSE_ID, Course
+
+    root = candidate.parent
+    glossary_candidate = root / args.glossary_file.name
+    legacy_course_id = LEGACY_COURSE_ID
+    if args.db.is_file():
+        try:
+            connection = _open_read_only(args.db)
+            try:
+                if _has_table(connection, "schema_meta"):
+                    legacy_course_id = (
+                        read_meta(connection, LEGACY_COURSE_KEY) or LEGACY_COURSE_ID
+                    )
+            finally:
+                connection.close()
+        except sqlite3.Error:  # pragma: no cover - diagnostics only
+            legacy_course_id = LEGACY_COURSE_ID
+    return CourseDefinition(
+        course=Course(
+            course_id=legacy_course_id,
+            title="Candidate question bank",
+            enabled=True,
+            order=-1_000_000,
+        ),
+        root=root,
+        questions_path=candidate,
+        glossary_path=(
+            glossary_candidate.resolve() if glossary_candidate.is_file() else None
+        ),
+        manifest_path=None,
+        layout="legacy",
+    )
+
+
+def resolve_definition(args: argparse.Namespace) -> CourseDefinition:
+    """Resolve the single course definition this check applies to."""
+    loader = CourseLoader(
+        args.courses_dir,
+        legacy_directory=args.question_file.parent,
+        legacy_questions_name=args.question_file.name,
+        legacy_glossary_name=args.glossary_file.name,
+    )
+    if args.course:
+        definition = loader.find_definition(args.course)
+        if definition is None:
+            known = [item.course_id for item in loader.discover_definitions()]
+            raise ScriptError(
+                f'Unknown course "{args.course}". Declared courses: '
+                f"{', '.join(known) if known else '(none)'}."
+            )
+        return definition
+
+    definitions = loader.enabled_definitions()
+    candidate = Path(args.candidate).resolve() if args.candidate else None
+    if candidate is not None:
+        # A candidate inside (or next to) a declared course belongs to it.
+        for definition in definitions:
+            if definition.questions_path == candidate:
+                return definition
+        for definition in definitions:
+            if definition.questions_path.parent == candidate.parent:
+                return definition
+        # Otherwise the candidate defines the deployment's root content location.
+        return _synthetic_legacy_definition(args, candidate)
+    if len(definitions) == 1:
+        return definitions[0]
+    if not definitions:
+        raise ScriptError(
+            "No enabled course is declared. Add courses/<course_id>/course.json "
+            "or place a root questions.json, or pass --course."
+        )
+    raise ScriptError(
+        "Several courses are declared, so the target is ambiguous. Pass "
+        "--course <course_id>."
+    )
+
+
+def candidate_file_for(
+    args: argparse.Namespace, definition: CourseDefinition
+) -> Path:
+    """Return the candidate file: the positional argument or the course's own.
+
+    ``--course`` without a positional path re-validates the published course, so
+    an operator can confirm the deployed state after a publication.
+    """
+    if args.candidate is not None:
+        return Path(args.candidate).resolve()
+    return definition.questions_path
+
+
+def simulate(database_path: Path, candidate_file: Path, definition: CourseDefinition) -> int:
+    """Run the real reconciliation against a throwaway copy of the database.
+
+    Returns the generation the real startup path would end up at.  The live
+    database is never written: only the copy changes, and it is deleted
+    afterwards.
+    """
+    from datetime import timezone
+
+    from app.repositories import UserRepository
+    from app.services.course_service import (
+        assemble_course_services,
+        synchronize_course,
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        copy = Path(directory) / "simulated.db"
+        shutil.copy2(database_path, copy)
+        ensure_schema(copy)
+        database = Database(copy)
+        # Point the definition at the candidate file, exactly as a real
+        # publication would.
+        simulated_definition = CourseDefinition(
+            course=definition.course,
+            root=definition.root,
+            questions_path=candidate_file,
+            glossary_path=definition.glossary_path,
+            manifest_path=definition.manifest_path,
+            layout=definition.layout,
+        )
+        loader = CourseLoader(
+            candidate_file.parent,
+            legacy_directory=None,
+            legacy_questions_name=candidate_file.name,
+            legacy_glossary_name=candidate_file.name,
+        )
+        bundle = loader.load_bundle(simulated_definition)
+        services = assemble_course_services(
+            bundle,
+            database=database,
+            knowledge_verification_target=2,
+            display_timezone=timezone.utc,
+            user_repository=UserRepository(database),
+        )
+        reconciled = synchronize_course(
+            services,
+            publication_identity=lambda: loader.publication_identity(
+                simulated_definition
+            ),
+        )
+        return reconciled.generation
+
+
+
+
+# ------------------------------------------------------------------------ main
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog=(
             "exit codes: 0 可部署（含允许的清理行为，会打印警告）；"
             "1 题库校验失败；2 非法复用退役 ID（阻止启动）；"
-            "3 --strict 下检测到学习状态清理。"
+            "3 --strict 下检测到学习状态清理；4 课程/数据库无法安全比对。"
         ),
     )
     parser.add_argument(
-        "question_file",
+        "candidate",
         nargs="?",
+        default=None,
+        help=(
+            "candidate questions.json to validate; omit to re-check the course's "
+            "currently published file"
+        ),
+    )
+    parser.add_argument(
+        "--course",
+        default=None,
+        help="course_id to check (required when several courses are declared)",
+    )
+    parser.add_argument(
+        "--courses-dir",
+        default=PROJECT_ROOT / "courses",
+        type=Path,
+        help="directory holding one sub-directory per course (default: ./courses)",
+    )
+    parser.add_argument(
+        "--question-file",
         default=PROJECT_ROOT / "questions.json",
         type=Path,
-        help="questions.json to validate (default: project root file)",
+        help="root questions.json used for the legacy course adapter",
+    )
+    parser.add_argument(
+        "--glossary-file",
+        default=PROJECT_ROOT / "glossary.json",
+        type=Path,
+        help="root glossary.json used for the legacy course adapter",
     )
     parser.add_argument(
         "--db",
@@ -202,9 +553,31 @@ def main(argv: list[str] | None = None) -> int:
             "(grading-changed or deleted questions)"
         ),
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help=(
+            "copy the database to a temporary file and run the real "
+            "reconciliation there, reporting the resulting generation"
+        ),
+    )
+    return parser
 
-    loader = QuestionLoader(args.question_file)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    try:
+        definition = resolve_definition(args)
+    except (ScriptError, CourseDefinitionError) as exc:
+        print(f"无法解析课程：\n{exc}", file=sys.stderr)
+        return 4
+    course_id = definition.course_id
+    candidate = candidate_file_for(args, definition)
+    print(f"课程 (course_id): {course_id} [{definition.layout}]")
+
+    loader = QuestionLoader(candidate)
     try:
         questions = loader.load()
     except QuestionBankError as exc:
@@ -212,35 +585,51 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"题库校验通过：{len(questions)} 道题。")
 
-    registry = _load_registry(args.db)
+    try:
+        registry = _load_registry(args.db, course_id)
+        stored_state = _load_state(args.db, course_id)
+    except ScriptError as exc:
+        print(f"无法比对：\n{exc}", file=sys.stderr)
+        return 4
+
+    generation = stored_state[0] if stored_state else 0
+    print(f"当前 generation：{generation}")
+    if args.simulate and args.db.is_file():
+        try:
+            simulated_generation = simulate(args.db, candidate, definition)
+        except (CourseLoadError, ScriptError) as exc:
+            print(f"模拟失败：\n{exc}", file=sys.stderr)
+            return 4
+        print(f"模拟后的 generation：{simulated_generation}")
+        print(
+            "本次发布会推进 generation："
+            f"{'yes' if simulated_generation != generation else 'no'}"
+        )
+
     if not registry:
         print(
-            "数据库中没有 question_registry 记录：首次启动将建立基线，"
+            "该课程在数据库中没有 question_registry 记录：首次启动将建立基线，"
             "不会清理任何学习数据。"
         )
         print("\n可以安全部署。")
         return 0
 
     diff = diff_questions(questions, registry)
-    stored_state = _load_state(args.db)
-    stored_catalogue = stored_state[1] if stored_state else None
+    stored_catalogue = stored_state[2] if stored_state else None
     candidate_catalogue = catalogue_fingerprint(loader.sources, loader.chapters)
-    # A database without a recorded catalogue shape predates catalogue
-    # tracking: the sync adopts the candidate as the baseline, so no change is
-    # reported here either.
+    # A database without a recorded catalogue shape predates catalogue tracking:
+    # the sync adopts the candidate as the baseline, so no change is reported.
     catalogue_changed = (
         stored_catalogue is not None and stored_catalogue != candidate_catalogue
     )
     file_changed = (
         stored_state is not None
         and loader.source_fingerprint is not None
-        and loader.source_fingerprint != stored_state[0]
+        and loader.source_fingerprint != stored_state[1]
     )
-    # The file changed but nothing any fingerprint covers did: the edit can only
-    # be labels (bank/source/chapter text) or formatting.
-    presentation_only = (
-        file_changed and not diff.has_changes and not catalogue_changed
-    )
+    presentation_only = file_changed and not diff.has_changes and not catalogue_changed
+    would_bump = bool(diff.structural or catalogue_changed)
+    _flag("本次发布将推进该课程 generation (generation would bump)", would_bump)
 
     _report("新增题目（不清理数据）(new)", diff.new_ids)
     _report("内容修改（历史保留）(content-only)", diff.content_changed_ids)
@@ -256,15 +645,28 @@ def main(argv: list[str] | None = None) -> int:
         "(catalogue-changed)",
         catalogue_changed,
     )
-    _flag(
-        "仅文案/格式差异（不影响 generation）(presentation-only)",
-        presentation_only,
+    _flag("仅文案/格式差异（不影响 generation）(presentation-only)", presentation_only)
+
+    print(
+        "\nattempts 处理策略："
+        f"判题规则变化删除该题 attempts ({len(diff.grading_changed_ids)} 题)；"
+        f"删除题目保留全部 attempts ({len(diff.deleted_ids)} 题)。"
     )
+    unusable = tuple(sorted(diff.unusable_ids))
+    impact = _impact(args.db, course_id, unusable)
+    print(
+        "本次发布会清理的本课程学习状态："
+        f"attempts {impact['attempts']} 条、错题/SRS {impact['wrong_questions']} 条、"
+        f"薄弱知识点 {impact['weak_points']} 条、"
+        f"未完成练习 {impact['progress_touched']}/{impact['progress_rows']} 轮、"
+        f"进行中的考试 {impact['in_progress_exams']} 场。"
+    )
+
     if diff.violations:
         print(
             "\n错误：以下已退役的 question ID 被复用于判题规则不同的题目：\n    - "
             + "\n    - ".join(diff.violations)
-            + "\n退役 ID 永久保留，请为新题分配新 ID。",
+            + "\n退役 ID 永久保留，请为新题分配新 ID。该课程会被标记为不可用。",
             file=sys.stderr,
         )
         return 2
@@ -299,16 +701,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if catalogue_changed:
+    if would_bump:
         print(
-            "\n目录结构变化（课件/章节的增删、顺序或归属）会推进题库 generation："
-            "部署后请统一重启全部工作进程，旧进程的学习页面会返回 503，"
-            "否则旧进程的章节菜单可能提交出新进程拒绝的筛选值。"
-        )
-    if diff.placement_changed_ids:
-        print(
-            "\n章节/来源调整会推进题库 generation：部署后请统一重启全部工作进程，"
-            "旧进程的学习页面会返回 503。"
+            f"\n本次发布会推进课程 {course_id} 的 generation：部署后请统一重启全部"
+            "工作进程；未更新的进程只会围栏该课程的学习页面（其他课程不受影响）。"
         )
     if presentation_only:
         print(
@@ -322,3 +718,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

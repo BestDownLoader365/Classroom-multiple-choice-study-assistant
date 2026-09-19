@@ -1,5 +1,21 @@
 """Application services containing MCQ business rules."""
 
+from .course_consistency import (
+    CourseConsistencyError,
+    CourseServabilityChangedError,
+    FORM_CONTEXT_COURSE,
+    FORM_CONTEXT_GENERATION,
+    FORM_CONTEXT_OPERATION,
+    StaleFormError,
+    StaleWorkerError,
+    guarded_learner_transaction,
+)
+from .course_service import (
+    CourseServices,
+    assemble_course_services,
+    synchronize_course,
+    with_generation,
+)
 from .exam_service import (
     EXAM_QUESTION_COUNT_OPTIONS,
     EXAM_TIME_LIMIT_OPTIONS,
@@ -36,6 +52,7 @@ from .local_time import (
 from .progress_state import reconcile_state
 from .question_bank_sync_service import (
     BankDiff,
+    CoursePublicationChangedError,
     QuestionBankSyncService,
     diff_questions,
     needs_placement_backfill,
@@ -65,6 +82,10 @@ __all__ = [
     "BankDiff",
     "ChapterDifficulty",
     "ChapterMastery",
+    "CourseConsistencyError",
+    "CoursePublicationChangedError",
+    "CourseServices",
+    "CourseServabilityChangedError",
     "DashboardData",
     "DayActivity",
     "EXAM_QUESTION_COUNT_OPTIONS",
@@ -75,6 +96,9 @@ __all__ = [
     "ExamReport",
     "ExamService",
     "ExamStateError",
+    "FORM_CONTEXT_COURSE",
+    "FORM_CONTEXT_GENERATION",
+    "FORM_CONTEXT_OPERATION",
     "GlobalOverviewData",
     "GlobalStatisticsService",
     "GradingService",
@@ -89,20 +113,26 @@ __all__ = [
     "ReviewItem",
     "ReviewSelectionResult",
     "SRS_REVIEW",
+    "StaleFormError",
+    "StaleWorkerError",
     "StatisticsService",
     "TRANSFER_VERIFICATION",
     "WeakKnowledgePointService",
     "WeakKnowledgeSummary",
     "WrongQuestionService",
+    "assemble_course_services",
     "catalogue_fingerprint",
     "content_fingerprint",
     "diff_questions",
     "display_day",
     "grading_fingerprint",
+    "guarded_learner_transaction",
     "needs_placement_backfill",
     "placement_fingerprint",
     "reconcile_state",
     "resolve_display_timezone",
+    "synchronize_course",
     "timezone_label",
     "to_display",
+    "with_generation",
 ]

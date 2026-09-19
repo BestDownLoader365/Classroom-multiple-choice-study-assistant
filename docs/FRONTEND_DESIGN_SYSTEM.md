@@ -1116,3 +1116,35 @@ In all implementations:
 The new product should feel as though it was designed by the same design team, while remaining structurally and semantically appropriate for its own requirements.
 
 **Same design language. Same visual taste. Same interaction character. Different product, business, and content.**
+
+---
+
+## Course selector and course list (added for multi-course)
+
+The course selector and the course list page reuse this design system instead of
+introducing a second look:
+
+* it sits in `site-header` between the brand and `header-actions`, using the same
+  `--font-data` label style, the same `1px solid var(--line-strong)` underline
+  affordance as `.header-link`, and the same `--accent` hover/`--accent-dark`
+  active treatment;
+* the picker is a native `<details>`/`<summary>` with plain `<a>` links, so
+  course selection works with JavaScript disabled, with the keyboard, and on
+  touch; the open menu reuses the `.size-picker-menu` look (sheet background,
+  `--line` border, single soft shadow) rather than a new popover style;
+* the course list page uses the existing heading pattern (`section-label` +
+  `h1` + lead paragraph), the existing `.status` chips for the per-course state
+  (`可学习` / `等待更新` / `已停用` / `未部署` / `不可用`), and the existing
+  `.button` variants for the primary action;
+* state variants only tint the card background with `--paper-deep`
+  (`.course-card-disabled`, `.course-card-unavailable`, `.course-card-stale`,
+  `.course-card-undeployed`) so a non-servable course reads as de-emphasised
+  without inventing new colours;
+* responsive behaviour hooks into the existing breakpoints: at
+  `max-width: 820px` the header wraps, the course picker takes the full row and
+  its menu becomes an inline list (no floating overlay on a narrow screen), and
+  the course grid collapses to a single column.
+
+The header always names the course the current page belongs to, and every page's
+forms post back to the same `course_id`, so the selector is navigation only — it
+never resets progress and never restarts the service.

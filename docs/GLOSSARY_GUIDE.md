@@ -1,18 +1,28 @@
-# `glossary.json` 专业术语库编写指南
+# `glossary.json` 专业术语库编写指南（GLOSSARY_GUIDE）
 
 本文面向创建、审核和维护课程术语库的用户。目标是写出一份能被当前应用直接加载的 `glossary.json`，让术语学习页、题目与错题中的术语高亮，以及中文释义弹层自动适配任意课程。
 
-本文描述当前项目实际支持的契约。最终校验逻辑以 [`app/repositories/glossary_loader.py`](../app/repositories/glossary_loader.py) 为准；题库本身的写法见 [`questions.json` 题库编写指南](QUESTION_JSON_GUIDE.md)。
+本文描述当前项目实际支持的契约。最终校验逻辑以 [`app/repositories/glossary_loader.py`](../app/repositories/glossary_loader.py) 为准；题库本身的写法见 [`questions.json` 题库编写指南](QUESTION_GUIDE.md)。
 
 ## 1. 文件用途与放置位置
 
-把 UTF-8 编码的 `glossary.json` 放在项目根目录，也就是与 `run.py` 和 `questions.json` 同级的位置。应用在启动时读取并完整校验它，修改后必须重启开发服务器或全部 Gunicorn worker。
+`glossary.json` 属于**某门课程**，放在该课程的目录里，也就是与它的 `course.json`（manifest）和 `questions.json` 同级：
+
+```text
+courses/<course_id>/
+├── course.json      # 声明 "glossary": "glossary.json"，或 "glossary": null 表示没有术语表
+├── questions.json
+└── glossary.json
+```
+
+应用启动时读取并完整校验它，修改后需要重启开发服务器或生产 worker 才会生效。manifest 声明了 glossary 但文件缺失/损坏时，该课程会被标记为 `unavailable`（不会假装“没有术语表”）；`glossary: null` 才是明确的“本课程没有术语表”。旧版的根目录 `glossary.json` 仍然可用：它会作为 `legacy` 课程的术语表加载。
 
 两个 JSON 文件职责不同：
 
 - `questions.json` 保存题目、选项、答案、解析和课程目录；
 - `glossary.json` 保存专业术语、别名、翻译、释义和分类；
-- 术语数据不写入 SQLite，也不参与任何题库指纹（`bank_version` 与 grading / content / placement / catalogue 指纹）。只修改 `glossary.json` 不会清空账号、答题记录、错题状态或练习进度，也不会推进题库 generation：即使其它 worker 仍在运行旧题库，`/ready` 依旧为 200，学习页面不会因此返回 503。
+- 术语数据不写入 SQLite，也不参与任何题库指纹（`bank_version` 与 grading / content / placement / catalogue 指纹），并且**按课程隔离**（术语身份是 `(course_id, term_id)`）：题面高亮只用当前课程的术语，课程之间不会互相注入、也不会共用别名；
+- 只修改 `glossary.json` 不会清空账号、答题记录、错题状态或练习进度，也不会推进该课程的 generation：`/ready/<course_id>` 依旧为 200，学习页面不会因此返回 503。
 
 ## 2. 可直接使用的完整示例
 
@@ -140,7 +150,7 @@ Loader 会对每个 canonical term 和 alias 执行 Unicode NFKC 规范化、大
 
 术语高亮只发生在模板明确标记的学习内容中。目前包括题干、选项、答案反馈、解析和错题内容。
 
-`scripts/audit_glossary.py` 为了检查术语覆盖面，会读取 `questions.json` 中面向学习者的英文文本：
+`scripts/audit_glossary.py` 为了检查术语覆盖面，会读取**同一门课程**的 `questions.json` 中面向学习者的英文文本：
 
 - `sources[].title`；
 - `chapters[].title`；
@@ -153,45 +163,59 @@ ID、文件名、页码、中文翻译和答案 ID 不属于覆盖语料。审�
 
 ## 9. 校验与审计命令
 
-以下命令均在项目根目录执行。
+以下命令均在项目根目录执行，`<course_id>` 用课程 manifest 里的身份（例如 `eek5106`）；只声明了一门启用课程时可以省略 `--course`。
 
 ### 9.1 检查 JSON 语法
 
 Linux、macOS 或 WSL：
 
 ```bash
-python -m json.tool glossary.json > /dev/null
+python -m json.tool courses/<course_id>/glossary.json > /dev/null
 ```
 
 PowerShell：
 
 ```powershell
-python -m json.tool glossary.json | Out-Null
+python -m json.tool courses/<course_id>/glossary.json | Out-Null
 ```
 
 ### 9.2 使用当前 Loader 校验完整契约
 
 ```bash
-python -c "from pathlib import Path; from app.repositories import GlossaryLoader; g = GlossaryLoader(Path('glossary.json')).load(); print(f'OK: {len(g.terms)} terms, {sum(len(t.aliases) for t in g.terms)} aliases')"
+python -c "from pathlib import Path; from app.repositories import GlossaryLoader; g = GlossaryLoader(Path('courses/eek5106/glossary.json')).load(); print(f'OK: {len(g.terms)} terms, {sum(len(t.aliases) for t in g.terms)} aliases')"
+```
+
+也可以直接让课程目录校验把每门课的题目数与术语数一次报出来：
+
+```bash
+python scripts/check_courses.py
 ```
 
 只有看到 `OK`，才表示字段类型、必填值、ID 和标签冲突都通过了当前代码校验。
 
 ### 9.3 审计与题库的覆盖关系
 
-使用项目默认文件：
+审核单门课程（用该课程自己的题库做语料）：
 
 ```bash
-python scripts/audit_glossary.py
+python scripts/audit_glossary.py --course eek5106
 ```
 
-检查其他路径：
+审核全部启用课程：
+
+```bash
+python scripts/audit_glossary.py --all
+```
+
+显式离线检查任意两个文件（不经过课程目录）：
 
 ```bash
 python scripts/audit_glossary.py \
   --questions path/to/questions.json \
   --glossary path/to/glossary.json
 ```
+
+审计只读取内容，不会修改 `question_registry`、generation 或任何学习数据。
 
 输出含义：
 
@@ -235,24 +259,24 @@ pytest -q
 | `duplicates another term or alias after normalization` | 同一词条内 term/alias 重复 | 删除重复标签。 |
 | `collides with glossary term ... after normalization` | 标签已由另一词条占用 | 合并同义词条，或删除/改写歧义 alias。 |
 | 术语页有词条但正文没有高亮 | 正文拼写不是 term/alias 的字面形式，或正文不属于高亮区域 | 添加准确 alias，并确认目标是题干、选项、反馈、解析或错题内容。 |
-| 修改后页面仍是旧内容 | 应用只在启动时加载文件 | 重启开发进程或全部生产 worker。 |
+| 修改后页面仍是旧内容 | 应用只在启动时加载文件 | 重启开发进程或生产 worker。 |
 
-## 12. 更换课程的推荐流程
+## 12. 新增/更换课程的推荐流程
 
-1. 按 [`QUESTION_JSON_GUIDE.md`](QUESTION_JSON_GUIDE.md) 准备并校验新题库。
+1. 按 [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) 准备并校验新题库。
 2. 从题干、选项、解析和课程目录收集需要学习的专业概念。
 3. 为每个概念确定 canonical term、中文译名、稳定 ID 和分类。
 4. 根据题库真实写法补充无歧义 aliases。
 5. 编写简洁、课程语境明确的中英文定义。
 6. 运行 JSON 语法检查、GlossaryLoader 校验和覆盖审计。
 7. 人工处理 orphan 与候选报告，不要把候选结果直接批量写入术语库。
-8. 同时部署 `questions.json` 和 `glossary.json`，重启全部应用进程并完成浏览器验收。
+8. 同时部署 `questions.json` 和 `glossary.json`（`publish_course.py` 可一次发布两者），重启应用进程并完成浏览器验收。
 
-更换 `questions.json` 时按 [`QUESTION_JSON_GUIDE.md`](QUESTION_JSON_GUIDE.md) 第 11.6 节发布：先预检、原子替换、再统一重启。题库按 `question.id` 逐题增量同步，**不会重置全站学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进题库 generation，让仍在运行旧题库的 worker 在学习页面返回 503，因此这类发布必须统一重启全部 worker。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。准备新课程时仍建议两个文件一起审核，避免旧术语错误地出现在新题库中。
+更换 `questions.json` 时按 [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) 第 11.6 节发布：先预检（`--course <course_id>`）、再原子发布（`swap_question_bank.py` / `publish_course.py`）、最后更新 worker。题库按 `question.id` **在该课程内**逐题增量同步，**不会重置该课程的学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进**该课程**的 generation，让仍在运行旧内容的 worker 只在该课程的学习页面返回 503，因此这类发布要更新 worker，但**不影响其他课程**。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。发布新课程时建议两个文件一起审核，避免旧术语出现在新题库中。
 
 ## 13. 发布前检查清单
 
-- [ ] 文件名和实际配置指向正确的 `glossary.json`，编码为 UTF-8。
+- [ ] manifest 的 `glossary` 指向该课程目录内正确的文件名（或明确写 `null`），编码为 UTF-8。
 - [ ] `schema_version` 是整数 `1`。
 - [ ] 根级 `title`、`title_zh` 和 `terms` 已提供。
 - [ ] 每个词条都有唯一稳定的 `id`、`term` 和 `term_zh`。
@@ -263,4 +287,4 @@ pytest -q
 - [ ] 分类名称与粒度一致，词条顺序符合学习需要。
 - [ ] 标准 JSON、GlossaryLoader、覆盖审计和完整测试集已运行。
 - [ ] orphan 和候选报告已经人工复核。
-- [ ] 已重启应用并完成桌面端、手机端、鼠标和键盘验收。
+- [ ] 已更新 worker 并完成桌面端、手机端、鼠标和键盘验收。

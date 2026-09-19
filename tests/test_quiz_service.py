@@ -1,6 +1,7 @@
 from dataclasses import replace
 import logging
 
+from app.models import LEGACY_COURSE_ID
 from app.models import Option, Question, QuizMode
 from app.repositories import (
     AttemptRepository,
@@ -41,8 +42,8 @@ def build_services(tmp_path, sample_questions, shuffler=lambda values: None):
     question_repository = QuestionRepository(sample_questions)
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    attempt_repository = AttemptRepository(database)
-    wrong_repository = WrongQuestionRepository(database)
+    attempt_repository = AttemptRepository(database, course_id=LEGACY_COURSE_ID)
+    wrong_repository = WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID)
     wrong_service = WrongQuestionService(
         attempt_repository,
         wrong_repository,

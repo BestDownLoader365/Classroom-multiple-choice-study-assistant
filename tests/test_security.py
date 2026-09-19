@@ -8,8 +8,8 @@ def _csrf(client):
         token = browser_session.get("csrf_token")
     if isinstance(token, str):
         return token
-    for path in ("/", "/login"):
-        response = client.get(path, base_url="https://localhost")
+    for path in ("/login", "/courses"):
+        response = client.get(path, base_url="https://localhost", follow_redirects=True)
         match = re.search(r'name="csrf_token" value="([^"]+)"', response.text)
         if match:
             return match.group(1)

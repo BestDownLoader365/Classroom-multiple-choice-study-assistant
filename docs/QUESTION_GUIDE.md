@@ -1,8 +1,8 @@
-# `questions.json` 题库编写指南
+# `questions.json` 题库编写指南（QUESTION_GUIDE）
 
 本文面向生成、审核和维护题库的开发者。目标是生成一份可以被当前应用直接加载的 `questions.json`，无需为不同课程修改 Python、HTML 或 JavaScript 代码。
 
-本文描述的是当前项目实际支持的题库契约。最终校验逻辑以 [`app/repositories/question_loader.py`](../app/repositories/question_loader.py) 为准。专业术语、别名、翻译、定义和分类不写在题库中，请使用独立的 [`glossary.json` 专业术语库编写指南](GLOSSARY_JSON_GUIDE.md)。
+本文描述的是当前项目实际支持的题库契约。最终校验逻辑以 [`app/repositories/question_loader.py`](../app/repositories/question_loader.py) 为准。专业术语、别名、翻译、定义和分类不写在题库中，请使用独立的 [`glossary.json` 专业术语库编写指南](GLOSSARY_GUIDE.md)。
 
 ## 1. 适用范围
 
@@ -18,9 +18,9 @@
 
 当前代码不会解释或渲染图片、音频、视频、公式对象、填空题、排序题、主观题等额外题型。即使把 `image`、`difficulty`、`tags` 等未知字段写入 JSON，Loader 也会忽略它们，界面不会自动获得对应功能。
 
-应用启动时会同时校验 `questions.json` 和 `glossary.json`，两个文件都必须有效。题库维护按 `question.id` 逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该题自身的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py` 预检题库变更的实际影响。
+`questions.json` 属于**某门课程**：它位于 `courses/<course_id>/questions.json`，并由同目录的 `course.json`（manifest）声明。应用启动时会加载并校验每一门启用课程的题库与（可选）`glossary.json`。题库维护按 `question.id` **在该课程内**逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该课程该题的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` 预检题库变更的实际影响。
 
-“不会影响学习记录”与“不改变题库结构”是两件事。`chapter_ids`（章节归属）和 `source_id` 决定题目出现在哪些章节筛选、哪些 Review 强化目标和哪些章节进度里，因此它们的变化属于**结构性变化**：学习历史仍然保留，但题库 generation 会 +1，运行旧题库的工作进程在学习页面（包括 `/stats`）统一返回 503，直到**所有 worker 一起重启**。课件/章节在根目录中的**增删、顺序或归属变化**同样是结构性变化（每个 worker 用自己的目录生成菜单并校验提交的筛选值，新旧菜单不一致会让旧 worker 提交出新 worker 拒绝为 400 的章节）。只有纯展示文案——题库 `title`/`title_zh`、`sources[].title`/`lecture`/`filename`、`chapters[].title` 与 JSON 格式——不推进 generation，允许新旧 worker 在下次统一重启前短暂显示不同文案。发布题库文件必须原子替换，详见第 11.6 节；`check_question_bank.py` 会分别报告 `catalogue-changed` 与 `presentation-only`，便于判断是否需要统一重启。
+“不会影响学习记录”与“不改变题库结构”是两件事。`chapter_ids`（章节归属）和 `source_id` 决定题目出现在哪些章节筛选、哪些 Review 强化目标和哪些章节进度里，因此它们的变化属于**结构性变化**：学习历史仍然保留，但**该课程**的 generation 会 +1，运行旧题库的 worker 在该课程的学习页面（包括 `/stats`）返回 503，直到 worker 更新；**其他课程完全不受影响**。课件/章节的**增删、顺序或归属变化**同样是结构性变化（每个 worker 用自己那份课程目录生成菜单并校验提交的筛选值，新旧菜单不一致会让旧 worker 提交出新 worker 拒绝为 400 的章节）。只有纯展示文案——题库 `title`/`title_zh`、`sources[].title`/`lecture`/`filename`、`chapters[].title` 与 JSON 格式——不推进 generation，允许新旧 worker 在下次更新前短暂显示不同文案。发布题库文件必须原子替换，详见第 11.6 节；`check_question_bank.py` 会分别报告 `catalogue-changed` 与 `presentation-only`，便于判断是否需要安排更新。
 
 ## 2. 新题库的推荐完整结构
 
@@ -202,7 +202,7 @@ JSON 文件必须使用 UTF-8 编码。标准 JSON 不允许注释、尾随逗�
 - 修正题干、翻译、解析、选项文案、选项顺序、section/pages，或新增一个错误选项时，**保留原 question ID**，该题的全部学习历史自动保留。
 - 修改题型、正确答案集合，或删除/重命名已有 option ID，属于判题规则变化：该题的历史作答和错题状态会被定向清理（不影响其他题），请谨慎操作并确认确有必要。
 - 删除题目后，该 ID 会被永久保留为退役状态，**不能再分配给另一道题**；把退役 ID 复用于判题规则不同的新题会导致应用拒绝启动（预检脚本会提前发现）。
-- 例外只存在于迁移历史中：pre-registry 阶段由历史作答推导出的退役 ID 没有判题身份（`option_ids` 为空），第一次重新出现时会被直接采用，因此新题可能继承这些 ID 上的旧作答历史。这是迁移期的一次性宽容，不是通用规则；`python scripts/check_question_bank.py` 会把这些记录列为 `legacy tombstones without grading identity`，新内容应改用全新的 ID。
+- 例外只存在于迁移历史中：pre-registry 阶段由历史作答推导出的退役 ID 没有判题身份（`option_ids` 为空），第一次重新出现时会被直接采用，因此新题可能继承这些 ID 上的旧作答历史。这是迁移期的一次性宽容，不是通用规则；`python scripts/check_question_bank.py --course <course_id>` 会把这些记录列为 `legacy tombstones without grading identity`，新内容应改用全新的 ID。
 - 如果误删后想恢复，把原题按原 ID、原判题规则原样加回即可，系统会自动识别为同一道题的回归。
 - 替换为另一门课程并继续使用原数据库时，不要重新从通用的 `q001` 开始复用旧 ID。推荐加入课程命名空间，例如 `calculus-q001`、`history-q001`。
 
@@ -537,7 +537,7 @@ schema 不要求代码理解某个学科的语义。课程差异应由目录和�
 6. 添加解析和结构化来源信息。
 7. 审核双语内容的一致性。
 8. 由独立 reviewer 执行本节的语义审核，不接受“生成器已经标注的答案”作为证据。
-9. 执行第 11 节中的 JSON、Loader 和 pytest 校验；再按 [`GLOSSARY_JSON_GUIDE.md`](GLOSSARY_JSON_GUIDE.md) 准备术语库并运行覆盖审计。
+9. 执行第 11 节中的 JSON、Loader 和 pytest 校验；再按 [`GLOSSARY_GUIDE.md`](GLOSSARY_GUIDE.md) 准备术语库并运行覆盖审计。
 10. 在浏览器中抽查章节筛选、选项显示、判题、错题复习和术语高亮。
 
 ### 10.1 Generation pass
@@ -627,21 +627,24 @@ pytest -q
 - 错题列表和复习模式可以正常找到新题目；错题页选择课件或章节后应立即筛选，不再出现“筛选错题”按钮。
 - 题目、选项、反馈和解析中的专业术语能按 `glossary.json` 正确高亮。
 
-### 11.6 预检、原子发布与统一重启
+### 11.6 预检、原子发布与 worker 更新
 
-题库文件是运行中的 worker 会直接读取的文件，发布必须按下面的流程完成：
+题库文件属于一门课程，发布流程按**课程**执行（`<course_id>` 是该课程的 manifest 身份；一门启用课程时可以省略 `--course`）：
 
 ```text
 candidate.json
-    ↓  python scripts/check_question_bank.py candidate.json --db instance/mcq.db
-    ↓  （--strict 时，会清理学习状态的更新返回非 0）
-    ↓  python scripts/swap_question_bank.py candidate.json
-    ↓  同目录临时文件 → fsync → os.replace(temp, questions.json)
-    ↓  统一重启全部应用 worker
-    ↓  curl http://127.0.0.1:8001/ready 确认 200
+    ↓  python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db
+    ↓  （--strict 时，会清理学习状态的更新返回非 0；--simulate 会用临时数据库副本跑一次真实 reconciliation）
+    ↓  python scripts/swap_question_bank.py --course <course_id> candidate.json --db instance/mcq.db
+    ↓  冻结候选字节 → 写入不可变 versions/<sha256>/questions.json
+    ↓  发布锁内重新校验 baseline → 单次 os.replace 原子切换 course.json
+    ↓  更新 worker（systemctl restart mcq-template.service）
+    ↓  curl http://127.0.0.1:8001/ready/<course_id> 确认 200
 ```
 
-预检脚本的退出码含义：`0` 可部署（可能同时打印“将清理学习状态”的警告），`1` 题库校验失败，`2` 非法复用退役 ID（启动会被阻止），`3` 仅在使用 `--strict` 时出现，表示更新会清理学习状态。**只要输出中出现清理学习状态的警告，脚本就不会打印“可以安全部署”**；请确认可以接受后再部署。
+`swap_question_bank.py` 只读一次候选文件，校验与发布使用**同一份字节**；它输出 `published, pending worker activation`，**不会**自行推进 generation（由 worker 启动时的 reconciliation 完成），也不声称文件系统发布与数据库激活是同一个事务。回滚就是把旧内容当作新候选再发布一次，不要手工改 `generation`。
+
+预检脚本的退出码含义：`0` 可部署（可能同时打印“将清理学习状态”的警告），`1` 题库校验失败，`2` 非法复用退役 ID（该课程会被标记为不可用），`3` 仅在使用 `--strict` 时出现，表示更新会清理学习状态，`4` 课程无法解析或数据库尚未迁移（未迁移的数据库只能映射到 legacy 课程）。**只要输出中出现清理学习状态的警告，脚本就不会打印“可以安全部署”**；请确认可以接受后再部署。
 
 预检还会单独报告两类整体性变化：`catalogue-changed: yes` 表示课件/章节被增删、重排或改变了归属（各 worker 的章节菜单与筛选校验因此不同），必须统一重启；`presentation-only: yes` 表示只有标签文案或 JSON 格式变化（题库标题、课件/章节标题、lecture、filename），学习数据与 worker 围栏都不受影响，这些文案在全部 worker 重启前可能短暂不同，但不需要为它单独安排重启。
 
@@ -654,16 +657,16 @@ candidate.json
 | 有增删题目、判题规则变化、题目归属变化 | `no` |
 | 课件/章节增删、重排或改归属（属于 `catalogue-changed: yes`） | `no` |
 | 一次发布里既改了标签文案、又改了任何上面这些内容 | `no` |
-| 数据库缺少 `question_bank_state` 记录（没有可比对的基线） | `no` |
+| 该课程在数据库里缺少 `question_bank_state` 记录（没有可比对的基线） | `no` |
 | 只改了标签文案，或只是 JSON 缩进/空白重排（内容未变） | `yes` |
 
-也就是说：判断“要不要统一重启”请以 `catalogue-changed` 与题目级各行为准；`presentation-only` 只说明“这次发布没有任何指纹可见的变化”，它不影响退出码。想知道具体改了哪些标签，需要自行比对两份候选文件。
+也就是说：判断“要不要更新 worker”请以 `catalogue-changed` 与题目级各行为准；`presentation-only` 只说明“这次发布没有任何指纹可见的变化”，它不影响退出码。想知道具体改了哪些标签，需要自行比对两份候选文件。
 
-不要用 `cp` 直接覆盖正在使用的 `questions.json`，也不要依赖编辑器的原地保存：写入过程中若被截断或分两次落盘，恰好在此期间启动或 reload 的 worker 会读到半截 JSON，并报出看起来像题库语法错误的 `Invalid JSON in question bank at line 1, column N`。`scripts/swap_question_bank.py` 只做三件事：校验候选文件、写入同目录临时文件并 fsync、用 `os.replace()` 原子就位。
+不要用 `cp` 直接覆盖正在使用的 `questions.json`，也不要依赖编辑器的原地保存：写入过程中若被截断或分两次落盘，恰好在此期间启动的 worker 会读到半截 JSON，并报出看起来像题库语法错误的 `Invalid JSON in question bank at line 1, column N`。manifest 布局下这一点由「内容归档到 `versions/<sha256>/` + 单次 `os.replace` 切换 `course.json`」保证；legacy 根目录布局退化为对单个文件的原子替换。
 
-任何结构性变化（增删题目、判题规则变化、`chapter_ids`/`source_id` 变化）之后都必须**统一重启全部 worker**；只重启一部分会让未被重启的 worker 在学习页面返回 503（这是防止两套题库同时写学习数据的 fail-fast 设计，不要通过忽略 generation 检查或手工改 `question_bank_state.generation` 绕过）。
+任何结构性变化（增删题目、判题规则变化、`chapter_ids`/`source_id` 变化）之后都必须**更新全部 worker**；只更新一部分会让旧 worker 在该课程的学习页面返回 503（这是防止两套题库同时写学习数据的 fail-fast 设计，不要通过忽略 generation 检查或手工改 `question_bank_state.generation` 绕过）。因为 generation 按课程独立，A 的更新只会围栏 A，B 的数据、generation 与请求行为都不变。
 
-删除题目还会改变页面统计口径：`attempts` 仍保存在数据库中，但统计只统计仍在题库中的题目，因此累计答题数可能下降、正确率可能变化；题目恢复后这些历史作答会重新计入。恢复数据库备份后同样要统一重启全部 worker，并用 `/ready` 确认状态一致。
+删除题目还会改变页面统计口径：`attempts` 仍保存在数据库中，但统计只统计仍在题库中的题目，因此累计答题数可能下降、正确率可能变化；题目恢复后这些历史作答会重新计入。恢复数据库备份后同样要更新全部 worker，并用 `/ready` 与 `/ready/<course_id>` 确认状态一致。
 
 ## 12. 常见错误
 

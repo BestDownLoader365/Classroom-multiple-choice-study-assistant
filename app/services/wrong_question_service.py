@@ -38,6 +38,27 @@ class LearningUpdate:
     knowledge_updates: tuple[KnowledgePointUpdate, ...] = ()
 
 
+def _derived_weak_knowledge_point_service(
+    wrong_question_repository: WrongQuestionRepository,
+    question_repository: QuestionRepository,
+) -> WeakKnowledgePointService:
+    """Derive a weak-knowledge service that inherits the bound course.
+
+    The composition root supplies this dependency explicitly; the fallback here
+    exists for focused unit tests.  It reads the namespace from the injected
+    repository instead of defaulting one, so it can never construct an
+    unscoped (cross-course) service.
+    """
+    return WeakKnowledgePointService(
+        WeakKnowledgePointRepository(
+            wrong_question_repository.database,
+            course_id=wrong_question_repository.course_id,
+        ),
+        question_repository,
+        wrong_question_repository,
+    )
+
+
 class WrongQuestionService:
     """Coordinate attempts with question correction and chapter weakness."""
 
@@ -53,14 +74,20 @@ class WrongQuestionService:
         self.question_repository = question_repository
         self.weak_knowledge_point_service = (
             weak_knowledge_point_service
-            or WeakKnowledgePointService(
-                WeakKnowledgePointRepository(
-                    wrong_question_repository.database
-                ),
-                question_repository,
-                wrong_question_repository,
+            or _derived_weak_knowledge_point_service(
+                wrong_question_repository, question_repository
             )
         )
+        for name, repository in (
+            ("attempt_repository", attempt_repository),
+            ("wrong_question_repository", wrong_question_repository),
+        ):
+            if repository.course_id != self.weak_knowledge_point_service.repository.course_id:
+                raise ValueError(
+                    f"WrongQuestionService received a {name} bound to "
+                    f'"{repository.course_id}" but a weak-knowledge service bound to '
+                    f'"{self.weak_knowledge_point_service.repository.course_id}".'
+                )
 
     def record_attempt(
         self,

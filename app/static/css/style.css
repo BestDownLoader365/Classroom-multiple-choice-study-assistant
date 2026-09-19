@@ -535,3 +535,38 @@ body.show-bilingual .translation-zh { display: block; }
     .data-table td:first-child::before { display: block; margin-bottom: 8px; }
     .data-table .num { text-align: left; }
 }
+
+/* Course selector and the course list page. Reuses the design system's tokens,
+   buttons and status chips; the selector is plain links inside <details>, so it
+   works with JavaScript disabled and on touch/narrow viewports. */
+.course-switcher { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.course-current { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.course-current-label { color: var(--muted); font-family: var(--font-data); font-size: 0.6rem; font-weight: 600; letter-spacing: 0.06em; }
+.course-current strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.82rem; font-weight: 650; }
+.course-menu { position: relative; }
+.course-menu-trigger { padding: 7px 11px; border: 0; border-bottom: 1px solid var(--line-strong); color: var(--ink-soft); cursor: pointer; font-size: 0.76rem; font-weight: 650; list-style: none; transition: color 140ms ease, border-color 140ms ease; }
+.course-menu-trigger::-webkit-details-marker { display: none; }
+.course-menu-trigger:hover { color: var(--accent); border-color: var(--accent); }
+.course-menu[open] .course-menu-trigger { color: var(--accent-dark); border-color: var(--accent-dark); }
+.course-menu-list { position: absolute; top: calc(100% + 8px); right: 0; z-index: 20; display: grid; min-width: 220px; max-width: min(78vw, 320px); margin: 0; padding: 8px; border: 1px solid var(--line); background: var(--sheet-bright); box-shadow: 0 18px 40px rgba(32, 35, 31, 0.14); gap: 2px; list-style: none; }
+.course-menu-link { display: block; padding: 9px 11px; color: var(--ink-soft); font-size: 0.8rem; font-weight: 600; text-decoration: none; }
+.course-menu-link:hover, .course-menu-link:focus-visible { color: var(--accent-dark); background: var(--accent-soft); }
+.course-menu-link.is-current { color: var(--ink); background: var(--paper-deep); }
+.course-status { color: var(--warning); font-size: 0.68rem; font-weight: 600; }
+
+.course-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 18px; }
+.course-card { display: grid; padding: 22px; border: 1px solid var(--line); background: var(--sheet); align-content: start; gap: 14px; }
+.course-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.course-card-heading h2 { margin: 0; font-size: 1.35rem; }
+.course-card-en { margin: 4px 0 0; color: var(--muted); font-size: 0.78rem; }
+.course-card-id { margin: 0; color: var(--muted); font-size: 0.72rem; }
+.course-card-id code { font-family: var(--font-data); }
+.course-card .button { justify-self: start; }
+.course-card-disabled, .course-card-unavailable, .course-card-stale, .course-card-undeployed { background: var(--paper-deep); }
+
+@media (max-width: 820px) {
+    .site-header { flex-wrap: wrap; padding-top: 12px; padding-bottom: 12px; }
+    .course-switcher { width: 100%; justify-content: space-between; }
+    .course-menu-list { position: static; margin-top: 8px; box-shadow: none; }
+    .course-grid { grid-template-columns: 1fr; }
+}

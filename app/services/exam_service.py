@@ -149,6 +149,17 @@ class ExamService:
         self.grading_service = grading_service
         self.wrong_question_service = wrong_question_service
         self.sampler = sampler
+        # The exam's exam-repository and the mistakes service must share one
+        # namespace, or grading an exam would write attempts into another course.
+        bound_course = getattr(
+            wrong_question_service.attempt_repository, "course_id", None
+        )
+        if bound_course != exam_repository.course_id:
+            raise ValueError(
+                f'ExamService received an exam repository bound to '
+                f'"{exam_repository.course_id}" but a wrong-question service bound '
+                f'to "{bound_course}".'
+            )
 
     @staticmethod
     def question_count_options(available: int) -> tuple[int, ...]:

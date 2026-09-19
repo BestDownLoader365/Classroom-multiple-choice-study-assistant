@@ -3,8 +3,11 @@
 import re
 from datetime import datetime, timedelta, timezone
 
+from app.models import LEGACY_COURSE_ID
 from app.models import ExamStatus, QuizMode
 from tests.test_web import learner_id, make_app, register
+
+LEGACY_HOME = "/course/legacy/"
 
 NOW = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -40,21 +43,21 @@ def exam_payload():
 
 
 def services(app):
-    return app.extensions["mcq_services"]
+    return app.extensions["mcq_services"].default_services
 
 
 def start_exam(client, count="10", limit="none"):
     response = client.post(
-        "/exam/start", data={"question_count": count, "time_limit": limit}
+        "/course/legacy/exam/start", data={"question_count": count, "time_limit": limit}
     )
     assert response.status_code == 302
     location = response.headers["Location"]
-    return location.split("/")[2]
+    return location.rsplit("/", 1)[-1]
 
 
 def answer(client, exam_id, position, answers, goto="next"):
     return client.post(
-        f"/exam/{exam_id}/answer",
+        f"/course/legacy/exam/{exam_id}/answer",
         data={"position": str(position), "answers": list(answers), "goto": goto},
     )
 
@@ -83,7 +86,7 @@ def test_exam_setup_lists_options_and_rejects_invalid_config(tmp_path):
     client = app.test_client()
     register(client)
 
-    page = client.get("/exam")
+    page = client.get("/course/legacy/exam")
     assert page.status_code == 200
     assert "模拟考试" in page.text
     assert "题目数量" in page.text
@@ -95,7 +98,7 @@ def test_exam_setup_lists_options_and_rejects_invalid_config(tmp_path):
                 {"question_count": "999", "time_limit": "none"},
                 {"question_count": "10", "time_limit": "45"},
                 {"question_count": "abc", "time_limit": "none"}):
-        response = client.post("/exam/start", data=bad, follow_redirects=True)
+        response = client.post("/course/legacy/exam/start", data=bad, follow_redirects=True)
         assert "考试配置无效" in response.text or "不支持" in response.text
     assert services(app).exam_repository.count() == 0
 
@@ -106,7 +109,7 @@ def test_exam_flow_keeps_fixed_questions_without_feedback(tmp_path):
     register(client)
     exam_id = start_exam(client)
 
-    first_page = client.get(f"/exam/{exam_id}")
+    first_page = client.get(f"/course/legacy/exam/{exam_id}")
     assert first_page.status_code == 200
     assert "第 1 / 10 题" in first_page.text
     assert "不限时" in first_page.text
@@ -118,7 +121,7 @@ def test_exam_flow_keeps_fixed_questions_without_feedback(tmp_path):
     # A refresh shows the same fixed question and restores the saved answer.
     first_question = question_text_on(first_page.text)
     answer(client, exam_id, 0, ["a"])
-    refreshed = client.get(f"/exam/{exam_id}?q=0")
+    refreshed = client.get(f"/course/legacy/exam/{exam_id}?q=0")
     assert question_text_on(refreshed.text) == first_question
     assert "已保存 1 项选择" in refreshed.text
     assert 'value="a"' in refreshed.text and "checked" in refreshed.text
@@ -126,9 +129,9 @@ def test_exam_flow_keeps_fixed_questions_without_feedback(tmp_path):
 
     # Navigation moves between fixed slots and persists across requests.
     answer(client, exam_id, 0, ["b"], goto="prev")
-    after_prev = client.get(f"/exam/{exam_id}?q=0")
+    after_prev = client.get(f"/course/legacy/exam/{exam_id}?q=0")
     assert "已保存 1 项选择" in after_prev.text
-    second_page = client.get(f"/exam/{exam_id}?q=1")
+    second_page = client.get(f"/course/legacy/exam/{exam_id}?q=1")
     assert "第 2 / 10 题" in second_page.text
 
     # The normal practice cycle is untouched by the exam.
@@ -149,9 +152,9 @@ def test_submit_produces_report_attempts_and_mistakes(tmp_path):
     for position in range(4):
         answer(client, exam_id, position, ["b"] if position % 2 == 0 else ["a"])
 
-    submit = client.post(f"/exam/{exam_id}/submit")
+    submit = client.post(f"/course/legacy/exam/{exam_id}/submit")
     assert submit.status_code == 302
-    report = client.get(f"/exam/{exam_id}/report")
+    report = client.get(f"/course/legacy/exam/{exam_id}/report")
     assert report.status_code == 200
     assert "本场成绩" in report.text
     assert "章节表现" in report.text
@@ -179,9 +182,9 @@ def test_submit_produces_report_attempts_and_mistakes(tmp_path):
     assert all(attempt.mode is QuizMode.MOCK_EXAM for attempt in attempts)
 
     # Submitting again is a no-op and the exam page is read-only afterwards.
-    client.post(f"/exam/{exam_id}/submit")
+    client.post(f"/course/legacy/exam/{exam_id}/submit")
     assert len(services(app).attempt_repository.list_for_learner(user_id)) == 4
-    reopened = client.get(f"/exam/{exam_id}")
+    reopened = client.get(f"/course/legacy/exam/{exam_id}")
     assert reopened.status_code == 302
     assert reopened.headers["Location"].endswith("/report")
     locked = answer(client, exam_id, 4, ["b"])
@@ -189,7 +192,7 @@ def test_submit_produces_report_attempts_and_mistakes(tmp_path):
     assert "已经交卷" in client.get(locked.headers["Location"]).text
 
     # The exam history links back to the immutable report.
-    setup_page = client.get("/exam")
+    setup_page = client.get("/course/legacy/exam")
     assert "已交卷" in setup_page.text
     assert "查看报告" in setup_page.text
     assert "过往模拟考试" in setup_page.text
@@ -201,7 +204,7 @@ def test_timed_exam_auto_submits_after_the_server_deadline(tmp_path):
     register(client)
     exam_id = start_exam(client, limit="600")
 
-    page = client.get(f"/exam/{exam_id}")
+    page = client.get(f"/course/legacy/exam/{exam_id}")
     assert "data-exam-timer" in page.text
     assert "data-remaining-seconds" in page.text
     answer(client, exam_id, 0, ["b"])
@@ -209,7 +212,7 @@ def test_timed_exam_auto_submits_after_the_server_deadline(tmp_path):
     expire_exam(app, exam_id)
 
     # Loading the exam after the deadline finalizes it as expired.
-    redirected = client.get(f"/exam/{exam_id}", follow_redirects=True)
+    redirected = client.get(f"/course/legacy/exam/{exam_id}", follow_redirects=True)
     assert "自动交卷" in redirected.text
     assert "本场成绩" in redirected.text
     user_id = learner_id(client)
@@ -223,7 +226,7 @@ def test_timed_exam_auto_submits_after_the_server_deadline(tmp_path):
     slots = services(app).exam_service.get_questions(session)
     assert slots[1].selected_answers == ()
 
-    report = client.get(f"/exam/{exam_id}/report")
+    report = client.get(f"/course/legacy/exam/{exam_id}/report")
     assert "时间结束，自动交卷" in report.text
 
 
@@ -234,15 +237,15 @@ def test_unfinished_exam_has_no_report_and_owner_only_access(tmp_path):
     exam_id = start_exam(owner)
 
     # An in-progress exam redirects the report route back to the exam page.
-    early = owner.get(f"/exam/{exam_id}/report")
+    early = owner.get(f"/course/legacy/exam/{exam_id}/report")
     assert early.status_code == 302
-    assert early.headers["Location"].endswith(f"/exam/{exam_id}")
+    assert early.headers["Location"].endswith(f"/course/legacy/exam/{exam_id}")
 
     other = app.test_client()
     register(other, "bob")
-    assert other.get(f"/exam/{exam_id}").status_code == 404
-    assert other.get(f"/exam/{exam_id}/report").status_code == 404
-    assert other.post(f"/exam/{exam_id}/submit").status_code == 404
+    assert other.get(f"/course/legacy/exam/{exam_id}").status_code == 404
+    assert other.get(f"/course/legacy/exam/{exam_id}/report").status_code == 404
+    assert other.post(f"/course/legacy/exam/{exam_id}/submit").status_code == 404
     forged = answer(other, exam_id, 0, ["a"])
     assert forged.status_code == 404
     assert services(app).exam_service.get_session(
@@ -257,17 +260,17 @@ def test_home_and_setup_offer_resume_for_active_exam(tmp_path):
     exam_id = start_exam(client)
     answer(client, exam_id, 2, ["b"])  # last visited position becomes 2
 
-    home = client.get("/")
+    home = client.get(LEGACY_HOME)
     assert "继续模拟考试" in home.text
     assert "第 3 / 10 题" in home.text
     assert "学习数据" in home.text
 
-    setup_page = client.get("/exam")
+    setup_page = client.get("/course/legacy/exam")
     assert "进行中的考试" in setup_page.text
     assert "继续考试" in setup_page.text
 
     # Reopening the exam without a page parameter lands on the saved spot.
-    resumed = client.get(f"/exam/{exam_id}")
+    resumed = client.get(f"/course/legacy/exam/{exam_id}")
     assert "第 3 / 10 题" in resumed.text
 
 
@@ -304,7 +307,7 @@ def test_legacy_attempts_table_is_migrated_in_place(tmp_path):
     database.initialize()
     database.initialize()  # the migration stays idempotent on repeat startup
 
-    attempts = AttemptRepository(database)
+    attempts = AttemptRepository(database, course_id=LEGACY_COURSE_ID)
     kept = attempts.list_for_learner("learner")
     assert len(kept) == 1
     assert kept[0].question_id == "q0"
@@ -330,7 +333,7 @@ def test_expired_exam_settles_when_visiting_home(tmp_path):
     answer(client, exam_id, 0, ["a"])  # wrong answer
     expire_exam(app, exam_id)
 
-    home = client.get("/")
+    home = client.get(LEGACY_HOME)
 
     assert "继续模拟考试" not in home.text
     user_id = learner_id(client)
@@ -343,10 +346,10 @@ def test_expired_exam_settles_when_visiting_home(tmp_path):
     )
     assert record is not None and record.corrected is False
     # The history and the report are immediately consistent.
-    setup_page = client.get("/exam")
+    setup_page = client.get("/course/legacy/exam")
     assert "已超时" in setup_page.text
     assert "进行中的考试" not in setup_page.text
-    report = client.get(f"/exam/{exam_id}/report")
+    report = client.get(f"/course/legacy/exam/{exam_id}/report")
     assert report.status_code == 200
     assert "时间结束，自动交卷" in report.text
 
@@ -360,7 +363,7 @@ def test_dashboard_visit_settles_expired_exam_into_statistics(tmp_path):
     answer(client, exam_id, 1, ["a"])  # wrong
     expire_exam(app, exam_id)
 
-    page = client.get("/dashboard")
+    page = client.get("/course/legacy/dashboard")
 
     assert "暂无答题记录" not in page.text
     user_id = learner_id(client)

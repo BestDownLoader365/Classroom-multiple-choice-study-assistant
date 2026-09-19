@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from app.models import LEGACY_COURSE_ID
 from app.models import Attempt, QuizMode
 from app.repositories import (
     AttemptRepository,
@@ -49,7 +50,7 @@ def test_users_are_hashed_and_case_insensitive(tmp_path):
 def test_attempt_repository_preserves_multiple_answer_order(tmp_path):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    attempts = AttemptRepository(database)
+    attempts = AttemptRepository(database, course_id=LEGACY_COURSE_ID)
     attempt = Attempt(
         learner_id="learner-id",
         question_id="q2",
@@ -75,7 +76,7 @@ def test_attempt_repository_preserves_multiple_answer_order(tmp_path):
 def test_attempt_repository_returns_latest_incorrect_answer_per_question(tmp_path):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    attempts = AttemptRepository(database)
+    attempts = AttemptRepository(database, course_id=LEGACY_COURSE_ID)
     for selected, answered_at in [
         (("a",), "2026-01-01T00:00:00+00:00"),
         (("b", "c"), "2026-01-02T00:00:00+00:00"),
@@ -101,7 +102,7 @@ def test_attempt_repository_keeps_only_latest_ten_per_learner_and_question(
 ):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    attempts = AttemptRepository(database)
+    attempts = AttemptRepository(database, course_id=LEGACY_COURSE_ID)
 
     for index in range(12):
         attempts.add(
@@ -153,22 +154,22 @@ def test_database_startup_prunes_existing_attempts_to_ten(tmp_path):
             connection.execute(
                 """
                 INSERT INTO attempts (
-                    learner_id, question_id, mode, selected_answers,
+                    learner_id, course_id, question_id, mode, selected_answers,
                     is_correct, answered_at
-                ) VALUES ('learner-id', 'q1', 'normal', '[]', 0, ?)
+                ) VALUES ('learner-id', 'legacy', 'q1', 'normal', '[]', 0, ?)
                 """,
                 (f"2026-01-{index + 1:02d}T00:00:00+00:00",),
             )
 
     database.initialize()
 
-    assert AttemptRepository(database).count() == 10
+    assert AttemptRepository(database, course_id=LEGACY_COURSE_ID).count() == 10
 
 
 def test_wrong_question_reset_deletes_only_requested_learners_rows(tmp_path):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    wrong_questions = WrongQuestionRepository(database)
+    wrong_questions = WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID)
     wrong_questions.record_wrong("learner-id", "q1", "2026-01-01", False)
     wrong_questions.record_wrong("learner-id", "q2", "2026-01-02", False)
     wrong_questions.record_wrong("other-id", "q1", "2026-01-03", False)
@@ -183,7 +184,7 @@ def test_wrong_question_reset_deletes_only_requested_learners_rows(tmp_path):
 def test_weak_knowledge_points_store_distinct_json_state_per_learner(tmp_path):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    weak_points = WeakKnowledgePointRepository(database)
+    weak_points = WeakKnowledgePointRepository(database, course_id=LEGACY_COURSE_ID)
     weak_points.activate_and_reset(
         "learner-id", "chapter-a", "2026-01-01T00:00:00+00:00"
     )
@@ -214,13 +215,13 @@ def test_weak_point_malformed_json_is_read_as_empty_progress(tmp_path):
         connection.execute(
             """
             INSERT INTO weak_knowledge_points (
-                learner_id, chapter_id, active, verified_question_ids,
+                learner_id, course_id, chapter_id, active, verified_question_ids,
                 last_wrong_at, updated_at
-            ) VALUES ('learner-id', 'chapter-a', 1, '{bad', 'now', 'now')
+            ) VALUES ('learner-id', 'legacy', 'chapter-a', 1, '{bad', 'now', 'now')
             """
         )
 
-    point = WeakKnowledgePointRepository(database).get_by_id(
+    point = WeakKnowledgePointRepository(database, course_id=LEGACY_COURSE_ID).get_by_id(
         "learner-id", "chapter-a"
     )
 

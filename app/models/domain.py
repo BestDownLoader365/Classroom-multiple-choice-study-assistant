@@ -169,6 +169,10 @@ class ExamSession:
     current_position: int = 0
     correct_count: int | None = None
     duration_seconds: int | None = None
+    #: Owning course namespace.  ``exam_id`` stays globally unique, but a
+    #: session always belongs to exactly one course; repositories fill this in
+    #: from their own binding, so callers never have to know the namespace.
+    course_id: str = ""
 
 
 @dataclass(frozen=True)

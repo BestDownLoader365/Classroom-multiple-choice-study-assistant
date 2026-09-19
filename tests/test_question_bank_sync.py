@@ -11,6 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from app import create_app
+
+LEGACY_HOME = "/course/legacy/"
 from app.models import ExamStatus, QuizMode
 from app.repositories import QuestionBankError
 from tests.conftest import write_json
@@ -18,7 +20,7 @@ from tests.test_web import learner_id, make_app, register
 
 
 def services(app):
-    return app.extensions["mcq_services"]
+    return app.extensions["mcq_services"].default_services
 
 
 def state(app, user, mode):
@@ -104,7 +106,7 @@ def test_content_only_edits_preserve_all_history(tmp_path, valid_payload, edit):
     app = make_app(tmp_path, valid_payload)
     client, user = prepare(app)
     seed_learning(app, user)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     generation_before = generation(app)
 
     changed = copy.deepcopy(valid_payload)
@@ -140,14 +142,14 @@ def test_content_only_edits_preserve_all_history(tmp_path, valid_payload, edit):
     assert generation(restarted) == generation_before
     assert registry(restarted)["q1"].status.value == "active"
     # Cosmetic edits never fence off a sibling worker on the old bytes.
-    assert client.get("/").status_code == 200
+    assert client.get(LEGACY_HOME).status_code == 200
 
 
 def test_json_formatting_change_is_a_noop(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client, user = prepare(app)
     seed_learning(app, user)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     generation_before = generation(app)
 
     restarted = restart_raw(
@@ -269,7 +271,7 @@ def test_new_question_leaves_existing_history_untouched(tmp_path, valid_payload)
     app = make_app(tmp_path, valid_payload)
     client, user = prepare(app)
     seed_learning(app, user)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     round_before = state(app, user, QuizMode.NORMAL)
 
     changed = copy.deepcopy(valid_payload)
@@ -331,7 +333,7 @@ def test_deleted_question_keeps_attempts_but_clears_state(tmp_path, valid_payloa
     # The restarted worker serves normally and no page mentions the removal.
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
-    home = client2.get("/")
+    home = client2.get(LEGACY_HOME)
     assert home.status_code == 200
     assert "检测到题库更新" not in home.text
 
@@ -364,12 +366,12 @@ def test_deleted_question_cleans_weak_verification(tmp_path, valid_payload):
 def test_deleted_question_trims_unfinished_normal_round(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client, user = prepare(app)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     current = state(app, user, QuizMode.NORMAL)
     first_id, second_id = current["question_ids"]
     answered = services(app).question_repository.get_by_id(first_id)
     client.post(
-        "/quiz/answer",
+        "/course/legacy/quiz/answer",
         data={"answer_token": current["answer_token"], "answers": list(answered.correct_answers)},
     )
     answered_state = state(app, user, QuizMode.NORMAL)
@@ -392,7 +394,7 @@ def test_deleted_question_trims_unfinished_normal_round(tmp_path, valid_payload)
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
     response = client2.post(
-        "/quiz/next", data={"answer_token": trimmed["answer_token"]}, follow_redirects=True
+        "/course/legacy/quiz/next", data={"answer_token": trimmed["answer_token"]}, follow_redirects=True
     )
     assert response.status_code == 200
 
@@ -400,12 +402,12 @@ def test_deleted_question_trims_unfinished_normal_round(tmp_path, valid_payload)
 def test_deleted_answered_question_decrements_round_counters(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client, user = prepare(app)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     current = state(app, user, QuizMode.NORMAL)
     first_id, second_id = current["question_ids"]
     answered = services(app).question_repository.get_by_id(first_id)
     client.post(
-        "/quiz/answer",
+        "/course/legacy/quiz/answer",
         data={"answer_token": current["answer_token"], "answers": list(answered.correct_answers)},
     )
     assert state(app, user, QuizMode.NORMAL)["correct_count"] == 1
@@ -429,7 +431,7 @@ def test_deleted_answered_question_decrements_round_counters(tmp_path, valid_pay
     assert trimmed["initial_question_count"] == 1
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
-    assert client2.get("/quiz").status_code == 200
+    assert client2.get("/course/legacy/quiz").status_code == 200
 
 
 def test_legacy_round_without_question_results_uses_attempt_fallback(
@@ -437,12 +439,12 @@ def test_legacy_round_without_question_results_uses_attempt_fallback(
 ):
     app = make_app(tmp_path, valid_payload)
     client, user = prepare(app)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     current = state(app, user, QuizMode.NORMAL)
     first_id = current["question_ids"][0]
     answered = services(app).question_repository.get_by_id(first_id)
     client.post(
-        "/quiz/answer",
+        "/course/legacy/quiz/answer",
         data={"answer_token": current["answer_token"], "answers": list(answered.correct_answers)},
     )
     # Simulate a pre-upgrade round that never recorded per-question results.
@@ -470,7 +472,7 @@ def test_deleted_question_trims_review_round_and_items(tmp_path, valid_payload):
     svc = services(app)
     svc.wrong_question_service.record_attempt(user, "q1", QuizMode.NORMAL, ("1",), False)
     svc.wrong_question_service.record_attempt(user, "q2", QuizMode.NORMAL, ("b",), False)
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     review = state(app, user, QuizMode.REVIEW)
     assert set(review["question_ids"]) == {"q1", "q2"}
     assert len(review["review_items"]) == 2
@@ -485,13 +487,13 @@ def test_deleted_question_trims_review_round_and_items(tmp_path, valid_payload):
     assert [item["question_id"] for item in trimmed["review_items"]] == ["q2"]
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
-    page = client2.get("/review")
+    page = client2.get("/course/legacy/review")
     assert page.status_code == 200
     assert "410" not in page.text
 
 
 def _start_exam(client, app, user):
-    client.post("/exam/start", data={"question_count": "10", "time_limit": "none"})
+    client.post("/course/legacy/exam/start", data={"question_count": "10", "time_limit": "none"})
     session = services(app).exam_service.get_active_session(user)
     assert session is not None
     return session
@@ -506,7 +508,7 @@ def test_deleted_question_shrinks_unfinished_exam(tmp_path):
     answered_id = slots[0].question_id
     deleted_id = slots[3].question_id
     client.post(
-        f"/exam/{exam_session.id}/answer",
+        f"/course/legacy/exam/{exam_session.id}/answer",
         data={"position": "0", "answers": ["b"]},
     )
 
@@ -529,10 +531,10 @@ def test_deleted_question_shrinks_unfinished_exam(tmp_path):
     # Resume renders and submits normally with the shrunken denominator.
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
-    page = client2.get(f"/exam/{exam_session.id}")
+    page = client2.get(f"/course/legacy/exam/{exam_session.id}")
     assert page.status_code == 200
     assert "/ 9 题" in page.text
-    response = client2.post(f"/exam/{exam_session.id}/submit", follow_redirects=True)
+    response = client2.post(f"/course/legacy/exam/{exam_session.id}/submit", follow_redirects=True)
     assert response.status_code == 200
     report = svc2.exam_service.get_report(user, exam_session.id)
     assert report.question_count == 9
@@ -547,10 +549,10 @@ def test_deleted_question_never_breaks_submitted_exam(tmp_path):
     slots = svc.exam_repository.get_questions(exam_session.id)
     answered_id = slots[0].question_id
     client.post(
-        f"/exam/{exam_session.id}/answer",
+        f"/course/legacy/exam/{exam_session.id}/answer",
         data={"position": "0", "answers": ["b"]},
     )
-    client.post(f"/exam/{exam_session.id}/submit")
+    client.post(f"/course/legacy/exam/{exam_session.id}/submit")
     assert svc.exam_service.get_session(user, exam_session.id).correct_count == 1
 
     changed = exam_bank_payload()
@@ -571,7 +573,7 @@ def test_deleted_question_never_breaks_submitted_exam(tmp_path):
     assert report.correct_count == 0
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
-    assert client2.get(f"/exam/{exam_session.id}/report").status_code == 200
+    assert client2.get(f"/course/legacy/exam/{exam_session.id}/report").status_code == 200
 
 
 def test_grading_changed_question_is_dropped_from_unfinished_exam(tmp_path):
@@ -596,8 +598,8 @@ def test_grading_changed_question_is_dropped_from_unfinished_exam(tmp_path):
     assert changed_id not in {slot.question_id for slot in slots2}
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
-    assert client2.get(f"/exam/{exam_session.id}").status_code == 200
-    assert client2.post(f"/exam/{exam_session.id}/submit").status_code == 302
+    assert client2.get(f"/course/legacy/exam/{exam_session.id}").status_code == 200
+    assert client2.post(f"/course/legacy/exam/{exam_session.id}/submit").status_code == 302
 
 
 def test_grading_changed_slot_is_excluded_from_submitted_report(tmp_path):
@@ -608,10 +610,10 @@ def test_grading_changed_slot_is_excluded_from_submitted_report(tmp_path):
     slots = svc.exam_repository.get_questions(exam_session.id)
     answered_id = slots[0].question_id
     client.post(
-        f"/exam/{exam_session.id}/answer",
+        f"/course/legacy/exam/{exam_session.id}/answer",
         data={"position": "0", "answers": ["b"]},
     )
-    client.post(f"/exam/{exam_session.id}/submit")
+    client.post(f"/course/legacy/exam/{exam_session.id}/submit")
 
     changed = exam_bank_payload()
     for question in changed["questions"]:
@@ -627,7 +629,7 @@ def test_grading_changed_slot_is_excluded_from_submitted_report(tmp_path):
     assert answered_id not in {item.question.id for item in report.items}
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
-    assert client2.get(f"/exam/{exam_session.id}/report").status_code == 200
+    assert client2.get(f"/course/legacy/exam/{exam_session.id}/report").status_code == 200
 
 
 def test_exam_emptied_by_deletions_is_finalized_quietly(tmp_path):
@@ -651,10 +653,10 @@ def test_exam_emptied_by_deletions_is_finalized_quietly(tmp_path):
     client2 = restarted.test_client()
     client2.post("/login", data={"username": "learner", "password": "secret1"})
     # The zero-question report renders instead of failing.
-    assert client2.get(f"/exam/{exam_session.id}/report").status_code == 200
-    response = client2.get(f"/exam/{exam_session.id}")
+    assert client2.get(f"/course/legacy/exam/{exam_session.id}/report").status_code == 200
+    response = client2.get(f"/course/legacy/exam/{exam_session.id}")
     assert response.status_code == 302
-    assert response.headers["Location"].endswith(f"/exam/{exam_session.id}/report")
+    assert response.headers["Location"].endswith(f"/course/legacy/exam/{exam_session.id}/report")
 
 
 def test_deleted_question_can_be_resurrected_unchanged(tmp_path, valid_payload):
@@ -682,7 +684,16 @@ def test_deleted_question_can_be_resurrected_unchanged(tmp_path, valid_payload):
     assert dashboard.total_attempts == 1
 
 
-def test_retired_id_reuse_for_a_different_question_fails_startup(tmp_path, valid_payload):
+def test_retired_id_reuse_for_a_different_question_fences_the_course(
+    tmp_path, valid_payload
+):
+    """Reusing a retired ID for a grading-different question must be refused.
+
+    The refusal is course-scoped: the course is reported ``unavailable`` and
+    nothing is written, while every other course in the deployment keeps
+    serving.  Because the reconciliation happens inside the sync transaction
+    before any learner write, the registry and all learner data stay untouched.
+    """
     app = make_app(tmp_path, valid_payload)
     client, user = prepare(app)
     services(app).wrong_question_service.record_attempt(
@@ -694,8 +705,13 @@ def test_retired_id_reuse_for_a_different_question_fails_startup(tmp_path, valid
 
     reused = copy.deepcopy(valid_payload)
     reused["questions"][1]["correct_answers"] = ["b"]  # same ID, new grading
-    with pytest.raises(QuestionBankError, match="retired"):
-        restart(restarted, reused)
+    write_json(restarted.config["QUESTION_FILE"], reused)
+    fenced = create_app(dict(restarted.config))
+
+    state_after = fenced.extensions["mcq_services"].course_registry.state("legacy")
+    assert state_after.status.value == "unavailable"
+    assert "reuses retired question IDs" in state_after.reason
+    assert fenced.test_client().get("/ready").status_code == 503
 
     # Nothing was applied: the registry and all learner data are untouched.
     assert registry(restarted)["q2"].status.value == "retired"
@@ -758,12 +774,12 @@ def test_chapter_reassignment_updates_weak_verification(tmp_path):
 
     # The superseded worker can no longer read or write the old mapping: a
     # learner cannot answer q2 there and push chapter-a back to "completed".
-    assert client.get("/dashboard").status_code == 503
-    assert client.get("/quiz/setup").status_code == 503
-    assert client.post("/review/start").status_code == 503
+    assert client.get("/course/legacy/dashboard").status_code == 503
+    assert client.get("/course/legacy/quiz/setup").status_code == 503
+    assert client.post("/course/legacy/review/start").status_code == 503
     attempts_before = services(restarted).attempt_repository.count()
     assert client.post(
-        "/review/answer", data={"answer_token": "stale", "answers": "b"}
+        "/course/legacy/review/answer", data={"answer_token": "stale", "answers": "b"}
     ).status_code == 503
     point = services(restarted).weak_knowledge_point_repository.get_by_id(
         user, "chapter-a"
@@ -1086,8 +1102,9 @@ def test_check_question_bank_script_lists_legacy_tombstones(
         # pre-registry world: no registry, no bank state.
         connection.execute(
             "INSERT INTO attempts "
-            "(learner_id, question_id, mode, selected_answers, is_correct, answered_at) "
-            "VALUES (?, 'ghost', 'normal', '[\"1\"]', 0, "
+            "(learner_id, course_id, question_id, mode, selected_answers, "
+            "is_correct, answered_at) "
+            "VALUES (?, 'legacy', 'ghost', 'normal', '[\"1\"]', 0, "
             "'2026-01-01T00:00:00+00:00')",
             (user,),
         )
@@ -1188,11 +1205,11 @@ def test_label_only_change_keeps_both_workers_serving(tmp_path):
     assert generation(stale) == 0
     assert generation(current) == 0
     # Both workers keep serving the menu; only the labels lag until the restart.
-    stale_page = client.get("/quiz/setup")
+    stale_page = client.get("/course/legacy/quiz/setup")
     assert stale_page.status_code == 200
     assert "Chapter A (v2)" not in stale_page.text
     fresh = current.test_client()
     fresh.post("/login", data={"username": "learner", "password": "secret1"})
-    fresh_page = fresh.get("/quiz/setup")
+    fresh_page = fresh.get("/course/legacy/quiz/setup")
     assert fresh_page.status_code == 200
     assert "Chapter A (v2)" in fresh_page.text

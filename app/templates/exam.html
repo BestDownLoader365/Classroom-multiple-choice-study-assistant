@@ -48,7 +48,11 @@
               action="{{ url_for('web.answer_exam', exam_id=exam_session.id) }}"
               data-exam-answer-form>
             {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+            <input type="hidden" name="form_context" value="{{ form_context() }}">
             <input type="hidden" name="position" value="{{ position }}">
+            {# Re-confirmed inside the transaction: the position must still map to
+               this exact question, or a slot reorder would misplace the answer. #}
+            <input type="hidden" name="question_id" value="{{ slot_question_id }}">
             <fieldset class="options">
                 <legend class="sr-only">请选择答案，考试期间不会提示对错</legend>
                 {% for option in ordered_options %}
@@ -95,6 +99,7 @@
                   data-exam-submit-form
                   data-confirm="{% if total - answered_count %}还有 {{ total - answered_count }} 题未作答，确定要交卷吗？{% else %}确定要交卷吗？交卷后不能修改答案。{% endif %}">
                 {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <input type="hidden" name="form_context" value="{{ form_context() }}">
                 <button class="button button-secondary" type="submit">交卷</button>
             </form>
         </div>

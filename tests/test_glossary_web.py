@@ -13,9 +13,9 @@ def test_glossary_requires_login_and_renders_repository_metadata(
     app = make_app(tmp_path, valid_payload, GLOSSARY_FILE=glossary_file)
     client = app.test_client()
 
-    assert client.get("/glossary").status_code == 302
+    assert client.get("/course/legacy/glossary").status_code == 302
     register(client)
-    page = client.get("/glossary")
+    page = client.get("/course/legacy/glossary")
 
     assert page.status_code == 200
     assert "统计学专业词汇" in page.text
@@ -41,8 +41,8 @@ def test_home_and_learning_content_expose_generic_glossary_hooks(
     assert "专业词汇" in home.text
     assert "统计学专业词汇" in home.text
     assert 'js/glossary.js' in home.text
-    client.post("/quiz/start", data={"quiz_size": "all"})
-    quiz = client.get("/quiz")
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+    quiz = client.get("/course/legacy/quiz")
     assert "data-glossary-highlight" in quiz.text
     assert '"standard-deviation"' in quiz.text
 
@@ -55,8 +55,8 @@ def test_glossary_change_does_not_reset_any_learning_state(
     first_client = first_app.test_client()
     register(first_client, "persistent")
     user_id = learner_id(first_client)
-    first_client.post("/quiz/start", data={"quiz_size": "all"})
-    first_app.extensions["mcq_services"].wrong_question_service.record_attempt(
+    first_client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+    first_app.extensions["mcq_services"].default_services.wrong_question_service.record_attempt(
         learner_id=user_id,
         question_id="q1",
         mode=QuizMode.NORMAL,
@@ -68,7 +68,7 @@ def test_glossary_change_does_not_reset_any_learning_state(
     changed["terms"][0]["term_zh"] = "标准偏差"
     write_json(glossary_file, changed)
     restarted = make_app(tmp_path, valid_payload, GLOSSARY_FILE=glossary_file)
-    services = restarted.extensions["mcq_services"]
+    services = restarted.extensions["mcq_services"].default_services
 
     assert services.attempt_repository.count() == 1
     assert services.wrong_question_repository.get_by_id(user_id, "q1") is not None
@@ -87,26 +87,26 @@ def test_highlight_hooks_cover_feedback_explanation_mistakes_and_review(
     client = app.test_client()
     register(client)
     user_id = learner_id(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
 
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     _, state = services.progress_repository.get(user_id, QuizMode.NORMAL)
     question = services.question_repository.get_by_id(state["question_ids"][0])
     client.post(
-        "/quiz/answer",
+        "/course/legacy/quiz/answer",
         data={
             "answer_token": state["answer_token"],
             "answers": list(question.correct_answers),
         },
     )
-    feedback = client.get("/quiz")
+    feedback = client.get("/course/legacy/quiz")
 
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
     )
-    mistakes = client.get("/mistakes")
-    client.post("/review/start")
-    review = client.get("/review")
+    mistakes = client.get("/course/legacy/mistakes")
+    client.post("/course/legacy/review/start")
+    review = client.get("/course/legacy/review")
 
     assert "data-feedback" in feedback.text
     assert feedback.text.count("data-glossary-highlight") >= 4
@@ -133,16 +133,17 @@ def test_statistics_course_replacement_needs_only_two_json_files(
             "SECRET_KEY": "test-secret",
             "QUESTION_FILE": write_json(tmp_path / "questions.json", valid_payload),
             "GLOSSARY_FILE": glossary_file,
+            "COURSES_DIR": tmp_path / "absent" / "courses",
             "DATABASE": tmp_path / "mcq.db",
         }
     )
     client = app.test_client()
 
     home = register(client)
-    setup = client.get("/quiz/setup")
-    client.post("/quiz/start", data={"quiz_size": "all"})
-    quiz = client.get("/quiz")
-    glossary = client.get("/glossary")
+    setup = client.get("/course/legacy/quiz/setup")
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+    quiz = client.get("/course/legacy/quiz")
+    glossary = client.get("/course/legacy/glossary")
 
     assert all(page.status_code == 200 for page in (home, setup, quiz, glossary))
     assert "统计学选择题练习" in home.text

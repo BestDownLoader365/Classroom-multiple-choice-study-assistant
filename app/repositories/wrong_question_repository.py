@@ -1,17 +1,19 @@
-"""Persistence operations for wrong-question learning state."""
+"""Persistence operations for wrong-question learning state, per course."""
 
 import sqlite3
 
 from app.models import WrongQuestion
 
+from .course_scope import require_course_id
 from .database import Database
 
 
 class WrongQuestionRepository:
-    """Update question-level wrong and correction state."""
+    """Update question-level wrong and correction state inside one course."""
 
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, course_id: str) -> None:
         self.database = database
+        self.course_id = require_course_id(course_id)
 
     def record_wrong(
         self,
@@ -30,10 +32,10 @@ class WrongQuestionRepository:
             connection.execute(
                 """
                 INSERT INTO wrong_questions (
-                    learner_id, question_id, wrong_count, review_streak, mastered,
-                    last_wrong_at, last_reviewed_at
-                ) VALUES (?, ?, 1, 0, 0, ?, ?)
-                ON CONFLICT(learner_id, question_id) DO UPDATE SET
+                    learner_id, course_id, question_id, wrong_count,
+                    review_streak, mastered, last_wrong_at, last_reviewed_at
+                ) VALUES (?, ?, ?, 1, 0, 0, ?, ?)
+                ON CONFLICT(learner_id, course_id, question_id) DO UPDATE SET
                     wrong_count = wrong_count + 1,
                     review_streak = 0,
                     mastered = 0,
@@ -45,7 +47,7 @@ class WrongQuestionRepository:
                         wrong_questions.last_reviewed_at
                     )
                 """,
-                (learner_id, question_id, timestamp, reviewed_at),
+                (learner_id, self.course_id, question_id, timestamp, reviewed_at),
             )
 
     def record_corrected(
@@ -71,9 +73,16 @@ class WrongQuestionRepository:
                     last_reviewed_at = ?,
                     srs_level = COALESCE(?, srs_level),
                     next_review_at = COALESCE(?, next_review_at)
-                WHERE learner_id = ? AND question_id = ?
+                WHERE learner_id = ? AND course_id = ? AND question_id = ?
                 """,
-                (timestamp, srs_level, next_review_at, learner_id, question_id),
+                (
+                    timestamp,
+                    srs_level,
+                    next_review_at,
+                    learner_id,
+                    self.course_id,
+                    question_id,
+                ),
             )
 
     def record_srs_reviewed(
@@ -93,43 +102,57 @@ class WrongQuestionRepository:
                 SET srs_level = ?,
                     next_review_at = ?,
                     last_reviewed_at = ?
-                WHERE learner_id = ? AND question_id = ? AND mastered = 1
+                WHERE learner_id = ? AND course_id = ?
+                  AND question_id = ? AND mastered = 1
                 """,
-                (srs_level, next_review_at, timestamp, learner_id, question_id),
+                (
+                    srs_level,
+                    next_review_at,
+                    timestamp,
+                    learner_id,
+                    self.course_id,
+                    question_id,
+                ),
             )
 
     def get_by_id(
         self, learner_id: str, question_id: str
     ) -> WrongQuestion | None:
-        """Return one wrong-question record."""
+        """Return one learner's correction state for a question in this course."""
         with self.database.connect() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM wrong_questions
-                WHERE learner_id = ? AND question_id = ?
+                WHERE learner_id = ? AND course_id = ? AND question_id = ?
                 """,
-                (learner_id, question_id),
+                (learner_id, self.course_id, question_id),
             ).fetchone()
         return self._to_model(row) if row else None
 
     def get_all(self, learner_id: str | None = None) -> list[WrongQuestion]:
-        """Return one learner's records, or all records for read-only viewing."""
+        """Return this course's wrong-question rows, newest first.
+
+        ``learner_id is None`` means every account *in this course*, never the
+        whole database.
+        """
         with self.database.connect() as connection:
             if learner_id is None:
                 rows = connection.execute(
                     """
                     SELECT * FROM wrong_questions
+                    WHERE course_id = ?
                     ORDER BY last_wrong_at DESC, learner_id, question_id
-                    """
+                    """,
+                    (self.course_id,),
                 ).fetchall()
             else:
                 rows = connection.execute(
                     """
                     SELECT * FROM wrong_questions
-                    WHERE learner_id = ?
+                    WHERE learner_id = ? AND course_id = ?
                     ORDER BY last_wrong_at DESC, question_id
                     """,
-                    (learner_id,),
+                    (learner_id, self.course_id),
                 ).fetchall()
         return [self._to_model(row) for row in rows]
 
@@ -143,31 +166,31 @@ class WrongQuestionRepository:
             rows = connection.execute(
                 """
                 SELECT * FROM wrong_questions
-                WHERE learner_id = ?
+                WHERE learner_id = ? AND course_id = ?
                   AND mastered = 1
                   AND next_review_at IS NOT NULL
                   AND next_review_at <= ?
                 ORDER BY next_review_at, question_id
                 """,
-                (learner_id, now),
+                (learner_id, self.course_id, now),
             ).fetchall()
         return [self._to_model(row) for row in rows]
 
     def delete_all_for_learner(self, learner_id: str) -> int:
-        """Delete one learner's current mistake state and return its row count."""
+        """Delete one learner's mistake state *in this course*; return row count."""
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "DELETE FROM wrong_questions WHERE learner_id = ?",
-                (learner_id,),
+                "DELETE FROM wrong_questions WHERE learner_id = ? AND course_id = ?",
+                (learner_id, self.course_id),
             )
         return cursor.rowcount
 
     def delete_for_questions(self, question_ids) -> int:
-        """Delete every learner's correction/SRS state for the given questions.
+        """Delete this course's correction/SRS state for the given question IDs.
 
-        Used when a question leaves the bank or its grading identity changes:
-        the record cannot be answered meaningfully anymore, so it is dropped
-        silently for every account at once.
+        Used when a question leaves this course's bank or its grading identity
+        changes: the record cannot be answered meaningfully anymore, so it is
+        dropped silently for every account of this course at once.
         """
         ids = [str(question_id) for question_id in question_ids]
         if not ids:
@@ -175,16 +198,18 @@ class WrongQuestionRepository:
         placeholders = ", ".join("?" for _ in ids)
         with self.database.connect() as connection:
             cursor = connection.execute(
-                f"DELETE FROM wrong_questions WHERE question_id IN ({placeholders})",
-                ids,
+                f"DELETE FROM wrong_questions WHERE course_id = ? "
+                f"AND question_id IN ({placeholders})",
+                [self.course_id, *ids],
             )
         return cursor.rowcount
 
     def distinct_question_ids(self) -> set[str]:
-        """Return every question ID referenced by any wrong-question row."""
+        """Return every question ID this course's wrong-question rows reference."""
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT DISTINCT question_id FROM wrong_questions"
+                "SELECT DISTINCT question_id FROM wrong_questions WHERE course_id = ?",
+                (self.course_id,),
             ).fetchall()
         return {row["question_id"] for row in rows}
 
@@ -201,3 +226,4 @@ class WrongQuestionRepository:
             srs_level=int(row["srs_level"] or 0),
             next_review_at=row["next_review_at"],
         )
+

@@ -17,6 +17,7 @@
             <form method="post" action="{{ url_for('web.start_review') }}"
                   data-confirm-restart="当前错题巩固尚未完成，确定要放弃进度并重新开始吗？">
                 {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <input type="hidden" name="form_context" value="{{ form_context() }}">
                 <input type="hidden" name="source_id" value="{{ selected_source }}">
                 <input type="hidden" name="chapter_id" value="{{ selected_chapter }}">
                 <button class="button button-secondary" type="submit" {% if not has_review_work %}disabled{% endif %}>
@@ -26,6 +27,7 @@
             {% else %}
             <form method="post" action="{{ url_for('web.start_review') }}">
                 {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <input type="hidden" name="form_context" value="{{ form_context() }}">
                 <input type="hidden" name="source_id" value="{{ selected_source }}">
                 <input type="hidden" name="chapter_id" value="{{ selected_chapter }}">
                 <button class="button button-primary" type="submit" {% if not has_review_work %}disabled{% endif %}>
@@ -36,6 +38,7 @@
             <form method="post" action="{{ url_for('web.reset_mistakes') }}"
                   data-confirm-reset="这会清空你的全部错题状态（答题历史仍会保留），确定要重置为 0 吗？">
                 {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
+                <input type="hidden" name="form_context" value="{{ form_context() }}">
                 <button class="button button-danger" type="submit"
                         {% if not has_mistakes %}disabled{% endif %}>
                     重置全部错题

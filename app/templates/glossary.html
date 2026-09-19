@@ -1,8 +1,27 @@
 {% extends "base.html" %}
 
-{% block title %}{{ glossary.title_zh }} · {{ glossary.title }}{% endblock %}
+{% block title %}{% if glossary %}{{ glossary.title_zh }} · {{ glossary.title }}{% else %}术语表 · {{ current_course.title_zh or current_course.title }}{% endif %}{% endblock %}
 
 {% block content %}
+{% if not glossary %}
+<section class="content-stack glossary-page" data-glossary-page>
+    <div class="page-heading glossary-heading">
+        <div>
+            <p class="section-label">词汇学习 · English first</p>
+            <h1>本课程暂无术语表</h1>
+            <p>{{ current_course.title_zh or current_course.title }} 没有配置术语表（<code>glossary: null</code>）。其他课程的术语表不会在这里显示。</p>
+        </div>
+        <div class="heading-actions">
+            <a class="button button-ghost" href="{{ url_for('web.home') }}">返回首页</a>
+            <a class="button button-ghost" href="{{ url_for('web.courses') }}">课程列表</a>
+        </div>
+    </div>
+    <div class="empty-state">
+        <h2>没有术语数据</h2>
+        <p>如需术语表，请在课程目录的 <code>course.json</code> 中把 <code>glossary</code> 指向一个术语文件。</p>
+    </div>
+</section>
+{% else %}
 <section class="content-stack glossary-page" data-glossary-page>
     <div class="page-heading glossary-heading">
         <div>
@@ -77,4 +96,5 @@
         <p>请尝试其他英文、中文、别名或分类。</p>
     </div>
 </section>
+{% endif %}
 {% endblock %}

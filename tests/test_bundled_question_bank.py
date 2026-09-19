@@ -1,7 +1,9 @@
 import re
 
-from app import QUESTION_FILE
 from app.repositories import QuestionLoader
+from tests.conftest import bundled_question_file
+
+QUESTION_FILE = bundled_question_file()
 
 
 KNOWN_SEMICONDUCTOR_MISTRANSLATIONS = {

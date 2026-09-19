@@ -3,25 +3,41 @@
 {% block title %}页面出现问题 · 课堂选择题学习助手{% endblock %}
 
 {% block content %}
-<section class="error-card">
+<section class="error-card" {% if error_course_id %}data-error-course-id="{{ error_course_id }}"{% endif %}>
     <div class="error-code">{{ error_code }}</div>
     <h1>页面出现问题</h1>
     <p class="lead">{{ error_message }}</p>
+    {% if error_course %}
+    <p class="launcher-note">受影响的课程：<strong>{{ error_course.title_zh or error_course.title }}</strong>
+        （<code>{{ error_course.course_id }}</code>）</p>
+    {% elif error_course_id %}
+    <p class="launcher-note">受影响的课程：<code>{{ error_course_id }}</code></p>
+    {% endif %}
     {% if error_code == 503 and g.user %}
-    {# The bank is being replaced: every learning page answers 503 until the
-       service restarts, so offer a way out (and a page that still works)
-       instead of linking back into the same 503. #}
+    {# The course is being replaced or is not served here: its learning pages
+       answer 503 until the service is updated, so offer navigation that still
+       works (the course selector and the reference pages) and a way out. #}
     <div class="inline-actions">
-        <a class="button button-ghost" href="{{ url_for('web.glossary') }}">浏览术语表</a>
+        <a class="button button-ghost" href="{{ url_for('web.courses') }}">课程列表</a>
+        {% if current_course and has_glossary %}
+        <a class="button button-ghost" href="{{ url_for('web.glossary') }}">浏览本课程术语表</a>
+        {% endif %}
         <form method="post" action="{{ url_for('web.logout') }}" class="inline-actions">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
             <button class="button button-primary" type="submit">退出登录</button>
         </form>
     </div>
+    {% if retry_after_seconds %}
+    <p class="launcher-note">建议 {{ retry_after_seconds }} 秒后重试；若长时间未恢复，请联系管理员。</p>
+    {% endif %}
     {% elif g.user %}
     <div class="inline-actions">
-        <a class="button button-primary" href="{{ url_for('web.home') }}">返回首页</a>
+        {% if current_course %}
+        <a class="button button-primary" href="{{ url_for('web.home') }}">返回本课程首页</a>
         <a class="button button-ghost" href="{{ url_for('web.mistakes') }}">查看我的错题</a>
+        {% else %}
+        <a class="button button-primary" href="{{ url_for('web.courses') }}">返回课程列表</a>
+        {% endif %}
     </div>
     {% else %}
     <div class="inline-actions">

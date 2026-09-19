@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.models import LEGACY_COURSE_ID
 from app.models import (
     Chapter,
     ExamStatus,
@@ -68,9 +69,9 @@ def exam_context(tmp_path):
             Chapter(id="chapter-b", source_id="source-a", title="Chapter B", order=2),
         ),
     )
-    exam_repository = ExamRepository(database)
-    attempts = AttemptRepository(database)
-    wrong_questions = WrongQuestionRepository(database)
+    exam_repository = ExamRepository(database, course_id=LEGACY_COURSE_ID)
+    attempts = AttemptRepository(database, course_id=LEGACY_COURSE_ID)
+    wrong_questions = WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID)
     wrong_question_service = WrongQuestionService(
         attempt_repository=attempts,
         wrong_question_repository=wrong_questions,

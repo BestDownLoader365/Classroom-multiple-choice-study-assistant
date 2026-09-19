@@ -2,6 +2,7 @@ from dataclasses import replace
 
 import pytest
 
+from app.models import LEGACY_COURSE_ID
 from app.models import QuizMode
 from app.repositories import (
     AttemptRepository,
@@ -19,8 +20,8 @@ OTHER_LEARNER_ID = "22222222-2222-4222-8222-222222222222"
 def wrong_context(tmp_path, sample_questions):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    attempts = AttemptRepository(database)
-    wrong_questions = WrongQuestionRepository(database)
+    attempts = AttemptRepository(database, course_id=LEGACY_COURSE_ID)
+    wrong_questions = WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID)
     service = WrongQuestionService(
         attempt_repository=attempts,
         wrong_question_repository=wrong_questions,
@@ -181,8 +182,8 @@ def test_mistake_filter_matches_any_question_chapter(tmp_path, sample_questions)
     database = Database(tmp_path / "mcq.db")
     database.initialize()
     service = WrongQuestionService(
-        AttemptRepository(database),
-        WrongQuestionRepository(database),
+        AttemptRepository(database, course_id=LEGACY_COURSE_ID),
+        WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID),
         QuestionRepository(sample_questions),
     )
     record(service, correct=False, question_id="q1")

@@ -3,15 +3,25 @@ import re
 from contextlib import contextmanager
 
 from app import create_app
+
+LEGACY_HOME = "/course/legacy/"
 from app.models import QuizMode
 from tests.conftest import write_json
 
 
 def make_app(tmp_path, valid_payload, **overrides):
+    """Build a test app whose only course is the legacy root-file adapter.
+
+    ``COURSES_DIR`` is pointed at a directory that does not exist so the fixture
+    can never pick up the developer's real ``courses/`` tree: which courses a test
+    sees must depend only on what the test wrote.
+    """
     config = {
         "TESTING": True,
         "SECRET_KEY": "test-secret",
         "QUESTION_FILE": write_json(tmp_path / "questions.json", valid_payload),
+        "GLOSSARY_FILE": tmp_path / "absent" / "glossary.json",
+        "COURSES_DIR": tmp_path / "absent" / "courses",
         "DATABASE": tmp_path / "mcq.db",
     }
     config.update(overrides)
@@ -38,7 +48,7 @@ def learner_id(client) -> str:
 @contextmanager
 def stored_learner_state(client):
     """Inspect or seed server progress without depending on browser cookies."""
-    repository = client.application.extensions["mcq_services"].progress_repository
+    repository = client.application.extensions["mcq_services"].default_services.progress_repository
     user_id = learner_id(client)
     states = {"user_id": user_id}
     originals = {}
@@ -85,7 +95,7 @@ def test_login_is_required_and_registration_opens_personal_home(
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
 
-    redirect_response = client.get("/")
+    redirect_response = client.get(LEGACY_HOME)
     registered_home = register(client)
 
     assert redirect_response.status_code == 302
@@ -132,9 +142,9 @@ def test_chapter_setup_is_dynamic_and_selected_chapter_reaches_session(
     client = app.test_client()
     register(client)
 
-    setup = client.get("/quiz/setup")
+    setup = client.get("/course/legacy/quiz/setup")
     started = client.post(
-        "/quiz/start",
+        "/course/legacy/quiz/start",
         data={"quiz_size": "all", "chapter_ids": "floorplanning"},
     )
 
@@ -164,11 +174,11 @@ def test_quiz_displays_all_chapters_for_a_multi_chapter_question(
     client = app.test_client()
     register(client)
     client.post(
-        "/quiz/start",
+        "/course/legacy/quiz/start",
         data={"quiz_size": "all", "chapter_ids": "floorplanning"},
     )
 
-    page = client.get("/quiz")
+    page = client.get("/course/legacy/quiz")
 
     assert "Floorplanning" in page.text
     assert "Routing" in page.text
@@ -183,14 +193,14 @@ def test_option_labels_continue_after_z(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with stored_learner_state(client) as browser_session:
         state = browser_session["quiz_progress_normal"]
         state["question_ids"] = ["q1"]
         state["current_index"] = 0
         browser_session["quiz_progress_normal"] = state
 
-    page = client.get("/quiz")
+    page = client.get("/course/legacy/quiz")
 
     assert '<span class="option-index" id="option-label-25">Z</span>' in page.text
     assert '<span class="option-index" id="option-label-26">AA</span>' in page.text
@@ -202,7 +212,7 @@ def test_all_chapters_start_preserves_original_behavior(tmp_path, valid_payload)
     register(client)
 
     client.post(
-        "/quiz/start", data={"quiz_size": "all", "chapter_ids": "all"}
+        "/course/legacy/quiz/start", data={"quiz_size": "all", "chapter_ids": "all"}
     )
 
     with stored_learner_state(client) as browser_session:
@@ -221,7 +231,7 @@ def test_multiple_selected_chapters_are_combined_server_side(
     register(client)
 
     client.post(
-        "/quiz/start",
+        "/course/legacy/quiz/start",
         data={
             "quiz_size": "all",
             "chapter_ids": ["floorplanning", "routing"],
@@ -249,14 +259,14 @@ def test_home_offers_continue_and_confirmable_restart(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "10"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "10"})
 
-    response = client.get("/")
+    response = client.get(LEGACY_HOME)
 
     assert "继续正常练习" in response.text
     assert "重新开始正常练习" in response.text
     assert "data-confirm-restart" in response.text
-    assert 'method="get" action="/quiz/setup"' in response.text
+    assert 'method="get" action="/course/legacy/quiz/setup"' in response.text
 
 
 def test_restart_entry_returns_to_chapter_selection_before_replacing_progress(
@@ -266,13 +276,13 @@ def test_restart_entry_returns_to_chapter_selection_before_replacing_progress(
     client = app.test_client()
     register(client)
     client.post(
-        "/quiz/start",
+        "/course/legacy/quiz/start",
         data={"quiz_size": "all", "chapter_ids": "floorplanning"},
     )
     with stored_learner_state(client) as browser_session:
         original_token = browser_session["quiz_progress_normal"]["answer_token"]
 
-    setup = client.get("/quiz/setup")
+    setup = client.get("/course/legacy/quiz/setup")
 
     assert setup.status_code == 200
     assert "选择练习章节" in setup.text
@@ -282,7 +292,7 @@ def test_restart_entry_returns_to_chapter_selection_before_replacing_progress(
         assert browser_session["quiz_progress_normal"]["answer_token"] == original_token
 
     client.post(
-        "/quiz/start", data={"quiz_size": "all", "chapter_ids": "routing"}
+        "/course/legacy/quiz/start", data={"quiz_size": "all", "chapter_ids": "routing"}
     )
     with stored_learner_state(client) as browser_session:
         restarted = browser_session["quiz_progress_normal"]
@@ -295,12 +305,12 @@ def test_restart_replaces_only_that_modes_progress(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with stored_learner_state(client) as browser_session:
         old_token = browser_session["quiz_progress_normal"]["answer_token"]
         browser_session["quiz_progress_normal"]["current_index"] = 1
 
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
 
     with stored_learner_state(client) as browser_session:
         restarted = browser_session["quiz_progress_normal"]
@@ -314,7 +324,7 @@ def test_normal_and_review_progress_are_kept_independently(
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     user_id = learner_id(client)
     services.wrong_question_service.record_attempt(
         learner_id=user_id,
@@ -324,18 +334,18 @@ def test_normal_and_review_progress_are_kept_independently(
         is_correct=False,
     )
 
-    client.post("/quiz/start", data={"quiz_size": "all"})
-    client.post("/review/start")
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/review/start")
 
     with stored_learner_state(client) as browser_session:
         assert "quiz_progress_normal" in browser_session
         assert "quiz_progress_review" in browser_session
         review_token = browser_session["quiz_progress_review"]["answer_token"]
-    home = client.get("/")
+    home = client.get(LEGACY_HOME)
     assert "继续正常练习" in home.text
     assert "继续错题巩固" in home.text
 
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with stored_learner_state(client) as browser_session:
         assert browser_session["quiz_progress_review"]["answer_token"] == review_token
 
@@ -346,10 +356,10 @@ def test_quiz_and_mistakes_pages_have_return_home_action(
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
 
-    quiz_page = client.get("/quiz")
-    mistakes_page = client.get("/mistakes")
+    quiz_page = client.get("/course/legacy/quiz")
+    mistakes_page = client.get("/course/legacy/mistakes")
 
     assert "返回首页" in quiz_page.text
     assert "返回首页" in mistakes_page.text
@@ -361,14 +371,14 @@ def test_refresh_and_repeated_post_do_not_duplicate_attempt(
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with stored_learner_state(client) as browser_session:
         state = browser_session["quiz_progress_normal"]
         user_id = browser_session["user_id"]
         question_id = state["question_ids"][0]
         token = state["answer_token"]
 
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     question = services.question_repository.get_by_id(question_id)
     wrong_answer = next(
         option.id
@@ -377,9 +387,9 @@ def test_refresh_and_repeated_post_do_not_duplicate_attempt(
     )
     form = {"answer_token": token, "answers": wrong_answer}
 
-    client.post("/quiz/answer", data=form)
-    refresh = client.get("/quiz")
-    duplicate = client.post("/quiz/answer", data=form)
+    client.post("/course/legacy/quiz/answer", data=form)
+    refresh = client.get("/course/legacy/quiz")
+    duplicate = client.post("/course/legacy/quiz/answer", data=form)
 
     assert refresh.status_code == 200
     assert duplicate.status_code == 302
@@ -394,13 +404,13 @@ def test_normal_refresh_preserves_round_and_does_not_consume_fairness(
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "10"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "10"})
     user_id = learner_id(client)
-    repository = app.extensions["mcq_services"].progress_repository
+    repository = app.extensions["mcq_services"].default_services.progress_repository
     before = copy.deepcopy(repository.get(user_id, QuizMode.NORMAL)[1])
 
-    first_page = client.get("/quiz")
-    second_page = client.get("/quiz")
+    first_page = client.get("/course/legacy/quiz")
+    second_page = client.get("/course/legacy/quiz")
     after = repository.get(user_id, QuizMode.NORMAL)[1]
 
     assert first_page.data == second_page.data
@@ -418,16 +428,16 @@ def test_legacy_normal_progress_without_fairness_fields_is_compatible(
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "10"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "10"})
     user_id = learner_id(client)
-    repository = app.extensions["mcq_services"].progress_repository
+    repository = app.extensions["mcq_services"].default_services.progress_repository
     version, old_state = repository.get(user_id, QuizMode.NORMAL)
     old_state.pop("fairness_scope")
     old_state.pop("fairness_remaining_ids")
     repository.save(user_id, QuizMode.NORMAL, version, old_state)
 
-    assert client.get("/quiz").status_code == 200
-    client.post("/quiz/start", data={"quiz_size": "10"})
+    assert client.get("/course/legacy/quiz").status_code == 200
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "10"})
     upgraded = repository.get(user_id, QuizMode.NORMAL)[1]
 
     assert isinstance(upgraded["fairness_scope"], str)
@@ -438,27 +448,27 @@ def test_unknown_answer_is_rejected_without_recording(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with stored_learner_state(client) as browser_session:
         token = browser_session["quiz_progress_normal"]["answer_token"]
 
     response = client.post(
-        "/quiz/answer",
+        "/course/legacy/quiz/answer",
         data={"answer_token": token, "answers": "not-an-option"},
     )
 
     assert response.status_code == 400
     assert "提交的答案不属于当前题目" in response.text
-    assert app.extensions["mcq_services"].attempt_repository.count() == 0
+    assert app.extensions["mcq_services"].default_services.attempt_repository.count() == 0
 
 
 def test_next_before_answer_does_not_advance_progress(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
 
-    response = client.post("/quiz/next")
+    response = client.post("/course/legacy/quiz/next")
 
     assert response.status_code == 302
     with stored_learner_state(client) as browser_session:
@@ -473,13 +483,13 @@ def test_negative_saved_progress_is_discarded_instead_of_resumed(
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with stored_learner_state(client) as browser_session:
         state = browser_session["quiz_progress_normal"]
         state["current_index"] = -1
         browser_session["quiz_progress_normal"] = state
 
-    response = client.get("/quiz", follow_redirects=True)
+    response = client.get("/course/legacy/quiz", follow_redirects=True)
 
     assert response.status_code == 200
     assert "当前没有可继续的练习" in response.text
@@ -492,7 +502,7 @@ def test_empty_multiple_answer_is_not_recorded(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with stored_learner_state(client) as browser_session:
         state = browser_session["quiz_progress_normal"]
         state["question_ids"] = ["q2"]
@@ -501,20 +511,20 @@ def test_empty_multiple_answer_is_not_recorded(tmp_path, valid_payload):
         token = state["answer_token"]
 
     response = client.post(
-        "/quiz/answer",
+        "/course/legacy/quiz/answer",
         data={"answer_token": token},
         follow_redirects=True,
     )
 
     assert "请至少选择一个答案" in response.text
-    assert app.extensions["mcq_services"].attempt_repository.count() == 0
+    assert app.extensions["mcq_services"].default_services.attempt_repository.count() == 0
 
 
 def test_feedback_distinguishes_missed_and_wrong_options(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with stored_learner_state(client) as browser_session:
         state = browser_session["quiz_progress_normal"]
         state["question_ids"] = ["q2"]
@@ -523,7 +533,7 @@ def test_feedback_distinguishes_missed_and_wrong_options(tmp_path, valid_payload
         token = state["answer_token"]
 
     response = client.post(
-        "/quiz/answer",
+        "/course/legacy/quiz/answer",
         data={"answer_token": token, "answers": ["a", "b"]},
         follow_redirects=True,
     )
@@ -542,18 +552,18 @@ def test_review_corrects_original_then_uses_transfer_question(tmp_path, valid_pa
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     user_id = learner_id(client)
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
     )
 
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     with stored_learner_state(client) as browser_session:
         first = browser_session["quiz_progress_review"]
         first_token = first["answer_token"]
     first_answer = client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": first_token, "answers": "2"},
         follow_redirects=True,
     )
@@ -562,14 +572,14 @@ def test_review_corrects_original_then_uses_transfer_question(tmp_path, valid_pa
     assert "连续答对" not in first_answer.text
     assert services.wrong_question_repository.get_by_id(user_id, "q2") is None
 
-    client.post("/review/next", data={"answer_token": first_token})
+    client.post("/course/legacy/review/next", data={"answer_token": first_token})
     with stored_learner_state(client) as browser_session:
         second = browser_session["quiz_progress_review"]
         second_token = second["answer_token"]
         assert second["question_ids"][1] == "q2"
         assert second["review_items"][1]["role"] == "transfer_verification"
     second_answer = client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": second_token, "answers": ["a", "c"]},
         follow_redirects=True,
     )
@@ -587,7 +597,7 @@ def test_accounts_only_see_their_own_mistakes(tmp_path, valid_payload):
     bob = app.test_client()
     register(alice, "alice")
     register(bob, "bob")
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     services.wrong_question_service.record_attempt(
         learner_id(alice), "q1", QuizMode.NORMAL, ("1",), False
     )
@@ -595,7 +605,7 @@ def test_accounts_only_see_their_own_mistakes(tmp_path, valid_payload):
         learner_id(bob), "q2", QuizMode.NORMAL, ("b",), False
     )
 
-    alice_page = alice.get("/mistakes")
+    alice_page = alice.get("/course/legacy/mistakes")
 
     assert "Pick one" in alice_page.text
     assert "Pick several" not in alice_page.text
@@ -611,7 +621,7 @@ def test_reset_mistakes_clears_only_current_account_and_review_progress(
     bob = app.test_client()
     register(alice, "alice")
     register(bob, "bob")
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     alice_id = learner_id(alice)
     bob_id = learner_id(bob)
     services.wrong_question_service.record_attempt(
@@ -620,10 +630,10 @@ def test_reset_mistakes_clears_only_current_account_and_review_progress(
     services.wrong_question_service.record_attempt(
         bob_id, "q2", QuizMode.NORMAL, ("b",), False
     )
-    alice.post("/review/start")
+    alice.post("/course/legacy/review/start")
 
-    page = alice.get("/mistakes")
-    response = alice.post("/mistakes/reset", follow_redirects=True)
+    page = alice.get("/course/legacy/mistakes")
+    response = alice.post("/course/legacy/mistakes/reset", follow_redirects=True)
 
     assert "重置全部错题" in page.text
     assert "data-confirm-reset" in page.text
@@ -639,9 +649,9 @@ def test_reset_mistakes_clears_only_current_account_and_review_progress(
 def test_reset_mistakes_requires_login_and_post(tmp_path, valid_payload):
     client = make_app(tmp_path, valid_payload).test_client()
 
-    unauthenticated = client.post("/mistakes/reset")
+    unauthenticated = client.post("/course/legacy/mistakes/reset")
     register(client)
-    wrong_method = client.get("/mistakes/reset")
+    wrong_method = client.get("/course/legacy/mistakes/reset")
 
     assert unauthenticated.status_code == 302
     assert unauthenticated.headers["Location"].endswith("/login")
@@ -654,12 +664,12 @@ def test_mistakes_page_uses_configured_verification_target(
     app = make_app(tmp_path, valid_payload, KNOWLEDGE_VERIFICATION_TARGET=3)
     client = app.test_client()
     register(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     services.wrong_question_service.record_attempt(
         learner_id(client), "q1", QuizMode.NORMAL, ("1",), False
     )
 
-    response = client.get("/mistakes")
+    response = client.get("/course/legacy/mistakes")
 
     assert "所属知识点还需答对 3 道不同题目" in response.text
     assert "0 / 3 道不同题目" in response.text
@@ -671,7 +681,7 @@ def test_mistakes_show_answers_after_correction(
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     user_id = learner_id(client)
 
     services.wrong_question_service.record_attempt(
@@ -687,7 +697,7 @@ def test_mistakes_show_answers_after_correction(
         user_id, "q2", QuizMode.REVIEW, ("a", "c"), True
     )
 
-    page = client.get("/mistakes")
+    page = client.get("/course/legacy/mistakes")
 
     assert 'data-corrected-question="q2"' in page.text
     assert 'data-correct-option="a"' in page.text
@@ -708,7 +718,7 @@ def test_mistakes_can_be_filtered_by_chapter_and_show_course_context(
     app = make_app(tmp_path, add_curriculum(valid_payload))
     client = app.test_client()
     register(client)
-    services = app.extensions["mcq_services"]
+    services = app.extensions["mcq_services"].default_services
     user_id = learner_id(client)
     services.wrong_question_service.record_attempt(
         user_id, "q1", QuizMode.NORMAL, ("1",), False
@@ -717,7 +727,7 @@ def test_mistakes_can_be_filtered_by_chapter_and_show_course_context(
         user_id, "q2", QuizMode.NORMAL, ("b",), False
     )
 
-    page = client.get("/mistakes?chapter=floorplanning")
+    page = client.get("/course/legacy/mistakes?chapter=floorplanning")
 
     assert "Pick one" in page.text
     assert "Pick several" not in page.text
@@ -737,13 +747,16 @@ def test_account_and_wrong_question_survive_app_restart(tmp_path, valid_payload)
         "TESTING": True,
         "SECRET_KEY": "test-secret",
         "QUESTION_FILE": write_json(tmp_path / "questions.json", valid_payload),
+        "GLOSSARY_FILE": tmp_path / "absent" / "glossary.json",
+        # Keep the fixture hermetic: never read the developer's real courses/ tree.
+        "COURSES_DIR": tmp_path / "absent" / "courses",
         "DATABASE": tmp_path / "mcq.db",
     }
     first_app = create_app(config)
     first_client = first_app.test_client()
     register(first_client, "persistent")
     user_id = learner_id(first_client)
-    first_app.extensions["mcq_services"].wrong_question_service.record_attempt(
+    first_app.extensions["mcq_services"].default_services.wrong_question_service.record_attempt(
         learner_id=user_id,
         question_id="q1",
         mode=QuizMode.NORMAL,
@@ -760,7 +773,7 @@ def test_account_and_wrong_question_survive_app_restart(tmp_path, valid_payload)
 
     record = restarted_app.extensions[
         "mcq_services"
-    ].wrong_question_repository.get_by_id(user_id, "q1")
+    ].default_services.wrong_question_repository.get_by_id(user_id, "q1")
     assert record is not None
     assert record.wrong_count == 1
 
@@ -769,7 +782,7 @@ def test_changed_question_bank_preserves_progress_silently(tmp_path, valid_paylo
     first_app = make_app(tmp_path, valid_payload)
     first_client = first_app.test_client()
     register(first_client, "learner")
-    first_client.post("/quiz/start", data={"quiz_size": "all"})
+    first_client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
     with first_client.session_transaction() as browser_session:
         saved_session = dict(browser_session)
 
@@ -780,7 +793,7 @@ def test_changed_question_bank_preserves_progress_silently(tmp_path, valid_paylo
     with restarted_client.session_transaction() as browser_session:
         browser_session.update(saved_session)
 
-    home = restarted_client.get("/")
+    home = restarted_client.get(LEGACY_HOME)
 
     # A wording edit is content-only: the round resumes in place and no
     # bank-update banner is ever shown.
@@ -792,10 +805,10 @@ def test_expired_answer_token_uses_chinese_error_page(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
 
     response = client.post(
-        "/quiz/answer",
+        "/course/legacy/quiz/answer",
         data={"answer_token": "expired", "answers": "1"},
     )
 

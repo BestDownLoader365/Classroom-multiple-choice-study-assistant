@@ -26,6 +26,11 @@ class GlossaryRepository:
         }
 
     @property
+    def glossary(self) -> Glossary:
+        """Return the immutable glossary this repository was built from."""
+        return self._glossary
+
+    @property
     def title(self) -> str:
         return self._glossary.title
 

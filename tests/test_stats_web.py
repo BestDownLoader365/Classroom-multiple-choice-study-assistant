@@ -4,10 +4,12 @@ from tests.test_dashboard_web import record
 from tests.test_exam_web import answer, exam_payload, start_exam
 from tests.test_web import learner_id, make_app, register
 
+LEGACY_HOME = "/course/legacy/"
+
 
 def test_stats_requires_login(tmp_path):
     client = make_app(tmp_path, exam_payload()).test_client()
-    response = client.get("/stats")
+    response = client.get("/course/legacy/stats")
     assert response.status_code == 302
     assert response.headers["Location"].endswith("/login")
 
@@ -17,10 +19,10 @@ def test_home_links_to_the_global_stats_page(tmp_path):
     client = app.test_client()
     register(client)
 
-    page = client.get("/")
+    page = client.get(LEGACY_HOME)
 
     assert "全员统计" in page.text
-    assert 'href="/stats"' in page.text
+    assert 'href="/course/legacy/stats"' in page.text
     assert "仅供参考" in page.text
 
 
@@ -29,7 +31,7 @@ def test_stats_empty_state_for_a_fresh_site(tmp_path):
     client = app.test_client()
     register(client)
 
-    page = client.get("/stats")
+    page = client.get("/course/legacy/stats")
 
     assert page.status_code == 200
     assert "暂无全员答题记录" in page.text
@@ -50,7 +52,7 @@ def test_stats_aggregates_every_account_without_exposing_one(tmp_path):
     register(bob, "bob")
     record(app, learner_id(bob), "q2", True)
 
-    page = alice.get("/stats")
+    page = alice.get("/course/legacy/stats")
 
     assert "注册账号" in page.text
     assert "有作答的账号" in page.text
@@ -68,7 +70,7 @@ def test_stats_aggregates_every_account_without_exposing_one(tmp_path):
 
     overview = app.extensions[
         "mcq_services"
-    ].global_statistics_service.build_overview()
+    ].default_services.global_statistics_service.build_overview()
     assert overview.account_count == 2
     assert overview.active_account_count == 2
     assert overview.total_attempts == 3
@@ -82,14 +84,14 @@ def test_stats_reflects_mock_exam_attempts(tmp_path):
     exam_id = start_exam(client)
     answer(client, exam_id, 0, ["b"])
     answer(client, exam_id, 1, ["a"])
-    client.post(f"/exam/{exam_id}/submit")
+    client.post(f"/course/legacy/exam/{exam_id}/submit")
 
-    page = client.get("/stats")
+    page = client.get("/course/legacy/stats")
 
     assert "暂无全员答题记录" not in page.text
     overview = app.extensions[
         "mcq_services"
-    ].global_statistics_service.build_overview()
+    ].default_services.global_statistics_service.build_overview()
     assert overview.total_attempts == 2
     assert overview.correct_attempts == 1
 
@@ -99,8 +101,8 @@ def test_stats_page_links_back_to_personal_dashboard(tmp_path):
     client = app.test_client()
     register(client)
 
-    page = client.get("/stats")
+    page = client.get("/course/legacy/stats")
 
-    assert 'href="/dashboard"' in page.text
+    assert 'href="/course/legacy/dashboard"' in page.text
     assert "我的学习数据" in page.text
     assert "全体学习数据 · 仅供参考" in page.text

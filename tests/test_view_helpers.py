@@ -47,8 +47,8 @@ def test_quiz_page_shrinks_roman_statement_lines(tmp_path, valid_payload):
     app = make_app(tmp_path, valid_payload)
     client = app.test_client()
     register(client)
-    client.post("/quiz/start", data={"quiz_size": "all"})
-    page = client.get("/quiz")
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+    page = client.get("/course/legacy/quiz")
 
     assert page.status_code == 200
     assert '<span class="stem-statement">I. Alpha is true.</span>' in page.text

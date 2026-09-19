@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.models import LEGACY_COURSE_ID
 from app.models import Chapter, Option, Question, QuizMode
 from app.repositories import (
     AttemptRepository,
@@ -100,7 +101,7 @@ def test_naive_timestamps_are_interpreted_as_utc():
 def repository(tmp_path):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    return WrongQuestionRepository(database)
+    return WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID)
 
 
 def test_new_wrong_record_has_no_srs_schedule(repository):
@@ -271,7 +272,7 @@ def test_legacy_database_is_upgraded_in_place_without_forcing_due(tmp_path):
     database.initialize()
     database.initialize()  # the migration must be idempotent
 
-    repository = WrongQuestionRepository(database)
+    repository = WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID)
     corrected = repository.get_by_id("learner-id", "q1")
     pending = repository.get_by_id("learner-id", "q2")
     assert (corrected.corrected, corrected.wrong_count, corrected.review_streak) == (
@@ -296,9 +297,9 @@ def test_legacy_database_is_upgraded_in_place_without_forcing_due(tmp_path):
 def srs_context(tmp_path, sample_questions):
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    wrong_repository = WrongQuestionRepository(database)
+    wrong_repository = WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID)
     service = WrongQuestionService(
-        attempt_repository=AttemptRepository(database),
+        attempt_repository=AttemptRepository(database, course_id=LEGACY_COURSE_ID),
         wrong_question_repository=wrong_repository,
         question_repository=QuestionRepository(sample_questions),
     )
@@ -428,9 +429,9 @@ def build_quiz(tmp_path, questions, shuffler=lambda values: None, chapters=()):
     question_repository = QuestionRepository(questions, chapters=chapters)
     database = Database(tmp_path / "mcq.db")
     database.initialize()
-    wrong_repository = WrongQuestionRepository(database)
+    wrong_repository = WrongQuestionRepository(database, course_id=LEGACY_COURSE_ID)
     wrong_service = WrongQuestionService(
-        AttemptRepository(database),
+        AttemptRepository(database, course_id=LEGACY_COURSE_ID),
         wrong_repository,
         question_repository,
     )

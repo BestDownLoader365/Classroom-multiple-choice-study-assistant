@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}课程选择 · 课堂选择题学习助手{% endblock %}
+
+{% block content %}
+<section class="content-stack courses-page">
+    <div class="page-heading">
+        <div>
+            <p class="section-label">多课程</p>
+            <h1>选择课程</h1>
+            <p>每门课程拥有独立的题库、错题本、术语表与学习进度。切换课程只是导航，不会重置任何进度，也不需要重启服务。</p>
+        </div>
+    </div>
+
+    {% if states %}
+    <div class="course-grid">
+        {% for state in states %}
+        <article class="course-card{% if not state.servable %} course-card-{{ state.status.value }}{% endif %}"
+                 data-course-id="{{ state.course_id }}">
+            <div class="course-card-heading">
+                <div>
+                    <h2>{{ state.course.title_zh or state.course.title }}</h2>
+                    <p class="course-card-en">{{ state.course.title }}</p>
+                </div>
+                {% if state.status.value == 'ready' %}
+                <span class="status status-mastered">可学习</span>
+                {% elif state.status.value == 'stale' %}
+                <span class="status status-progressing">等待更新</span>
+                {% elif state.status.value == 'disabled' %}
+                <span class="status status-weak">已停用</span>
+                {% elif state.status.value == 'undeployed' %}
+                <span class="status status-weak">未部署</span>
+                {% else %}
+                <span class="status status-weak">不可用</span>
+                {% endif %}
+            </div>
+            <p class="course-card-id"><code>{{ state.course_id }}</code></p>
+            {% if state.status.value == 'ready' %}
+            <a class="button button-primary" href="{{ url_for('web.home', course_id=state.course_id) }}">开始学习</a>
+            {% elif state.status.value == 'disabled' %}
+            <p class="launcher-note">该课程已在课程目录中停用。</p>
+            {% elif state.status.value == 'undeployed' %}
+            <p class="launcher-note">该课程存在于数据库中，但尚未部署到当前服务实例。</p>
+            {% else %}
+            <p class="launcher-note">{{ state.reason or "该课程暂时不可用。" }}</p>
+            {% endif %}
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state">
+        <h2>没有可用课程</h2>
+        <p>请检查 <code>courses/</code> 目录中的课程清单，或放置根目录的 <code>questions.json</code>。</p>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}

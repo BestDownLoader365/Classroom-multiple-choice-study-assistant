@@ -1,52 +1,49 @@
-"""Atomically publish a validated question bank.
+"""Atomically publish a validated question bank for one course.
 
 Non-atomic publishing (``cp`` over a live file, an editor saving the JSON in
-place) can truncate or partially overwrite the file while a worker is
-starting up or reloading.  The worker then reports ``Invalid JSON in question
-bank at line 1, column N`` — a publishing artefact mistaken for a broken
-bank.  This helper only validates the candidate, writes it to a temporary
-file next to the target, fsyncs it, and atomically replaces the target with
-``os.replace`` (same filesystem, so the swap is a single rename)::
+place) can truncate or partially overwrite the file while a worker is starting
+up.  The worker then reports ``Invalid JSON in question bank at line 1,
+column N`` — a publishing artefact mistaken for a broken bank.  This helper
 
-    python scripts/check_question_bank.py candidate.json     # preflight first
-    python scripts/swap_question_bank.py candidate.json
-    python scripts/swap_question_bank.py candidate.json --target questions.json
+1. reads the candidate **once** and freezes those bytes;
+2. validates exactly those frozen bytes;
+3. resolves the target course and runs the read-only preflight (retired-ID
+   reuse, destructive diffs) against the database;
+4. writes the bytes to an immutable ``versions/<sha256>/questions.json``;
+5. re-validates the publication baseline **inside** the course's publication
+   lock, then switches the course manifest over with a single ``os.replace``
+   rename and fsyncs the directory::
 
-It never restarts anything: after a structural change (added/deleted
-questions, grading rule changes, chapter/source moves) restart the whole
-service so every worker loads the same bank.
+    python scripts/check_question_bank.py --course physical_design candidate.json
+    python scripts/swap_question_bank.py --course physical_design candidate.json --db instance/mcq.db
+
+Filesystem publication and database activation are **not** one transaction: the
+command reports ``published, pending worker activation``.  It never restarts
+anything and never bumps the course generation itself — the startup
+reconciliation does that on the next worker activation.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.repositories import QuestionBankError, QuestionLoader  # noqa: E402
+from scripts.course_tooling import (  # noqa: E402
+    ToolingError,
+    build_loader,
+    freeze_candidate,
+    preflight_baseline,
+    publish_questions,
+    resolve_definition,
+    validate_bytes,
+)
 
 
-def _fsync_directory(directory: Path) -> None:
-    """Persist the rename itself, where the filesystem supports it."""
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        descriptor = os.open(directory, flags)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
-
-
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "candidate",
@@ -54,47 +51,102 @@ def main(argv: list[str] | None = None) -> int:
         help="fully written candidate question bank to publish",
     )
     parser.add_argument(
-        "--target",
+        "--course",
+        default=None,
+        help="course_id to publish (required when several courses are declared)",
+    )
+    parser.add_argument(
+        "--courses-dir",
+        default=PROJECT_ROOT / "courses",
+        type=Path,
+        help="directory holding one sub-directory per course (default: ./courses)",
+    )
+    parser.add_argument(
+        "--question-file",
         default=PROJECT_ROOT / "questions.json",
         type=Path,
-        help="live question bank to replace (default: project root questions.json)",
+        help="root questions.json used for the legacy course adapter",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "--glossary-file",
+        default=PROJECT_ROOT / "glossary.json",
+        type=Path,
+        help="root glossary.json used for the legacy course adapter",
+    )
+    parser.add_argument(
+        "--db",
+        default=PROJECT_ROOT / "instance" / "mcq.db",
+        type=Path,
+        help="SQLite database used for the read-only preflight (never modified)",
+    )
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="publish without diffing against the database (not recommended)",
+    )
+    return parser
 
-    candidate = args.candidate.resolve()
-    target = args.target.resolve()
-    if not candidate.is_file():
-        print(f"候选题库不存在：{candidate}", file=sys.stderr)
-        return 1
-    if candidate == target:
-        print("候选文件就是目标文件，无需替换。")
-        return 0
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    loader = build_loader(args.courses_dir, args.question_file, args.glossary_file)
     try:
-        questions = QuestionLoader(candidate).load()
-    except QuestionBankError as exc:
+        definition = resolve_definition(loader, args.course)
+        payload, digest = freeze_candidate(Path(args.candidate).resolve())
+        questions = validate_bytes(payload)
+    except (ToolingError, OSError) as exc:
         print(f"候选题库校验失败，未替换任何文件：\n{exc}", file=sys.stderr)
         return 1
 
-    payload = candidate.read_bytes()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temporary, 0o644)
-        os.replace(temporary, target)
-        _fsync_directory(target.parent)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
+    print(f"课程 (course_id): {definition.course_id} [{definition.layout}]")
+    print(f"候选内容已冻结：sha256={digest[:16]}… ({len(payload)} bytes)")
+    print(f"题库校验通过：{len(questions)} 道题。")
 
-    print(f"已校验并通过原子替换发布 {len(questions)} 道题 -> {target}")
-    print("下一步：统一重启全部应用工作进程，让所有 worker 加载同一份题库。")
+    if not args.skip_preflight:
+        from scripts.check_question_bank import main as check_main
+
+        exit_code = check_main(
+            [
+                str(args.candidate),
+                "--course",
+                definition.course_id,
+                "--courses-dir",
+                str(args.courses_dir),
+                "--question-file",
+                str(args.question_file),
+                "--glossary-file",
+                str(args.glossary_file),
+                "--db",
+                str(args.db),
+            ]
+        )
+        if exit_code != 0:
+            print(
+                f"\n预检返回 {exit_code}：未发布任何内容。先修复或改用 "
+                "check_question_bank.py 查看完整报告。",
+                file=sys.stderr,
+            )
+            return exit_code
+
+    baseline = preflight_baseline(definition)
+    try:
+        published, legacy_layout = publish_questions(
+            definition, payload, digest, baseline=baseline
+        )
+    except (ToolingError, OSError) as exc:
+        print(f"\n发布失败，未替换任何文件：\n{exc}", file=sys.stderr)
+        return 1
+
+    print(f"\n已发布 {len(questions)} 道题 -> {published}")
+    if legacy_layout:
+        print("布局：legacy 根目录文件（原子替换单文件，没有 manifest）")
+    else:
+        print("布局：manifest 已通过单次 rename 原子切换（内容不可变、按 sha256 归档）")
+    print(
+        "\n状态：published, pending worker activation（已发布，等待 worker 激活）。\n"
+        "发布文件系统内容与数据库激活不是同一个事务：请统一重启全部应用工作进程，"
+        "让每个 worker 加载同一份内容；未更新的进程只会围栏该课程，其他课程不受影响。"
+    )
     return 0
 
 

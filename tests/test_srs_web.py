@@ -6,11 +6,13 @@ from app.models import QuizMode
 from app.services import srs_service as srs
 from tests.test_web import learner_id, make_app, register
 
+LEGACY_HOME = "/course/legacy/"
+
 NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _services(app):
-    return app.extensions["mcq_services"]
+    return app.extensions["mcq_services"].default_services
 
 
 def _review_state(app, user_id):
@@ -54,13 +56,13 @@ def test_corrected_question_returns_for_scheduled_srs_reviews(
     )
 
     # Review 中完成原错题纠正。
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     state = _review_state(app, user_id)
     assert [
         (item["question_id"], item["role"]) for item in state["review_items"]
     ] == [("q1", "original_correction")]
     client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": state["answer_token"], "answers": "2"},
     )
 
@@ -69,28 +71,28 @@ def test_corrected_question_returns_for_scheduled_srs_reviews(
     assert record.corrected is True
     assert record.srs_level == 0
     assert srs.parse_timestamp(record.next_review_at) > datetime.now(timezone.utc)
-    home = client.get("/")
+    home = client.get(LEGACY_HOME)
     assert "今日到期" not in home.text
     assert "待复习" not in home.text
 
     # 时间推进到到期 → 首页待处理区出现“待复习 1 题”。
     _make_due(app, user_id, "q1")
-    home = client.get("/")
+    home = client.get(LEGACY_HOME)
     assert "待复习 1 题" in home.text
 
     # 再次进入 Review：以“间隔复习”角色抽到该题。
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     state = _review_state(app, user_id)
     assert [
         (item["question_id"], item["role"]) for item in state["review_items"]
     ] == [("q1", "srs_review")]
-    page = client.get("/review")
+    page = client.get("/course/legacy/review")
     assert "间隔复习" in page.text
 
     # 到期答对 → 升级到 Level 1，3 天后再次复习。
     before = datetime.now(timezone.utc)
     client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": state["answer_token"], "answers": "2"},
     )
     record = services.wrong_question_repository.get_by_id(user_id, "q1")
@@ -111,11 +113,11 @@ def test_failed_srs_review_restarts_the_correction_cycle(tmp_path, valid_payload
     _make_due(app, user_id, "q1")
 
     # 到期后答错 → 回到纠错状态，SRS 排期被清除。
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     state = _review_state(app, user_id)
     assert state["review_items"][0]["role"] == "srs_review"
     page = client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": state["answer_token"], "answers": "1"},
         follow_redirects=True,
     )
@@ -127,7 +129,7 @@ def test_failed_srs_review_restarts_the_correction_cycle(tmp_path, valid_payload
     assert "已重新进入待纠正状态" in page.text
 
     # 重新开始 Review：它作为待纠正的原错题出现，而不是重复的 SRS 任务。
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     state = _review_state(app, user_id)
     assert [
         (item["question_id"], item["role"]) for item in state["review_items"]
@@ -136,7 +138,7 @@ def test_failed_srs_review_restarts_the_correction_cycle(tmp_path, valid_payload
     # 重新纠正成功 → 重新从 1 天周期开始。
     before = datetime.now(timezone.utc)
     client.post(
-        "/review/answer",
+        "/course/legacy/review/answer",
         data={"answer_token": state["answer_token"], "answers": "2"},
     )
     record = services.wrong_question_repository.get_by_id(user_id, "q1")
@@ -157,7 +159,7 @@ def test_home_due_count_is_isolated_per_user(tmp_path, valid_payload):
 
     bob = app.test_client()
     bob_home = register(bob, "bob")
-    alice_home = alice.get("/")
+    alice_home = alice.get(LEGACY_HOME)
 
     assert "今日到期" not in bob_home.text
     assert "待复习 1 题" not in bob_home.text
@@ -172,10 +174,10 @@ def test_srs_review_session_survives_interruption(tmp_path, valid_payload):
     _seed_corrected_schedule(app, user_id)
     _make_due(app, user_id, "q1")
 
-    client.post("/review/start")
-    client.get("/")  # 中途退出复习页面
+    client.post("/course/legacy/review/start")
+    client.get(LEGACY_HOME)  # 中途退出复习页面
 
-    page = client.get("/review")
+    page = client.get("/course/legacy/review")
 
     assert page.status_code == 200
     assert "Pick one" in page.text
@@ -195,11 +197,11 @@ def test_mistakes_page_offers_review_when_only_srs_is_due(tmp_path, valid_payloa
     )
     _make_due(app, user_id, "q1")
 
-    page = client.get("/mistakes")
+    page = client.get("/course/legacy/mistakes")
 
     assert "今日待复习" in page.text
     assert "disabled" not in page.text
-    client.post("/review/start")
+    client.post("/course/legacy/review/start")
     state = _review_state(app, user_id)
     assert [
         (item["question_id"], item["role"]) for item in state["review_items"]

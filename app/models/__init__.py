@@ -1,5 +1,17 @@
 """Domain models used by the MCQ application."""
 
+from .course import (
+    COURSE_ID_PATTERN,
+    LEGACY_COURSE_ID,
+    SUPPORTED_COURSE_SCHEMA_VERSION,
+    Course,
+    CourseDefinition,
+    CourseDefinitionError,
+    CourseIdError,
+    CourseLoadError,
+    is_valid_course_id,
+    validate_course_id,
+)
 from .domain import (
     Attempt,
     Chapter,
@@ -21,7 +33,17 @@ from .domain import (
 
 __all__ = [
     "Attempt",
+    "COURSE_ID_PATTERN",
     "Chapter",
+    "Course",
+    "CourseDefinition",
+    "CourseDefinitionError",
+    "CourseIdError",
+    "CourseLoadError",
+    "LEGACY_COURSE_ID",
+    "SUPPORTED_COURSE_SCHEMA_VERSION",
+    "is_valid_course_id",
+    "validate_course_id",
     "ExamQuestion",
     "ExamSession",
     "ExamStatus",

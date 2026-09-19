@@ -4,9 +4,13 @@ set -Eeuo pipefail
 readonly APP_SERVICE="mcq-template.service"
 readonly NGINX_SERVICE="nginx.service"
 readonly HEALTH_URL="http://127.0.0.1:8080/health"
-# Readiness is the check that matters after a bank update: a worker still
-# running a superseded (or restored-from-backup) questions.json answers 503 on
-# every learning page while /health keeps returning 200.
+# Readiness is the check that matters after a content update: a worker still
+# running a superseded (or restored-from-backup) publication answers 503 on that
+# course's learning pages while /health keeps returning 200.
+#
+# Aggregate readiness covers the worker's *declared, enabled* courses.  When it
+# reports degraded, use /ready/<course_id> to find the affected course: a stale
+# or unavailable course A does not stop course B from serving learners.
 readonly READY_URL="http://127.0.0.1:8080/ready"
 
 as_root() {
@@ -70,16 +74,21 @@ if [[ "$health_response" != *'"status":"ok"'* ]]; then
     exit 1
 fi
 
-if [[ "$ready_response" != *'"status":"ready"'* ]]; then
-    echo "错误：服务已启动，但没有 worker 可以承接学习流量：$READY_URL" >&2
-    echo "常见原因：仍有 worker 使用旧 questions.json 或数据库被恢复到较旧备份。" >&2
-    echo "请查看日志中的 'Question bank generation mismatch' 并重启全部 worker：" >&2
-    echo "  journalctl -u $APP_SERVICE -n 50 --no-pager" >&2
+if [[ "$ready_response" != *'"status": "ready"'* && "$ready_response" != *'"status":"ready"'* ]]; then
+    echo "错误：服务已启动，但至少一门课程无法承接学习流量：$READY_URL" >&2
+    echo "常见原因：仍有 worker 使用旧课程内容、课程包损坏，或数据库被恢复到较旧备份。" >&2
+    echo "诊断步骤：" >&2
+    echo "  1) $READY_URL          # 查看每门课程的 status/generation" >&2
+    echo "  2) $READY_URL/<course_id>   # 定位具体课程（stale / unavailable）" >&2
+    echo "  3) 查看日志中 'is stale on this worker' 或 'is unavailable' 的行：" >&2
+    echo "     journalctl -u $APP_SERVICE -n 50 --no-pager" >&2
+    echo "  4) 内容更新后重启全部 worker；只有受影响课程会被围栏。" >&2
     exit 1
 fi
 
 echo
 echo "生产服务启动成功：$ready_response"
 echo "存活检查：$HEALTH_URL"
-echo "就绪检查：$READY_URL"
+echo "就绪检查（汇总）：$READY_URL"
+echo "就绪检查（单课程）：$READY_URL/<course_id>"
 echo "Sakura FRP TCP 本地目标：127.0.0.1:8080"
