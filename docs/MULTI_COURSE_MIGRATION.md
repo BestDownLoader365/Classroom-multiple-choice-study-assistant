@@ -159,7 +159,7 @@ curl -i http://127.0.0.1:8001/ready
 
 ```bash
 python scripts/check_question_bank.py --course physical_design old_questions.json --db instance/mcq.db
-python scripts/swap_question_bank.py --course physical_design old_questions.json --db instance/mcq.db
+python scripts/publish_course.py --course physical_design --questions old_questions.json --db instance/mcq.db
 # 统一重启 worker
 ```
 

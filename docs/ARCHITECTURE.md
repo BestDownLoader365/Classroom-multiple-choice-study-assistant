@@ -186,7 +186,6 @@ MCQ_Template/
 │   ├── migrate_courses.py
 │   ├── publish_course.py
 │   ├── rename_course.py
-│   ├── swap_question_bank.py
 │   ├── start_production.sh
 │   └── stop_production.sh
 └── tests/
@@ -248,7 +247,7 @@ Convenience operations scripts for WSL. The start script validates Nginx, starts
 
 #### `questions.json`
 
-Contains the complete question bank. Every application process reads and validates it once during startup. Editing this file requires restarting the active server: `python run.py` in development or `mcq-template.service` in production. Replace it atomically (`scripts/swap_question_bank.py`) rather than with `cp` or an editor save: a partially written file is read by a worker starting in that window and reported as misleading invalid JSON.
+Contains the complete question bank. Every application process reads and validates it once during startup. Editing this file requires restarting the active server: `python run.py` in development or `mcq-template.service` in production. Replace it atomically (`scripts/publish_course.py --questions`) rather than with `cp` or an editor save: a partially written file is read by a worker starting in that window and reported as misleading invalid JSON.
 
 #### `glossary.json`
 
@@ -327,15 +326,20 @@ Consequences worth knowing:
   required from `catalogue-changed` and the per-question lines; `presentation-only`
   only confirms that this publish has no fencing or learner-data impact.
 
-#### `scripts/swap_question_bank.py`
+#### `scripts/publish_course.py`
 
-Publishes a validated candidate bank atomically: it loads the candidate with
-`QuestionLoader`, writes it to a temporary file in the target directory, fsyncs it,
-and swaps it in with `os.replace()`. Direct `cp` over a live file (or an editor's
-in-place save) can truncate or partially write the JSON while a worker starts, which
-surfaces as a misleading `Invalid JSON in question bank at line 1, column N`; this
-script removes that failure mode. Publishing still requires a coordinated restart of
-all workers, because a structural change advances the bank generation.
+The single publish entry point for every course-content type: add a course, publish
+`questions.json` and/or `glossary.json`, and enable/disable a course. A publish reads the
+candidate once, validates exactly those frozen bytes, archives them under
+`versions/<sha256>/`, and switches the manifest over with a single `os.replace` (the
+legacy root-file layout falls back to an atomic single-file replace). It re-runs the
+matching gate by default — `check_question_bank.py` against the database for questions,
+`check_glossary.py` for the glossary — and refuses to switch over content that fails it;
+`--skip-preflight` is the explicit, discouraged escape hatch. Direct `cp` over a live file
+(or an editor's in-place save) can truncate the JSON while a worker starts, which surfaces
+as a misleading `Invalid JSON in question bank at line 1, column N`; this script removes
+that failure mode. Publishing still requires a coordinated restart of all workers, because
+a structural change advances the bank generation.
 
 #### `instance/mcq.db`
 
@@ -1211,7 +1215,7 @@ Developers should preserve these rules when extending the application:
 - Extend Normal selection: keep it limited to live eligible IDs plus `fairness_scope`/`fairness_remaining_ids`; do not inject review signals.
 - Extend Review selection: add role-bearing candidate rules through weak/correction services; do not touch the Normal bag.
 - Add a new learning mode: extend `QuizMode`, define its queue and persistence rules, add an independent mode in the progress table, and update the database mode constraint if attempts use the new mode.
-- Replace the question bank: publish the candidate with `python scripts/swap_question_bank.py candidate.json` (validate first with `scripts/check_question_bank.py`, never `cp` over the live file) and then restart **all** workers together. Ordinary maintenance is reconciled per question without clearing learner data; grading-identity changes and deletions affect exactly the involved questions, and chapter/source moves or catalogue-shape changes bump the generation so slicing workers stop serving until the shared restart (labels alone do not).
+- Replace the question bank: publish the candidate with `python scripts/publish_course.py --course <course_id> --questions candidate.json` (it re-runs `scripts/check_question_bank.py` by default; never `cp` over the live file) and then restart **all** workers together. Ordinary maintenance is reconciled per question without clearing learner data; grading-identity changes and deletions affect exactly the involved questions, and chapter/source moves or catalogue-shape changes bump the generation so slicing workers stop serving until the shared restart (labels alone do not).
 
 ## 18. Local Production Deployment
 
@@ -1498,7 +1502,7 @@ hand-editing the generation.
    bank-level report lines” above: `catalogue-changed: yes` means that course's
    workers need the restart, while `presentation-only: no` does not mean the
    labels stayed identical.
-3. Publish atomically: `python scripts/swap_question_bank.py --course <course_id> candidate.json --db instance/mcq.db`
+3. Publish atomically: `python scripts/publish_course.py --course <course_id> --questions candidate.json --db instance/mcq.db`
    reads the candidate **once**, validates exactly those bytes, writes them to an
    immutable `versions/<sha256>/questions.json`, re-validates the publication
    baseline inside the course publication lock, and switches `course.json` over

@@ -1,7 +1,8 @@
 """Course-level operations: add, publish content, enable and disable.
 
-Every course-content change follows the same check-then-publish flow: run the
-matching ``check_<subject>.py`` gate first, and only publish when it exits ``0``::
+This is the single publish entry point for every course-content type.  Every
+change follows the same check-then-publish flow: run the matching
+``check_<subject>.py`` gate first, and only publish when it exits ``0``::
 
     # 1) check the candidates (read-only; publishes nothing)
     python scripts/check_question_bank.py --course physical_design candidate.json --db instance/mcq.db
@@ -21,13 +22,16 @@ matching ``check_<subject>.py`` gate first, and only publish when it exits ``0``
     python scripts/publish_course.py --course physical_design --disable
     python scripts/publish_course.py --course physical_design --enable
 
-Content publication uses the same frozen-bytes, versioned, atomic-manifest
-machinery as ``swap_question_bank.py``: the candidate is read once, validated,
-archived under ``versions/<sha256>/`` and switched over with a single rename.
-Every publish also re-runs the matching check script: a glossary publish (and a
-course creation that carries a glossary) runs ``check_glossary.py`` and refuses
-to switch over content that fails it; ``--run-preflight`` adds the database
-preflight for questions.  Nothing here restarts a worker or bumps a generation.
+Content publication reads the candidate once, validates exactly those frozen
+bytes, archives them under ``versions/<sha256>/`` and switches the manifest over
+with a single ``os.replace`` (the legacy root-file layout falls back to an atomic
+single-file replace).  The command **re-runs the matching check script by
+default** — ``check_question_bank.py`` against ``--db`` for ``--questions``,
+``check_glossary.py`` offline for ``--glossary`` — and refuses to switch over
+content that fails it.  ``--skip-preflight`` is the explicit, discouraged escape
+hatch.  A brand-new course created with ``--add`` has no history to diff, so its
+question bank is gated by schema validation only.  Nothing here restarts a
+worker or bumps a generation.
 
 Exit codes: ``0`` success, ``1`` validation/publish refused, ``2`` usage.
 """
@@ -69,11 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable", action="store_true")
     parser.add_argument("--disable", action="store_true")
     parser.add_argument(
-        "--run-preflight",
+        "--skip-preflight",
         action="store_true",
         help=(
-            "also run the matching check script before publishing: "
-            "check_question_bank.py (diff against --db) for --questions, "
+            "publish without running the matching check script first "
+            "(not recommended): check_question_bank.py for --questions, "
             "check_glossary.py for --glossary"
         ),
     )
@@ -133,7 +137,7 @@ def _add_course(args: argparse.Namespace) -> int:
     except (ToolingError, OSError) as exc:
         print(f"候选内容校验失败，未创建课程：\n{exc}", file=sys.stderr)
         return 1
-    if args.glossary is not None:
+    if args.glossary is not None and not args.skip_preflight:
         exit_code = _run_glossary_check(
             args.questions.resolve(), args.glossary.resolve()
         )
@@ -236,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
         except (ToolingError, OSError) as exc:
             print(f"候选题库校验失败，未替换任何文件：\n{exc}", file=sys.stderr)
             return 1
-        if args.run_preflight:
+        if not args.skip_preflight:
             from scripts.check_question_bank import main as check_main
 
             exit_code = check_main(
@@ -279,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         except (ToolingError, OSError) as exc:
             print(f"候选术语表校验失败，未替换任何文件：\n{exc}", file=sys.stderr)
             return 1
-        if args.run_preflight:
+        if not args.skip_preflight:
             exit_code = _run_glossary_check(
                 definition.questions_path, args.glossary.resolve()
             )

@@ -637,14 +637,14 @@ pytest -q
 candidate.json
     ↓  python scripts/check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db
     ↓  （--strict 时，会清理学习状态的更新返回非 0；--simulate 会用临时数据库副本跑一次真实 reconciliation）
-    ↓  python scripts/swap_question_bank.py --course <course_id> candidate.json --db instance/mcq.db
+    ↓  python scripts/publish_course.py --course <course_id> --questions candidate.json --db instance/mcq.db
     ↓  冻结候选字节 → 写入不可变 versions/<sha256>/questions.json
     ↓  发布锁内重新校验 baseline → 单次 os.replace 原子切换 course.json
     ↓  更新 worker（systemctl restart mcq-template.service）
     ↓  curl http://127.0.0.1:8001/ready/<course_id> 确认 200
 ```
 
-`swap_question_bank.py` 只读一次候选文件，校验与发布使用**同一份字节**；它输出 `published, pending worker activation`，**不会**自行推进 generation（由 worker 启动时的 reconciliation 完成），也不声称文件系统发布与数据库激活是同一个事务。回滚就是把旧内容当作新候选再发布一次，不要手工改 `generation`。
+`publish_course.py --questions` 只读一次候选文件，校验与发布使用**同一份字节**；它输出 `published, pending worker activation`，**不会**自行推进 generation（由 worker 启动时的 reconciliation 完成），也不声称文件系统发布与数据库激活是同一个事务。回滚就是把旧内容当作新候选再发布一次，不要手工改 `generation`。
 
 预检脚本的退出码含义：`0` 可部署（可能同时打印“将清理学习状态”的警告），`1` 题库校验失败，`2` 非法复用退役 ID（该课程会被标记为不可用），`3` 仅在使用 `--strict` 时出现，表示更新会清理学习状态，`4` 课程无法解析或数据库尚未迁移（未迁移的数据库只能映射到 legacy 课程）。**只要输出中出现清理学习状态的警告，脚本就不会打印“可以安全部署”**；请确认可以接受后再部署。
 

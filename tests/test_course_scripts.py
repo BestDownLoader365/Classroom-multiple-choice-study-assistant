@@ -17,7 +17,6 @@ from scripts.course_tooling import (
     resolve_definition,
 )
 from scripts.publish_course import main as publish_course_main
-from scripts.swap_question_bank import main as swap_main
 from tests.conftest import (
     course_bank,
     course_glossary,
@@ -136,7 +135,9 @@ def test_check_question_bank_refuses_a_non_legacy_course_on_a_legacy_database(
     assert "has not been migrated" in capsys.readouterr().err
 
 
-def test_swap_publishes_immutably_and_switches_the_manifest(world, tmp_path):
+def test_publish_course_questions_is_immutable_and_switches_the_manifest(
+    world, tmp_path
+):
     app, courses_dir, database, _digest = world
     candidate = tmp_path / "candidate.json"
     changed = course_bank(("a", "alpha"))
@@ -145,8 +146,8 @@ def test_swap_publishes_immutably_and_switches_the_manifest(world, tmp_path):
     expected_bytes = candidate.read_bytes()
     expected_digest = hashlib.sha256(expected_bytes).hexdigest()
 
-    exit_code = swap_main(
-        [str(candidate), "--course", A, *cli_common(courses_dir, database)]
+    exit_code = publish_course_main(
+        ["--course", A, "--questions", str(candidate), *cli_common(courses_dir, database)]
     )
 
     assert exit_code == 0
@@ -169,6 +170,53 @@ def test_swap_publishes_immutably_and_switches_the_manifest(world, tmp_path):
     assert text == "Rewritten for alpha"
 
 
+def test_publish_course_questions_preflight_blocks_unless_skipped(tmp_path):
+    """``--questions`` is gated by ``check_question_bank.py``; --skip-preflight opts out."""
+    import sqlite3
+
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank())
+    candidate = tmp_path / "candidate.json"
+    write_json(candidate, course_bank())
+
+    # An unmigrated database cannot be diffed against a non-legacy course.
+    database = tmp_path / "old.db"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        "CREATE TABLE question_registry ("
+        "question_id TEXT PRIMARY KEY, status TEXT, question_type TEXT, "
+        "option_ids TEXT, correct_answers TEXT, content_fingerprint TEXT, "
+        "first_seen_at TEXT, last_seen_at TEXT, retired_at TEXT);"
+    )
+    connection.commit()
+    connection.close()
+
+    common = [
+        "--course",
+        A,
+        "--courses-dir",
+        str(courses_dir),
+        "--question-file",
+        str(tmp_path / "absent" / "questions.json"),
+        "--glossary-file",
+        str(tmp_path / "absent" / "glossary.json"),
+        "--db",
+        str(database),
+    ]
+    before = (courses_dir / A / "course.json").read_bytes()
+
+    assert publish_course_main(["--questions", str(candidate), *common]) == 4
+    assert (courses_dir / A / "course.json").read_bytes() == before
+
+    assert (
+        publish_course_main(
+            ["--questions", str(candidate), "--skip-preflight", *common]
+        )
+        == 0
+    )
+    assert b"versions" in (courses_dir / A / "course.json").read_bytes()
+
+
 def test_failed_publish_leaves_the_publication_untouched(world, tmp_path):
     app, courses_dir, database, _digest = world
     del app
@@ -176,8 +224,8 @@ def test_failed_publish_leaves_the_publication_untouched(world, tmp_path):
     broken = tmp_path / "broken.json"
     broken.write_text('{"questions": [}', encoding="utf-8")
 
-    exit_code = swap_main(
-        [str(broken), "--course", A, *cli_common(courses_dir, database)]
+    exit_code = publish_course_main(
+        ["--course", A, "--questions", str(broken), *cli_common(courses_dir, database)]
     )
 
     assert exit_code == 1
@@ -191,11 +239,12 @@ def test_unknown_course_is_refused(world, tmp_path):
     write_json(candidate, course_bank())
 
     assert (
-        swap_main(
+        publish_course_main(
             [
-                str(candidate),
                 "--course",
                 "does_not_exist",
+                "--questions",
+                str(candidate),
                 *cli_common(courses_dir, database),
             ]
         )
@@ -327,7 +376,7 @@ def test_publish_course_runs_the_glossary_check_before_switching_over(
 
     assert (
         publish_course_main(
-            ["--course", A, "--glossary", str(glossary), "--run-preflight", *common]
+            ["--course", A, "--glossary", str(glossary), *common]
         )
         == 0
     )
@@ -345,10 +394,7 @@ def test_publish_course_runs_the_glossary_check_before_switching_over(
     write_json(broken, payload)
 
     assert (
-        publish_course_main(
-            ["--course", A, "--glossary", str(broken), "--run-preflight", *common]
-        )
-        == 1
+        publish_course_main(["--course", A, "--glossary", str(broken), *common]) == 1
     )
     assert (courses_dir / A / "course.json").read_bytes() == before
     capsys.readouterr()

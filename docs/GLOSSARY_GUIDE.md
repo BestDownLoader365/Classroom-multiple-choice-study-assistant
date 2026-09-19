@@ -270,9 +270,9 @@ pytest -q
 5. 编写简洁、课程语境明确的中英文定义。
 6. 运行 `python -m json.tool`、`python scripts/check_glossary.py --course <course_id>` 覆盖校验；课程目录或 manifest 有改动时再跑 `python scripts/check_courses.py`。
 7. 人工处理 orphan 与候选报告，不要把候选结果直接批量写入术语库。
-8. 校验通过后再部署 `questions.json` 和 `glossary.json`（`python scripts/publish_course.py --course <course_id> --questions ... --glossary ... --run-preflight` 可一次发布两者），重启应用进程并完成浏览器验收。
+8. 校验通过后再部署 `questions.json` 和 `glossary.json`（`python scripts/publish_course.py --course <course_id> --questions ... --glossary ...` 可一次发布两者，默认会重跑对应校验），重启应用进程并完成浏览器验收。
 
-更换 `questions.json` 时按 [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) 第 11.6 节发布：先预检（`--course <course_id>`）、再原子发布（`swap_question_bank.py` / `publish_course.py`）、最后更新 worker。题库按 `question.id` **在该课程内**逐题增量同步，**不会重置该课程的学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进**该课程**的 generation，让仍在运行旧内容的 worker 只在该课程的学习页面返回 503，因此这类发布要更新 worker，但**不影响其他课程**。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。发布新课程时建议两个文件一起审核，避免旧术语出现在新题库中。
+更换 `questions.json` 时按 [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) 第 11.6 节发布：先预检（`--course <course_id>`）、再原子发布（`publish_course.py --questions`）、最后更新 worker。题库按 `question.id` **在该课程内**逐题增量同步，**不会重置该课程的学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进**该课程**的 generation，让仍在运行旧内容的 worker 只在该课程的学习页面返回 503，因此这类发布要更新 worker，但**不影响其他课程**。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。发布新课程时建议两个文件一起审核，避免旧术语出现在新题库中。
 
 ## 13. 发布前检查清单
 
@@ -287,5 +287,5 @@ pytest -q
 - [ ] 分类名称与粒度一致，词条顺序符合学习需要。
 - [ ] 标准 JSON、GlossaryLoader、`check_glossary.py` 覆盖校验、`check_courses.py` 和完整测试集已运行且通过。
 - [ ] orphan 和候选报告已经人工复核。
-- [ ] 校验全部通过后才执行 publish course（`--glossary … --run-preflight`）；任一校验失败时没有发布任何内容。
+- [ ] 校验全部通过后才执行 publish course（`publish_course.py --glossary …`，默认会重跑 `check_glossary.py`）；任一校验失败时没有发布任何内容。
 - [ ] 已更新 worker 并完成桌面端、手机端、鼠标和键盘验收。

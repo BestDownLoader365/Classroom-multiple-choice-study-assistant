@@ -19,8 +19,8 @@ registry writes.  Every other mode resolves the course(s) through the
 application's own loader, so the same validation the workers run is reused here.
 
 Nothing is published by this script.  Run it *before* publishing; the publish
-commands (``publish_course.py``, ``swap_question_bank.py``) refuse to switch over
-content that does not pass its check.
+command (``publish_course.py``) re-runs the matching check by default and refuses
+to switch over content that does not pass it.
 
 Exit codes: ``0`` the glossary is valid (orphan/candidate reports are advisory),
 ``1`` the glossary (or its corpus) fails to load or fails validation.

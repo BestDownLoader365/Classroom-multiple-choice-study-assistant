@@ -1160,17 +1160,21 @@ def test_check_question_bank_script_reports_catalogue_and_label_changes(
     assert "将清理" not in captured.err
 
 
-def test_swap_question_bank_publishes_atomically(tmp_path, valid_payload, capsys):
+def test_publish_course_switches_the_legacy_bank_atomically(
+    tmp_path, valid_payload, capsys
+):
     """The legacy single-file layout is still switched over atomically."""
     from app.repositories import QuestionLoader
-    from scripts.swap_question_bank import main
+    from scripts.publish_course import main
 
     # Building the app registers the ``legacy`` course so the read-only preflight
     # has a real baseline to diff against.
     make_app(tmp_path, valid_payload)
     target = tmp_path / "questions.json"
     candidate = write_json(tmp_path / "candidate.json", valid_payload)
-    common = [
+    base = [
+        "--course",
+        "legacy",
         "--courses-dir",
         str(tmp_path / "absent" / "courses"),
         "--question-file",
@@ -1181,7 +1185,7 @@ def test_swap_question_bank_publishes_atomically(tmp_path, valid_payload, capsys
         str(tmp_path / "mcq.db"),
     ]
 
-    assert main([str(candidate), *common]) == 0
+    assert main(["--questions", str(candidate), *base]) == 0
     assert "统一重启" in capsys.readouterr().out
     published = json.loads(target.read_text(encoding="utf-8"))
     assert [question["id"] for question in published["questions"]] == ["q1", "q2"]
@@ -1192,8 +1196,8 @@ def test_swap_question_bank_publishes_atomically(tmp_path, valid_payload, capsys
     # An invalid or missing candidate never touches the live file.
     broken = tmp_path / "broken.json"
     broken.write_text('{"questions": [}', encoding="utf-8")
-    assert main([str(broken), *common]) == 1
-    assert main([str(tmp_path / "missing.json"), *common]) == 1
+    assert main(["--questions", str(broken), *base]) == 1
+    assert main(["--questions", str(tmp_path / "missing.json"), *base]) == 1
     assert json.loads(target.read_text(encoding="utf-8")) == published
 
 

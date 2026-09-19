@@ -285,21 +285,21 @@ python scripts/rename_course.py --db instance/mcq.db --from legacy --to eek5106 
 # 1) 只读预检（同一份数据库快照，只读打开）
 python scripts/check_question_bank.py --course physical_design candidate.json --db instance/mcq.db
 
-# 2) 原子发布
-python scripts/swap_question_bank.py --course physical_design candidate.json --db instance/mcq.db
+# 2) 原子发布（默认重跑上面的预检；--skip-preflight 才可跳过，不推荐）
+python scripts/publish_course.py --course physical_design --questions candidate.json --db instance/mcq.db
 
 # 3) 统一重启 worker，并确认
 curl -i http://127.0.0.1:8001/ready/physical_design
 ```
 
-`swap_question_bank.py` 的顺序是：**一次性**读取候选文件字节 → 用同一份字节校验 → 只读预检 → 写入不可变
+`publish_course.py --questions` 的顺序是：**一次性**读取候选文件字节 → 用同一份字节校验 → 只读预检 → 写入不可变
 的 `versions/<sha256>/questions.json` → 在课程发布锁内**重新验证** baseline → 单次 `os.replace` 原子切换
 manifest → fsync 目录。它输出 `published, pending worker activation`，**不会**自行 bump generation，也
 **不**声称文件系统发布与数据库激活是同一个事务。
 
-`--course` 在只声明了一门启用课程时可以省略；多课程部署请始终显式指定。
+`--course` 对本命令是必填；多课程部署请始终显式指定。
 
-回滚走正常流程：把旧内容当作新候选再发布一次（`check_question_bank.py` + `swap_question_bank.py`），
+回滚走正常流程：把旧内容当作新候选再发布一次（`check_question_bank.py` + `publish_course.py --questions`），
 **不允许**手工 `generation--`。
 
 ### 7.6 术语表校验
@@ -313,7 +313,7 @@ python scripts/check_glossary.py --questions path/questions.json --glossary path
 校验只读取内容，不修改 registry、generation 或任何学习数据。校验通过后再发布：
 
 ```bash
-python scripts/publish_course.py --course physical_design --glossary new_glossary.json --run-preflight
+python scripts/publish_course.py --course physical_design --glossary new_glossary.json
 ```
 
 ### 7.7 故障定位
@@ -335,15 +335,15 @@ journalctl -u mcq-template.service -n 100 --no-pager | grep -E 'is stale|is unav
 | 变更对象 | 校验脚本（只读） | 发布命令 |
 | --- | --- | --- |
 | 课程目录 / manifest / 整门课能否加载 | `check_courses.py` | `publish_course.py --add` / `--enable` / `--disable` |
-| `questions.json` | `check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` | `swap_question_bank.py --course <course_id> candidate.json --db instance/mcq.db`（或 `publish_course.py --questions … --run-preflight`） |
-| `glossary.json` | `check_glossary.py --course <course_id>` | `publish_course.py --course <course_id> --glossary new_glossary.json --run-preflight` |
+| `questions.json` | `check_question_bank.py --course <course_id> candidate.json --db instance/mcq.db` | `publish_course.py --course <course_id> --questions candidate.json --db instance/mcq.db` |
+| `glossary.json` | `check_glossary.py --course <course_id>` | `publish_course.py --course <course_id> --glossary new_glossary.json` |
 
 固定流程（缺一不可）：
 
 1. **准备校验脚本**：确认该内容种类已有 `check_<校验对象>.py`；若还没有，先补齐脚本与测试。
 2. **修改内容**：只编辑候选文件，不要原地覆盖正在使用的 `questions.json` / `glossary.json`。
 3. **运行校验**：`check_courses.py` 必须始终通过；题库再跑 `check_question_bank.py`，术语表再跑 `check_glossary.py`。
-4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`swap_question_bank.py` 与 `publish_course.py --run-preflight` 会在写入前内部重跑校验并拒绝未通过的内容）。发布是纯文件系统切换，最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
+4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换，最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
 
 校验未通过时不得发布：schema 校验失败或校验脚本返回非零时，发布命令不会替换、不会创建任何文件，也不会推进 generation。
 
