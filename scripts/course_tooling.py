@@ -51,7 +51,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from app.models import (  # noqa: E402
     CourseDefinition,
     CourseDefinitionError,
+    validate_course_id,
 )
+from app.models.course import CourseIdError  # noqa: E402
 from app.repositories import CourseLoader  # noqa: E402
 
 VERSIONS_DIRECTORY = "versions"
@@ -110,6 +112,33 @@ def preferred_candidate(
     return published, "published"
 
 
+def new_course_hint(loader: CourseLoader, course_id: str) -> str:
+    """Explain how to proceed when a directory exists but declares no course.
+
+    ``courses/<course_id>/`` holding only working copies
+    (``questions_candidate.json`` / ``glossary_candidate.json``) is *not* a
+    declared course: the loader only knows courses with a ``course.json``
+    manifest, so every ``--course`` lookup fails until ``publish_course.py
+    --add`` has created it.  The requested id is validated as a slug before it
+    is ever used in a path, so a mistyped or hostile value cannot escape
+    ``courses/``.  Returns ``""`` when there is nothing to explain.
+    """
+    try:
+        slug = validate_course_id(course_id)
+    except CourseIdError:
+        return ""
+    course_root = loader.courses_root / slug
+    if not course_root.is_dir():
+        return ""
+    if (course_root / "course.json").is_file():  # pragma: no cover - defensive
+        return ""
+    return (
+        f"提示：{course_root} 里只有候选文件，还没有 course.json。新课程请先用 "
+        "publish_course.py --course <course_id> --add ... 创建（它会校验候选并写入 "
+        "manifest），之后 --course 才能解析这门课。"
+    )
+
+
 def resolve_definition(
     loader: CourseLoader, course_id: str | None, *, require_explicit: bool = False
 ) -> CourseDefinition:
@@ -121,9 +150,11 @@ def resolve_definition(
             declared = ", ".join(
                 item.course_id for item in loader.discover_definitions()
             )
+            hint = new_course_hint(loader, course_id)
             raise ToolingError(
                 f'Unknown course "{course_id}". Declared courses: '
                 f"{declared or '(none)'}."
+                + (f"\n{hint}" if hint else "")
             )
         return definition
     if require_explicit:

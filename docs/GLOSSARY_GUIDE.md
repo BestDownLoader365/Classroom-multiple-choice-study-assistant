@@ -26,7 +26,7 @@ courses/<course_id>/
 
 ## 2. 可直接使用的完整示例
 
-当前术语库使用 `schema_version: 1`。下面的统计学示例不依赖项目随附的半导体课程，可以直接通过 Loader 校验：
+当前术语库使用 `schema_version: 1`。下面的统计学示例不依赖部署中的半导体课程（例如 `eek5106`），可以直接通过 Loader 校验：
 
 ```json
 {
@@ -221,6 +221,10 @@ python scripts/check_glossary.py \
   --questions path/to/questions.json \
   --glossary path/to/glossary.json
 ```
+
+新增课程时，`--course <course_id>` 在 `courses/<course_id>/course.json` 存在之前无法解析（脚本会报 `Unknown course`，
+因为 loader 只认有 manifest 的课程目录）：先用 `python scripts/publish_course.py --course <course_id> --add ...` 创建
+课程（它会先校验候选），再运行上面的按课程校验；尚未创建课程时就用上面这段显式离线模式先校验候选文件。
 
 校验只读取内容，不会修改 `question_registry`、generation 或任何学习数据。
 

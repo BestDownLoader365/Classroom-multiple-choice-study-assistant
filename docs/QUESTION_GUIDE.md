@@ -633,6 +633,11 @@ pytest -q
 
 题库文件属于一门课程，发布流程按**课程**执行（`<course_id>` 是该课程的 manifest 身份；一门启用课程时可以省略 `--course`）。候选文件放在课程目录里，默认路径为 `courses/<course_id>/questions_candidate.json`：
 
+> 上面的流程从"已存在的课程"开始。新增一门课时，`--course` 在 `courses/<course_id>/course.json` 存在之前无法解析
+> （预检会返回 `4` / `Unknown course`，因为 loader 只认有 manifest 的课程目录），要先运行
+> `python scripts/publish_course.py --course <course_id> --add ...` 创建课程（它会校验候选并写入 manifest），再按
+> 上面的顺序预检与发布；完整步骤见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.2 节。
+
 ```text
 courses/<course_id>/questions_candidate.json
     ↓  python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db

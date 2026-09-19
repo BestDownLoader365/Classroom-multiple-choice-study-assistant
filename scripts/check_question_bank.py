@@ -23,6 +23,15 @@ The candidate is resolved in this order (``--help`` shows the same default):
 Deleting the working copy therefore restores the old "re-check what is deployed"
 behaviour, and ``--published`` makes that explicit while a candidate exists.
 
+A brand-new course cannot be named by ``--course`` before it exists:
+``courses/<course_id>/course.json`` is what declares a course, and
+``publish_course.py --add`` is what writes it (``--add`` runs the same schema
+validation on the frozen candidate bytes).  Until then ``--course <new_id>``
+reports ``Unknown course`` and exits ``4``.  The positional-path form without
+``--course`` is *not* a substitute for a course that is not declared yet: such a
+candidate is read as the legacy deployment's root content location and diffed
+against the persisted legacy namespace, so its report is about the wrong course.
+
 Everything is scoped to one course: the course's own registry, its own bank
 state row and its own generation.  A course A check never reads or reports
 course B's history.
@@ -94,6 +103,7 @@ from app.repositories.schema_migrations import (  # noqa: E402
 from app.services import catalogue_fingerprint, diff_questions  # noqa: E402
 from scripts.course_tooling import (  # noqa: E402
     QUESTIONS_CANDIDATE_NAME,
+    new_course_hint,
     preferred_candidate,
 )
 
@@ -422,9 +432,11 @@ def resolve_definition(args: argparse.Namespace) -> CourseDefinition:
         definition = loader.find_definition(args.course)
         if definition is None:
             known = [item.course_id for item in loader.discover_definitions()]
+            hint = new_course_hint(loader, args.course)
             raise ScriptError(
                 f'Unknown course "{args.course}". Declared courses: '
                 f"{', '.join(known) if known else '(none)'}."
+                + (f"\n{hint}" if hint else "")
             )
         return definition
 

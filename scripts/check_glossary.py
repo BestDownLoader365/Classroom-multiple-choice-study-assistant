@@ -24,6 +24,11 @@ forces the deployed files.
 ``--questions``/``--glossary`` run fully offline: no catalogue, no database and no
 registry writes.  Every other mode resolves the course(s) through the
 application's own loader, so the same validation the workers run is reused here.
+``--course <course_id>`` resolves through that catalogue as well, so a brand-new
+course must be created first (``publish_course.py --add`` writes its
+``course.json``) before a per-course check can name it; a glossary candidate for
+a course that does not exist yet is still checkable with the explicit
+``--questions``/``--glossary`` offline mode above.
 
 Nothing is published by this script.  Run it *before* publishing; the publish
 command (``publish_course.py``) re-runs the matching check by default and refuses

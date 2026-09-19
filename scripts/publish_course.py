@@ -4,12 +4,16 @@ This is the single publish entry point for every course-content type.  Every
 change follows the same check-then-publish flow: run the matching
 ``check_<subject>.py`` gate first, and only publish when it exits ``0``::
 
-    # 1) check the candidates (read-only; publishes nothing)
+    # existing course: check the candidates (read-only) first
     python scripts/check_question_bank.py --course physical_design --db instance/mcq.db
     python scripts/check_glossary.py --course physical_design
 
-    # 2) add a new course: put questions_candidate.json (and optionally
-    #    glossary_candidate.json) in courses/<course_id>/ first, then
+    # brand-new course: the per-course gates resolve ``--course`` through the
+    # catalogue, so a courses/<course_id>/ directory without course.json is
+    # ignored and ``--course <new_id>`` reports "Unknown course" until the
+    # course is declared.  Put the candidates in courses/<course_id>/ and create
+    # the course first -- ``--add`` validates those frozen bytes itself and
+    # writes the manifest -- then the two checks above can name the new course.
     python scripts/publish_course.py --course physical_design --add \
         --title "Physical Design"
 

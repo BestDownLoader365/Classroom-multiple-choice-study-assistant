@@ -1206,3 +1206,73 @@ def test_delete_course_refuses_the_persisted_legacy_namespace(tmp_path, capsys):
     assert "legacy_course_id" in capsys.readouterr().err
     assert _snapshot(database, "legacy") == before
 
+
+
+def test_new_course_gates_require_the_manifest_written_by_add(tmp_path, capsys):
+    """``--course`` cannot resolve a directory that only holds candidates yet.
+
+    This is the documented trap for a brand-new course: only ``course.json``
+    (written by ``--add``) declares a course, so both read-only gates must
+    explain that instead of silently checking some other namespace.
+    """
+    courses_dir = tmp_path / "courses"
+    target = courses_dir / "physical_design"
+    target.mkdir(parents=True)
+    write_json(target / "questions_candidate.json", course_bank())
+    write_json(target / "glossary_candidate.json", course_glossary("alpha"))
+    absent_questions = str(courses_dir.parent / "absent" / "questions.json")
+    absent_glossary = str(courses_dir.parent / "absent" / "glossary.json")
+    courses_args = ["--courses-dir", str(courses_dir)]
+    glossary_args = [
+        "--course",
+        "physical_design",
+        *courses_args,
+        "--question-file",
+        absent_questions,
+    ]
+
+    assert check_glossary_main(glossary_args) == 1
+    assert "Unknown course" in capsys.readouterr().err
+
+    assert (
+        check_main(
+            [
+                "--course",
+                "physical_design",
+                "--db",
+                str(tmp_path / "mcq.db"),
+                *courses_args,
+                "--question-file",
+                absent_questions,
+                "--glossary-file",
+                absent_glossary,
+            ]
+        )
+        == 4
+    )
+    err = capsys.readouterr().err
+    assert "Unknown course" in err
+    # The hint names the command that declares the course.
+    assert "--add" in err and "publish_course.py" in err
+
+    # The documented order: create the course, then the same gates resolve it.
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                "physical_design",
+                "--add",
+                "--title",
+                "Physical Design",
+                *courses_args,
+                "--question-file",
+                absent_questions,
+                "--glossary-file",
+                absent_glossary,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert check_glossary_main(glossary_args) == 0
+

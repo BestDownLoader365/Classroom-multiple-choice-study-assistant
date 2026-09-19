@@ -153,6 +153,9 @@ repository 与 service 装配流程。不存在第二套业务逻辑。
 * 所有学习表单的 action URL 都包含课程；
 * CSRF 保留；
 * 表单携带服务端签名的 `form_context`，至少绑定 `course_id`、`operation`、`generation`；
+  其中 `operation` 是**表单提交目标**的操作（即 action URL 指向的路由），而不是渲染该表单的页面：
+  守卫用它与请求真正到达的端点比对，签成页面操作会让每次提交都被判为 stale form（409）。
+  模板统一写成 `form_context(<form action 的 endpoint>)`。
 * Quiz / Review 继续保留 `answer_token`；
 * Exam 表单额外绑定 `position` 与 `question_id`，事务内重新确认 `position -> 同一 question_id`，
   防止 startup reconciliation 重排槽位后旧页面写到别的题目。
@@ -272,28 +275,48 @@ python scripts/check_courses.py --json     # 机器可读
 
 ### 7.2 新增课程（从零开始）
 
+**顺序要点：`--course` 只能解析「已声明的课程」。** 声明一门课的只有 `courses/<course_id>/course.json`，而这个
+manifest 由 `publish_course.py --add` 写入。只有候选文件、还没有 manifest 的目录会被 loader 忽略（日志与校验脚本
+都会打印 `Ignoring course directory …: no course.json found`），此时把新 ID 传给 `--course` 只会得到
+`Unknown course "<course_id>"`（`check_question_bank.py` 退出码 4，`check_glossary.py` 退出码 1）。因此新课程是
+「先创建、再按课程校验」，而不是像已有课程那样「先校验候选、再发布」。
+
 完整流程（`<course_id>` 用小写 slug，例如 `physical_design`）：
 
 ```bash
-# 1) 创建课程目录和候选文件（候选文件是唯一的输入）
+# 1) 创建课程目录和候选文件（候选文件是唯一的内容输入）
 mkdir -p courses/physical_design
 cp my_questions.json  courses/physical_design/questions_candidate.json
 cp my_glossary.json   courses/physical_design/glossary_candidate.json   # 可选；不需要术语表就跳过
 
-# 2) 校验候选：题库 schema + 与数据库的差异；术语表 schema + 覆盖度
+# 2) 创建课程：读取候选 → schema/术语表校验 → 写入 course.json 与已发布副本
+#    （任何一项校验失败都不会创建目录、也不会写入任何文件）
+python scripts/publish_course.py --course physical_design --add \
+  --title "Physical Design" --title-zh "物理设计" --order 20
+
+# 3) 课程已被声明，现在按课程校验（默认读候选文件，见 7.1 节）
 python scripts/check_question_bank.py --course physical_design --db instance/mcq.db
 python scripts/check_glossary.py --course physical_design
 
-# 3) 修复检查结果（见下表），重复 2) 直到退出码为 0
-
-# 4) 创建课程：发布候选内容并写入 manifest
-python scripts/publish_course.py --course physical_design --add \
-  --title "Physical Design" --title-zh "物理设计" --order 20
+# 4) 修复检查结果（见下表），重复 3) 直到退出码为 0
 
 # 5) 统一重启全部 worker，并验证
 curl -i http://127.0.0.1:8001/ready/physical_design
 python scripts/check_courses.py
 ```
+
+第 2 步与第 3 步的分工：
+
+* `--add` 对**新课程没有历史可比对**，所以它只做 schema 门禁（题库 `validate_bytes`、术语表离线覆盖校验），退出码
+  非 0 时不会创建课程目录；真正「与数据库比对」的报告只能在第 3 步做。
+* 第 3 步在 worker 首次启动之前运行也没问题：数据库里还没有该课程的 `question_registry` / `question_bank_state`
+  行，检查会明确报告「该课程在数据库中没有 question_registry 记录：首次启动将建立基线」，退出码为 `0`；真实的历史
+  差异要等该课程已激活后再用同一命令复查（那时它会读到已建立的基线）。
+* 术语表在课程创建**之前**也可以校验：显式离线模式不要求课程存在：
+  `python scripts/check_glossary.py --questions courses/physical_design/questions_candidate.json --glossary courses/physical_design/glossary_candidate.json`。
+* **不要**在课程创建前用位置参数校验新题库（`check_question_bank.py courses/physical_design/questions_candidate.json`）：
+  当候选不属于任何已声明课程且没有 `--course` 时，它会把该候选当作 legacy 部署的根内容位置，与持久化的 legacy
+  命名空间比对，报告出的 `deleted` / `learner state will be cleared` 与你真正要新增的课程无关。
 
 执行 `--add` 后创建/更新的文件：
 
@@ -307,6 +330,9 @@ python scripts/check_courses.py
 `--add` 只做 schema 校验（新课程没有历史可比对），并提示 `created, pending worker activation`；重启 worker 后
 `/ready/<course_id>` 应返回 `ready`，`check_courses.py` 应列出该课程且状态为 `ok`。已有课程只能用
 `--questions`/`--glossary` 发布新内容，`--add` 会拒绝覆盖。
+
+`courses` 表的那一行由 worker 启动时写入，`--add` 本身只改文件系统，所以新课程在第一次成功启动前，任何
+`--course <course_id>` 校验都还没有历史可比对；这不是错误，见第 3 步的说明。
 
 检查结果的常见修复：
 
@@ -500,6 +526,11 @@ journalctl -u mcq-template.service -n 100 --no-pager | grep -E 'is stale|is unav
 4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换，最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
 
 校验未通过时不得发布：schema 校验失败或校验脚本返回非零时，发布命令不会替换、不会创建任何文件，也不会推进 generation。
+
+> **新增一门课是这张表的例外顺序。** 上表默认课程已经存在；而 `check_courses.py` 只报告已声明（已有
+> `course.json`）的课程，`check_question_bank.py --course <course_id>` / `check_glossary.py --course <course_id>` 在
+> 课程创建前都会报 `Unknown course`（没有 manifest 的目录被 loader 忽略）。新课程的顺序是
+> `publish_course.py --add`（自带题库 schema 与术语表门禁）→ 再用 `--course` 补跑上表的只读校验，完整步骤见 7.2 节。
 
 ---
 

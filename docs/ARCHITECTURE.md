@@ -91,28 +91,29 @@ MCQ_Template/
 ├── wsgi.py
 ├── gunicorn.conf.py
 ├── requirements.txt
-├── questions.json
-├── glossary.json
 ├── README.md
 ├── pytest.ini
+├── .gitignore                     # instance/, courses/ and root *.json are not versioned
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── COURSE_GUIDE.md
 │   ├── FRONTEND_DESIGN_SYSTEM.md
-│   ├── QUESTION_GUIDE.md
-│   └── GLOSSARY_GUIDE.md
+│   ├── GLOSSARY_GUIDE.md
+│   ├── MULTI_COURSE_MIGRATION.md
+│   └── QUESTION_GUIDE.md
 ├── deploy/
 │   ├── mcq-template.service
 │   └── nginx-mcq-template.conf
 ├── instance/
 │   └── mcq.db
-├── courses/                       # one directory per course (manifest layout)
+├── courses/                       # one directory per course; content is not versioned
 │   └── <course_id>/
-│       ├── course.json            # manifest: course_id, title, enabled, paths
+│       ├── course.json            # manifest: course_id, title, enabled, order, paths
 │       ├── questions_candidate.json   # working copy the CLI reads by default
 │       ├── glossary_candidate.json    # optional glossary working copy
-│       ├── questions.json
+│       ├── questions.json         # published copy (plain-file layout)
 │       ├── glossary.json          # optional; `"glossary": null` means none
-│       └── versions/<sha256>/     # immutable publications written by the tooling
+│       └── versions/<sha256>/     # immutable publications a manifest may point at
 ├── app/
 │   ├── __init__.py
 │   ├── course_runtime.py          # CourseRegistry / CourseState / AppServices
@@ -142,6 +143,8 @@ MCQ_Template/
 │   │   └── weak_knowledge_point_repository.py
 │   ├── services/
 │   │   ├── __init__.py
+│   │   ├── course_consistency.py  # Flask-independent learner-write guard
+│   │   ├── course_service.py      # one course's dependency graph + reconciliation
 │   │   ├── grading_service.py
 │   │   ├── local_time.py
 │   │   ├── progress_state.py
@@ -157,6 +160,7 @@ MCQ_Template/
 │   ├── web/
 │   │   ├── __init__.py
 │   │   ├── auth.py
+│   │   ├── course_context.py      # signed form contexts + course-aware url_for
 │   │   └── view_helpers.py
 │   ├── routes/
 │   │   ├── __init__.py
@@ -164,6 +168,7 @@ MCQ_Template/
 │   ├── templates/
 │   │   ├── base.html
 │   │   ├── auth.html
+│   │   ├── courses.html
 │   │   ├── error.html
 │   │   ├── glossary.html
 │   │   ├── home.html
@@ -192,34 +197,41 @@ MCQ_Template/
 │   ├── start_production.sh
 │   └── stop_production.sh
 └── tests/
+    ├── __init__.py
     ├── conftest.py
     ├── test_bundled_glossary.py
+    ├── test_bundled_question_bank.py
+    ├── test_course_isolation.py
+    ├── test_course_loader.py
+    ├── test_course_migration.py
+    ├── test_course_scripts.py
+    ├── test_course_web.py
+    ├── test_dashboard_web.py
+    ├── test_exam_service.py
+    ├── test_exam_web.py
+    ├── test_form_context.py
+    ├── test_global_statistics_service.py
     ├── test_glossary_loader.py
     ├── test_glossary_repository.py
     ├── test_glossary_web.py
-    ├── test_repositories.py
-    ├── test_question_loader.py
-    ├── test_question_bank_sync.py
-    ├── test_question_metadata_migration.py
     ├── test_grading_service.py
-    ├── test_local_time.py
-    ├── test_quiz_service.py
-    ├── test_wrong_question_service.py
     ├── test_learning_upgrade.py
+    ├── test_local_time.py
+    ├── test_progress_state.py
+    ├── test_progress_sync.py
+    ├── test_question_bank_sync.py
+    ├── test_question_loader.py
+    ├── test_quiz_service.py
+    ├── test_repositories.py
+    ├── test_security.py
     ├── test_srs.py
     ├── test_srs_web.py
-    ├── test_security.py
-    ├── test_statistics_service.py
-    ├── test_global_statistics_service.py
-    ├── test_exam_service.py
-    ├── test_exam_web.py
-    ├── test_dashboard_web.py
-    ├── test_stats_web.py
-    ├── test_progress_sync.py
-    ├── test_progress_state.py
     ├── test_stale_worker.py
+    ├── test_statistics_service.py
+    ├── test_stats_web.py
+    ├── test_view_helpers.py
     ├── test_web.py
-    └── test_bundled_question_bank.py
+    └── test_wrong_question_service.py
 ```
 
 ### Root files
@@ -248,24 +260,36 @@ Contains source-controlled templates for the `mcq-template.service` systemd unit
 
 Convenience operations scripts for WSL. The start script validates Nginx, starts Gunicorn and Nginx, verifies both services, and polls the `/ready` readiness URL (which fails while a worker still serves a superseded question bank). The stop script stops Nginx before Gunicorn and verifies that both are inactive. They control already-deployed services and do not copy templates into `/etc`.
 
-#### `questions.json`
+#### `courses/<course_id>/questions.json` (or the optional legacy root `questions.json`)
 
-Contains the complete question bank. Every application process reads and validates it once during startup. Editing this file requires restarting the active server: `python run.py` in development or `mcq-template.service` in production. Replace it atomically (`scripts/publish_course.py --questions`) rather than with `cp` or an editor save: a partially written file is read by a worker starting in that window and reported as misleading invalid JSON.
+Holds one course's complete question bank; the course's manifest names the file that is
+loaded (a plain `questions.json` or an immutable `versions/<sha256>/questions.json`).
+Every application process reads and validates each enabled course's bank once during
+startup. Editing one requires restarting the active server: `python run.py` in
+development or `mcq-template.service` in production. Publish it atomically
+(`scripts/publish_course.py`) rather than with `cp` or an editor save: a partially
+written file is read by a worker starting in that window and reported as misleading
+invalid JSON. A root `questions.json` without a manifest is still loaded as the
+`legacy` course, which is the pre-multi-course layout.
 
-#### `glossary.json`
+#### `courses/<course_id>/glossary.json` (or the optional legacy root `glossary.json`)
 
-Contains the active course's domain-neutral terminology metadata, canonical terms,
+Holds one course's domain-neutral terminology metadata, canonical terms,
 aliases, translations, definitions and optional categories. Every process validates
-and loads it once at startup. It is independent of learner state and of every
+and loads it once at startup, and a manifest may declare `"glossary": null` to state
+that the course has none. It is independent of learner state and of every
 question-bank fingerprint (`bank_version` plus the grading, content, placement and
 catalogue fingerprints), so glossary maintenance never triggers reconciliation and
 never fences sibling workers.
 
-#### `docs/QUESTION_GUIDE.md` and `docs/GLOSSARY_GUIDE.md`
+#### `docs/QUESTION_GUIDE.md`, `docs/GLOSSARY_GUIDE.md`, `docs/COURSE_GUIDE.md` and `docs/MULTI_COURSE_MIGRATION.md`
 
-These are the user-facing authoring contracts for the two startup-loaded JSON files.
-They document the fields accepted by the current loaders, validation commands,
-content-quality guidance, replacement behavior, and release checklists.
+The first two are the user-facing authoring contracts for the two startup-loaded JSON
+files. They document the fields accepted by the current loaders, validation commands,
+content-quality guidance, replacement behavior, and release checklists. `COURSE_GUIDE.md`
+covers the manifest, URLs, per-course publishing/disable/delete workflow and the
+new-course order of operations; `MULTI_COURSE_MIGRATION.md` covers the namespace
+migration, its field-level verification and rollback.
 
 #### `scripts/check_courses.py`
 
@@ -684,16 +708,19 @@ Resolves and converts the display timezone. Storage and all comparisons stay in 
 
 This module creates the Flask blueprint and defines all browser endpoints.
 
+Every learning row below is registered twice: canonically as `/course/<course_id><path>` (the URL's course is the only authority) and as the course-less legacy alias `<path>`. The alias redirects a `GET` after resolving the course and answers 409 to any other method, so a stale form is never guessed into a course from the session (see `resolve_course_context` below).
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Liveness: return `{"status":"ok"}` after application assembly succeeds; public and used for layered production checks |
 | GET | `/ready` | Aggregate readiness over this worker's *declared, enabled* courses: `{"status":"ready",...}` with 200 only while every one of them is `ready`, otherwise `{"status":"degraded","courses":{"<course_id>":{"status","worker_generation","database_generation","reason"},...},"enabled_course_count":N,"ready_course_count":M}` with 503. The aggregate is a monitoring signal only: a stale course A never makes course B's routes fail |
 | GET | `/ready/<course_id>` | Per-course readiness: 200 when that course is `ready`, 503 when it is `stale`/`unavailable`/`disabled`, 404 when no such course is declared |
-| GET/POST | `/login` | Show the login form or authenticate a user; a signed-in visitor is redirected to `/` on a healthy worker and to `/glossary` (with the bank-update notice) on a stale one |
+| GET/POST | `/login` | Show the login form or authenticate a user; a signed-in visitor is redirected to the preferred course's home on a healthy worker and to `/courses` (with the bank-update notice) when no course can be served |
 | GET/POST | `/register` | Show the registration form or create a user; the same stale-aware redirect applies after a successful registration |
 | POST | `/logout` | Clear the signed-in session |
-| GET | `/` | Show personal counts and practice controls |
-| GET | `/glossary` | Show the active course glossary with live search and category filtering |
+| GET | `/` | Redirect to the session's preferred course, or to `/courses` when none is known; a preference pointing at a course this worker cannot serve answers 503 instead of silently landing in another course |
+| GET | `/courses` | Show the course selector: one card per declared course with its status, linking only into a course that is `ready` |
+| GET | `/glossary` | Show this course's glossary with live search and category filtering |
 | POST | `/quiz/start` | Start or restart normal practice |
 | GET | `/quiz/setup` | Dynamically list course materials/chapters before normal practice |
 | GET | `/quiz` | Render the current normal-practice question or result |
@@ -716,13 +743,14 @@ This module creates the Flask blueprint and defines all browser endpoints.
 
 `/health` and `/ready` are registered directly on the Flask application before the web blueprint. They therefore do not run the blueprint's account requirement and do not expose learner, database, question, or secret data. `/health` answers while the process is merely alive (a stale worker must still be able to serve the login/logout pages); `/ready` is the signal monitoring and the start script should use, because a worker whose bank generation no longer matches the database only answers 503 for learning pages.
 
-The blueprint's second `before_request` hook, `resolve_course_context`, does three things. First it binds the request to exactly one course: the `<course_id>` URL variable is the only authority, and the course''s live state is recomputed against the database (so a course whose generation moved is fenced immediately, without any process-wide flag). A course-less legacy URL is redirected for a `GET` — resolving an `exam_id` to the course that actually owns it, after checking learner ownership — and refused with 409 for anything else, so a stale form is never guessed into a course from the session. Second, it rejects a `POST` whose signed `form_context` is missing or untrusted. Third, it records `session["last_course_id"]`, which is only a navigation preference for `/`. `POST /logout`, `GET /login`, `GET/POST /register`, `/courses`, and `GET /glossary` are exempt from the per-course fence, so a learner on a shared device can always sign out, pick another course, and read reference material. Those exempt account pages share `_redirect_after_sign_in()`, which never hands a learner to a page that can only answer 503: on a healthy worker it redirects to the course home, on a degraded one to `/courses` plus the notice "题库正在更新，暂时只能浏览课程列表与术语表；…". Each course''s 503 page names the affected course, renders "题库正在更新，请稍后刷新页面；如果长时间未恢复，请联系管理员。", sets `Retry-After`, offers the course selector and a logout form, and never links back into the same 503, so it cannot loop. The same request may also be rejected inside the write transaction by `app/services/course_consistency.py`, which re-checks the course''s servability, the worker''s loaded generation and the signed form context after `BEGIN IMMEDIATE`; that is what closes the "outer pre-check passed, sibling published, then we write" race.
+The blueprint's second `before_request` hook, `resolve_course_context`, does three things. First it binds the request to exactly one course: the `<course_id>` URL variable is the only authority, and the course''s live state is recomputed against the database (so a course whose generation moved is fenced immediately, without any process-wide flag). A course-less legacy URL is redirected for a `GET` — resolving an `exam_id` to the course that actually owns it, after checking learner ownership — and refused with 409 for anything else, so a stale form is never guessed into a course from the session. Second, it rejects a `POST` whose signed `form_context` is missing or untrusted; that token binds the course, the operation the form performs and the worker generation the page was rendered from. Third, it records `session["last_course_id"]`, which is only a navigation preference for `/`. `POST /logout`, `GET /login`, `GET/POST /register`, `/courses`, and `GET /glossary` are exempt from the per-course fence, so a learner on a shared device can always sign out, pick another course, and read reference material. Those exempt account pages share `_redirect_after_sign_in()`, which never hands a learner to a page that can only answer 503: on a healthy worker it redirects to the course home, on a degraded one to `/courses` plus the notice "题库正在更新，暂时只能浏览课程列表与术语表；…". Each course''s 503 page names the affected course, renders "题库正在更新，请稍后刷新页面；如果长时间未恢复，请联系管理员。", sets `Retry-After`, offers the course selector and a logout form, and never links back into the same 503, so it cannot loop. The same request may also be rejected inside the write transaction by `app/services/course_consistency.py`, which re-checks the course''s servability, the worker''s loaded generation and the signed form context after `BEGIN IMMEDIATE`; that is what closes the "outer pre-check passed, sibling published, then we write" race.
 
 ### `app/web/` request helpers
 
-Two small modules keep cross-cutting HTTP concerns out of the route functions:
+Three small modules keep cross-cutting HTTP concerns out of the route functions:
 
 - `app/web/auth.py` holds the authentication, CSRF, and login rate-limit helpers. It resolves `session["user_id"]` to a real user for the blueprint's account requirement, issues and checks the CSRF token carried by mutating forms, and consults `RateLimitRepository` to throttle repeated failed logins.
+- `app/web/course_context.py` holds the signed `form_context` that binds every learning form to `(course_id, operation, generation)`, its reader (`read_form_context()`, which verifies the signature and the 12-hour age window), the endpoint-to-operation mapping, and the course-aware template `url_for`. The signed `operation` is always the operation the form **posts to** — the endpoint a template passes to `form_context(<form action endpoint>)`, never the page that rendered it — because the write guard compares it with the endpoint the submit actually reached; signing the rendering page's endpoint would make every submit answer 409.
 - `app/web/view_helpers.py` holds the template and catalogue helpers that assemble the course/chapter selection lists and other view models shared by the practice and review screens, plus the display-timezone-aware timestamp/duration formatters injected into every template.
 
 The authentication hook resolves `session["user_id"]` to a real user. Missing or invalid accounts are redirected to `/login`. Protected views then run inside the `shared_progress` wrapper: it loads both practice modes from SQLite, defensively drops question IDs that are no longer answerable, runs the view, and persists changed states in one transaction. Server-side rows are the only source of progress; any ancient cookie copy is purged without being read. Bank maintenance is silent — no flash or banner. A stale worker never reaches the wrapper because `resolve_course_context` already answered 503, and the wrapper still re-checks the generation inside the write transaction (`guarded_learner_transaction`) so a publication that lands between the pre-check and the write changes nothing. `POST /logout` deliberately stays outside the wrapper so signing out always works. The wrapper decides whether a row needs writing by comparing the practice state only: `bank_version` is diagnostic, so two workers running banks that differ only in wording must not overwrite the same `quiz_progress` row back and forth inside the global write lock.
@@ -776,6 +804,10 @@ Defines the shared document structure, header, signed-in username, logout action
 ### `app/templates/auth.html`
 
 Renders both login and registration forms. The route passes a page mode so one template can present the correct fields and links.
+
+### `app/templates/courses.html`
+
+Renders the course selector (`/courses`) from the worker's course states: one card per declared course with its Chinese/English title, `course_id`, and a status badge (可学习 / 等待更新 / 已停用 / 未部署 / 不可用). Only a `ready` course gets a "开始学习" link into `/course/<course_id>/`; every other state explains itself instead of linking into a page that could only answer 503. With no declared course the page shows an empty state pointing at `courses/` and the legacy root `questions.json`.
 
 ### `app/templates/home.html`
 
@@ -1131,16 +1163,22 @@ The tests use temporary question/glossary files and temporary SQLite databases, 
 
 | Test file | Main coverage |
 |---|---|
-| `tests/conftest.py` | Shared domain objects and valid JSON fixtures |
+| `tests/conftest.py` | Shared domain objects, valid JSON fixtures, generated course trees, and the autouse fixture that signs a `form_context` for tests that do not render a template |
+| `tests/test_bundled_glossary.py` | Bundled glossary validity, coverage, scale, aliases, and categories |
+| `tests/test_bundled_question_bank.py` | Completeness and quality rules for the real bundled bank |
+| `tests/test_course_loader.py` | Manifest discovery, validation, bundle loading, and the worker registry |
+| `tests/test_course_isolation.py` | Behavioural namespace separation: two courses reusing the same local question/chapter/source IDs never observe, clear or advance each other's state |
+| `tests/test_course_migration.py` | Namespace migration: field-level equivalence, idempotency, and fault injection at all five stages |
+| `tests/test_course_scripts.py` | CLI tooling: read-only preflight, `--add`/`--disable`/`--enable`, atomic publish with the bytes frozen once, and `delete_course.py` |
+| `tests/test_course_web.py` | Multi-course web behaviour: switching, signed learning forms, stale-form rejection, per-course fencing, readiness, workers |
+| `tests/test_form_context.py` | Regression coverage that every rendered learning form signs the operation its own `action` performs; this client sends only the tokens the templates rendered |
 | `tests/test_glossary_loader.py` | Glossary schema, normalization, aliases, collisions, and arbitrary categories |
 | `tests/test_glossary_repository.py` | Immutable lookup, category ordering, and defensive serialization |
 | `tests/test_glossary_web.py` | Authenticated vocabulary UI, highlighting hooks, and glossary/question-bank state separation |
-| `tests/test_bundled_glossary.py` | Bundled glossary validity, coverage, scale, aliases, and categories |
 | `tests/test_repositories.py` | SQLite repositories, JSON weak-point persistence, and account-scoped queries |
 | `tests/test_question_loader.py` | JSON parsing, validation, and bilingual fields |
 | `tests/test_question_bank_sync.py` | Per-question reconciliation: content edits preserve everything, chapter/source moves and catalogue-shape changes bump the generation without clearing data, catalogue labels deliberately do not (both workers keep serving), catalogue baselines are adopted on upgrade, grading changes clear one question, deletions keep attempts but drop state, weak-point/progress/exam reconciliation, resurrection and retired-ID reuse, bootstrap and concurrent startup, pre-deploy check exit codes and bank-level reports |
 | `tests/test_stale_worker.py` | Stale-worker fencing: learning pages 503, logout/login/glossary stay reachable, login/register never redirect into the 503, the 503 page cannot loop, readiness versus liveness, and the single generation-mismatch warning |
-| `tests/test_question_metadata_migration.py` | Repeatable conversion of legacy source citations into schema-v2 metadata |
 | `tests/test_grading_service.py` | Exact single/multiple grading and invalid options |
 | `tests/test_quiz_service.py` | Limits, coverage cycles/boundaries/scope/all, stable option shuffle, review selection |
 | `tests/test_wrong_question_service.py` | Wrong counts, one-answer correction, distinct verification, resets, isolation |
@@ -1150,12 +1188,14 @@ The tests use temporary question/glossary files and temporary SQLite databases, 
 | `tests/test_progress_state.py` | Characterization coverage for the progress-state helpers: validation, resume summaries, session keys, and quiz-size parsing |
 | `tests/test_progress_sync.py` | Independent clients/workers, resume and completion, concurrency, stale forms, reset, legacy migration, transaction rollback, wording-only bank differences never rewriting progress |
 | `tests/test_web.py` | Public health response, login, registration, page flows, shared progress, duplicate protection, feedback, errors |
-| `tests/test_bundled_question_bank.py` | Completeness and quality rules for the real bundled bank |
+| `tests/test_view_helpers.py` | Roman-statement stem rendering helper and its template wiring |
 | `tests/test_security.py` | Security headers, CSP, CSRF enforcement, login rate limiting, and payload limits |
 | `tests/test_exam_service.py` | Exam creation/frozen sets, config validation, answer persistence, ownership, grading, idempotent submit, mistake sync, SRS reopening, deadline rules, expiry sweep, reports, history |
 | `tests/test_exam_web.py` | Exam pages end to end: no feedback during exams, refresh stability, resume, submission results, locked answers, history links, expiry settlement via home/dashboard visits, legacy attempts-table migration |
 | `tests/test_statistics_service.py` | Dashboard aggregation: totals, accuracy, 7/30-day boundaries, chapter mastery bands, low-sample flags, zero-filled trends, display-timezone bucketing, isolation |
 | `tests/test_dashboard_web.py` | Dashboard page: login guard, empty state, rendered metrics/mastery/trend, mock-exam reflection, per-user scoping, configured-timezone dates |
+| `tests/test_stats_web.py` | Cross-account statistics page: login guard, empty state, rendered metrics and chapter difficulty, group scoping |
+| `tests/test_global_statistics_service.py` | Cross-account aggregation: totals, activity windows, chapter-difficulty ranking and bands |
 | `tests/test_local_time.py` | Timezone resolution/fallback/errors, conversion helpers, offset labels, tz-aware formatting, startup fail-fast |
 
 Run all tests with:
@@ -1183,13 +1223,11 @@ python run.py
 
 At startup:
 
-1. Flask configuration is created.
-2. `questions.json` is read and fully validated.
-3. `glossary.json` is read and fully validated.
-4. `instance/mcq.db` and the current tables are created if absent, then the question bank is reconciled per question against the persistent registry.
-5. Repositories and services are assembled.
-6. Routes are registered.
-7. The Werkzeug development server listens on `http://127.0.0.1:5000` with debug enabled and the reloader disabled.
+1. Flask configuration is created (secret key, display timezone, course directory, database path) and the course loader is prepared.
+2. `instance/mcq.db` and the current tables are created, migrated or extended if needed, then the deployment-wide repositories are built.
+3. The course registry loads and fully validates every enabled course's manifest, published question bank and optional glossary, and reconciles each bank per question against the persistent registry. A single broken course becomes `unavailable` and keeps its learner data untouched, while the other courses keep serving.
+4. The signed-form serializer, the `/health` and `/ready` endpoints, the security headers and the web blueprint are attached.
+5. The Werkzeug development server listens on `http://127.0.0.1:5000` with debug enabled and the reloader disabled.
 
 The first learner creates an account through `/register`, then starts a quiz from the home page.
 
