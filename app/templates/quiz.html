@@ -36,7 +36,7 @@
         {% if mode.value == "normal" %}
         <form method="post" action="{{ url_for('web.start_quiz') }}">
             {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
-            <input type="hidden" name="form_context" value="{{ form_context() }}">
+            <input type="hidden" name="form_context" value="{{ form_context('web.start_quiz') }}">
             <input type="hidden" name="quiz_size" value="{{ state.requested_size }}">
             {% for chapter_id in state.chapter_ids %}
             <input type="hidden" name="chapter_ids" value="{{ chapter_id }}">
@@ -98,7 +98,7 @@
         {% if state.status == "pending" %}
         <form class="answer-form" method="post" action="{{ url_for(answer_endpoint) }}" data-answer-form>
             {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
-            <input type="hidden" name="form_context" value="{{ form_context() }}">
+            <input type="hidden" name="form_context" value="{{ form_context(answer_endpoint) }}">
             <input type="hidden" name="answer_token" value="{{ state.answer_token }}">
             <fieldset class="options">
                 <legend class="sr-only">请选择答案</legend>
@@ -221,7 +221,7 @@
 
         <form method="post" action="{{ url_for(next_endpoint) }}">
             {% if config.ENABLE_CSRF %}<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">{% endif %}
-            <input type="hidden" name="form_context" value="{{ form_context() }}">
+            <input type="hidden" name="form_context" value="{{ form_context(next_endpoint) }}">
             <input type="hidden" name="answer_token" value="{{ state.answer_token }}">
             <button class="button button-primary submit-answer" type="submit">
                 {% if mode.value == "review" %}继续巩固{% elif state.current_index + 1 == total %}查看本轮结果{% else %}下一题{% endif %}

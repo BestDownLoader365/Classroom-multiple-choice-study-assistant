@@ -177,15 +177,23 @@ def create_web_blueprint(
             return endpoint[len(f"web.{LEGACY_PREFIX}") :]
         return _course_ctx.operation_for_endpoint(endpoint)
 
-    def issue_form_context(operation: str | None = None, **extra: Any) -> str:
-        """Return the signed form context for the current course and page."""
+    def issue_form_context(target_endpoint: str, **extra: Any) -> str:
+        """Return the signed form context of one form.
+
+        ``target_endpoint`` is the route the form **posts to** — the same value
+        the template hands to ``url_for`` for the form's ``action`` — and never
+        the page that rendered it.  The transaction guard compares the signed
+        operation against the endpoint the request actually reached, so signing
+        the rendering page's endpoint would reject every submit with 409.
+        A bare operation name (``"start_quiz"``) is accepted and kept as-is.
+        """
         course = getattr(g, "course", None)
         if course is None:
             return ""
         return _course_ctx.issue_form_context(
             form_serializer,
             course_id=course.course_id,
-            operation=operation or operation_name() or "",
+            operation=_course_ctx.operation_for_endpoint(target_endpoint) or "",
             generation=course.generation,
             **extra,
         )
