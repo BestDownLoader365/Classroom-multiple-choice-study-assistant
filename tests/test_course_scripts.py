@@ -301,6 +301,56 @@ def test_check_courses_reports_status_and_exits_nonzero_on_a_broken_course(
     assert check_courses_main(common) == 1
 
 
+def test_check_courses_reports_a_copy_no_manifest_points_at(tmp_path, capsys):
+    """A stale plain copy is reported, but never fails the gate.
+
+    A course created before the content-addressed layout keeps a
+    ``questions.json``/``glossary.json`` next to the manifest.  Once the manifest
+    points at ``versions/<sha256>/`` nothing reads that file any more, so the gate
+    has to show it instead of letting it look like the live content.
+    """
+    courses_dir = tmp_path / "courses"
+    courses_dir.mkdir(parents=True)
+    candidate = tmp_path / "candidate.json"
+    write_json(candidate, course_bank())
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                A,
+                "--add",
+                "--questions",
+                str(candidate),
+                *cli_common(courses_dir, tmp_path / "mcq.db"),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    common = [
+        "--courses-dir",
+        str(courses_dir),
+        "--question-file",
+        str(tmp_path / "absent" / "questions.json"),
+        "--glossary-file",
+        str(tmp_path / "absent" / "glossary.json"),
+    ]
+
+    # A plain-file course declares the root copy itself: nothing to report.
+    write_course(courses_dir, B, course_bank(("b", "beta")))
+    assert check_courses_main(common) == 0
+    assert "未被 manifest 引用" not in capsys.readouterr().out
+
+    # The stale copy of a course-addressed course is reported; exit code stays 0.
+    stale = courses_dir / A / "questions.json"
+    write_json(stale, course_bank(("c", "gamma")))
+    assert check_courses_main(common) == 0
+    out = capsys.readouterr().out
+    assert str(stale) in out
+    assert "未被 manifest 引用" in out
+
+
 def test_check_glossary_validates_and_reports_coverage(tmp_path, capsys):
     """``check_glossary.py`` validates a candidate pair and reports coverage."""
     questions = tmp_path / "questions.json"
@@ -435,11 +485,18 @@ def test_publish_course_add_validates_the_glossary_before_writing(tmp_path, caps
         )
         == 0
     )
-    manifest = json.loads(
-        (courses_dir / "physical_design" / "course.json").read_text()
-    )
-    assert manifest["glossary"] == "glossary.json"
-    assert (courses_dir / "physical_design" / "glossary.json").is_file()
+    target = courses_dir / "physical_design"
+    manifest = json.loads((target / "course.json").read_text())
+    questions_digest = hashlib.sha256(questions.read_bytes()).hexdigest()
+    glossary_digest = hashlib.sha256(glossary.read_bytes()).hexdigest()
+    assert manifest["questions"] == f"versions/{questions_digest}/questions.json"
+    assert manifest["glossary"] == f"versions/{glossary_digest}/glossary.json"
+    assert (target / "versions" / questions_digest / "questions.json").is_file()
+    assert (target / "versions" / glossary_digest / "glossary.json").is_file()
+    # `--add` archives exactly what it validated: no unreferenced copy is left
+    # next to the manifest for someone to edit by mistake.
+    assert not (target / "questions.json").exists()
+    assert not (target / "glossary.json").exists()
 
     # A failed check creates nothing at all, not even the course directory.
     bad_glossary = tmp_path / "bad_glossary.json"
@@ -821,10 +878,21 @@ def test_publish_course_add_uses_the_default_candidates(tmp_path, capsys):
 
     manifest = json.loads((target / "course.json").read_text())
     assert manifest["title"] == "Physical Design"
-    assert manifest["questions"] == "questions.json"
-    assert manifest["glossary"] == "glossary.json"
-    assert (target / "questions.json").is_file()
-    assert (target / "glossary.json").is_file()
+    questions_digest = hashlib.sha256(
+        (target / "questions_candidate.json").read_bytes()
+    ).hexdigest()
+    glossary_digest = hashlib.sha256(
+        (target / "glossary_candidate.json").read_bytes()
+    ).hexdigest()
+    assert manifest["questions"] == f"versions/{questions_digest}/questions.json"
+    assert manifest["glossary"] == f"versions/{glossary_digest}/glossary.json"
+    assert (target / "versions" / questions_digest / "questions.json").is_file()
+    assert (target / "versions" / glossary_digest / "glossary.json").is_file()
+    # The candidates stay the working copies; the published bytes live only under
+    # versions/, so the course directory holds no unreferenced content copy.
+    assert (target / "questions_candidate.json").is_file()
+    assert not (target / "questions.json").exists()
+    assert not (target / "glossary.json").exists()
 
     # Without any candidate at all, --add points at the path it expected.
     assert (

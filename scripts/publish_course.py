@@ -12,8 +12,9 @@ change follows the same check-then-publish flow: run the matching
     # catalogue, so a courses/<course_id>/ directory without course.json is
     # ignored and ``--course <new_id>`` reports "Unknown course" until the
     # course is declared.  Put the candidates in courses/<course_id>/ and create
-    # the course first -- ``--add`` validates those frozen bytes itself and
-    # writes the manifest -- then the two checks above can name the new course.
+    # the course first -- ``--add`` validates those frozen bytes itself, archives
+    # them under ``versions/<sha256>/`` and writes the manifest -- then the two
+    # checks above can name the new course.
     python scripts/publish_course.py --course physical_design --add \
         --title "Physical Design"
 
@@ -40,7 +41,10 @@ at all still refuses to do anything.
 Content publication reads the candidate once, validates exactly those frozen
 bytes, archives them under ``versions/<sha256>/`` and switches the manifest over
 with a single ``os.replace`` (the legacy root-file layout falls back to an atomic
-single-file replace).  The command **re-runs the matching check script by
+single-file replace).  A course is born the same way: ``--add`` archives its
+initial content instead of writing a plain ``questions.json``/``glossary.json``
+next to the manifest, so the course directory never holds a copy that no
+manifest path points at.  The command **re-runs the matching check script by
 default** — ``check_question_bank.py`` against ``--db`` for ``--questions``,
 ``check_glossary.py`` offline for ``--glossary`` — and refuses to switch over
 content that fails it.  ``--skip-preflight`` is the explicit, discouraged escape
@@ -54,6 +58,7 @@ Exit codes: ``0`` success, ``1`` validation/publish refused, ``2`` usage.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -65,11 +70,13 @@ from app.models import CourseDefinitionError  # noqa: E402
 from scripts.course_tooling import (  # noqa: E402
     GLOSSARY_CANDIDATE_NAME,
     QUESTIONS_CANDIDATE_NAME,
+    VERSIONS_DIRECTORY,
     ToolingError,
     build_loader,
     default_candidate_path,
     freeze_candidate,
     preflight_baseline,
+    publication_lock,
     publish_glossary,
     publish_questions,
     resolve_definition,
@@ -173,7 +180,14 @@ def _apply_default_candidates(
 
 
 def _add_course(args: argparse.Namespace) -> int:
-    """Create ``courses/<id>/`` with a manifest and the supplied content."""
+    """Create ``courses/<id>/`` with a manifest and the supplied content.
+
+    The initial content is archived under ``versions/<sha256>/`` exactly like
+    every later publish, so a course is born in the content-addressed layout:
+    the manifest is the only pointer to it, and no unreferenced copy of a
+    published file is ever left next to the manifest for a maintainer to edit
+    by mistake.
+    """
     from app.models import validate_course_id
     from app.models.course import CourseIdError
 
@@ -217,27 +231,45 @@ def _add_course(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return exit_code
-    target.mkdir(parents=True, exist_ok=True)
-    write_file_atomically(target / "questions.json", payload)
-    glossary_name: str | None = None
+    # The initial content is a publication like any other: archive the frozen
+    # bytes first, then write the manifest that points at them.  The manifest
+    # write is the single commit point, and it happens inside the course's
+    # publication lock so two concurrent `--add` runs cannot both win.
+    questions_relative = f"{VERSIONS_DIRECTORY}/{digest}/questions.json"
+    glossary_relative: str | None = None
     if glossary_payload is not None:
-        write_file_atomically(target / "glossary.json", glossary_payload)
-        glossary_name = "glossary.json"
+        glossary_digest = hashlib.sha256(glossary_payload).hexdigest()
+        glossary_relative = f"{VERSIONS_DIRECTORY}/{glossary_digest}/glossary.json"
     manifest = {
         "schema_version": 1,
         "course_id": course_id,
         "title": args.title or course_id,
         "title_zh": args.title_zh,
         "enabled": not args.disable,
-        "questions": "questions.json",
-        "glossary": glossary_name,
+        "questions": questions_relative,
+        "glossary": glossary_relative,
         "order": args.order,
     }
-    write_file_atomically(
-        manifest_path,
-        json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
-    )
+    target.mkdir(parents=True, exist_ok=True)
+    with publication_lock(target):
+        # Re-checked inside the lock: the check above runs before validation,
+        # so a concurrent `--add` could have declared the course in between.
+        if manifest_path.exists():
+            print(f"课程已存在：{manifest_path}", file=sys.stderr)
+            return 1
+        write_file_atomically(target / questions_relative, payload)
+        if glossary_payload is not None and glossary_relative is not None:
+            write_file_atomically(target / glossary_relative, glossary_payload)
+        write_file_atomically(
+            manifest_path,
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
+        )
     print(f"已新增课程 {course_id}：{len(questions)} 道题，manifest={manifest_path}")
+    print(
+        f"已发布内容：{questions_relative}"
+        + (f"；{glossary_relative}" if glossary_relative else "")
+        + f"（{VERSIONS_DIRECTORY}/ 之外的目录里没有已发布副本）"
+    )
     print(
         "状态：created, pending worker activation。请在 worker 启动日志中确认 "
         f'"{course_id}" ready，然后用 /ready/{course_id} 验证。'

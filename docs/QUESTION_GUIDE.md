@@ -635,7 +635,8 @@ pytest -q
 
 > 上面的流程从"已存在的课程"开始。新增一门课时，`--course` 在 `courses/<course_id>/course.json` 存在之前无法解析
 > （预检会返回 `4` / `Unknown course`，因为 loader 只认有 manifest 的课程目录），要先运行
-> `python scripts/publish_course.py --course <course_id> --add ...` 创建课程（它会校验候选并写入 manifest），再按
+> `python scripts/publish_course.py --course <course_id> --add ...` 创建课程（它会校验候选、归档到
+> `versions/<sha256>/` 并写入 manifest），再按
 > 上面的顺序预检与发布；完整步骤见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.2 节。
 
 ```text

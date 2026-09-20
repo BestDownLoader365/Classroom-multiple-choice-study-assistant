@@ -111,9 +111,10 @@ MCQ_Template/
 │       ├── course.json            # manifest: course_id, title, enabled, order, paths
 │       ├── questions_candidate.json   # working copy the CLI reads by default
 │       ├── glossary_candidate.json    # optional glossary working copy
-│       ├── questions.json         # published copy (plain-file layout)
-│       ├── glossary.json          # optional; `"glossary": null` means none
-│       └── versions/<sha256>/     # immutable publications a manifest may point at
+│       ├── versions/<sha256>/     # immutable publications: what --add and every publish write
+│       ├── .publish.lock          # publication lock taken while a publish switches over
+│       ├── questions.json         # published copy, plain-file layout only (older courses)
+│       └── glossary.json          # same; unread once the manifest points at versions/
 ├── app/
 │   ├── __init__.py
 │   ├── course_runtime.py          # CourseRegistry / CourseState / AppServices
@@ -263,14 +264,18 @@ Convenience operations scripts for WSL. The start script validates Nginx, starts
 #### `courses/<course_id>/questions.json` (or the optional legacy root `questions.json`)
 
 Holds one course's complete question bank; the course's manifest names the file that is
-loaded (a plain `questions.json` or an immutable `versions/<sha256>/questions.json`).
+loaded (a plain `questions.json` for the plain-file layout or an immutable
+`versions/<sha256>/questions.json`, which is what `--add` and every publish write).
 Every application process reads and validates each enabled course's bank once during
 startup. Editing one requires restarting the active server: `python run.py` in
 development or `mcq-template.service` in production. Publish it atomically
 (`scripts/publish_course.py`) rather than with `cp` or an editor save: a partially
 written file is read by a worker starting in that window and reported as misleading
 invalid JSON. A root `questions.json` without a manifest is still loaded as the
-`legacy` course, which is the pre-multi-course layout.
+`legacy` course, which is the pre-multi-course layout. A `questions.json` sitting
+next to a manifest that points at `versions/<sha256>/` is read by nothing at all:
+`check_courses.py` reports it as an unreferenced copy so it cannot be mistaken for
+the live content.
 
 #### `courses/<course_id>/glossary.json` (or the optional legacy root `glossary.json`)
 
@@ -295,7 +300,10 @@ migration, its field-level verification and rollback.
 
 Course-level gate: validates every manifest (schema version, slug, required paths, path
 containment, declared glossary) and loads every enabled course's question bank *and*
-glossary through the application's own loader, reporting per-course status. Read-only: a
+glossary through the application's own loader, reporting per-course status. It also
+lists — informationally, without changing the exit code — any `questions.json` /
+`glossary.json` in the course directory that no manifest path points at, because such a
+copy is never read and would otherwise look like the live content. Read-only: a
 global catalogue ambiguity exits ``2``, a single broken course exits ``1`` while the
 other courses are still reported.
 
@@ -384,7 +392,11 @@ The single publish entry point for every course-content type: add a course, publ
 `questions.json` and/or `glossary.json`, and enable/disable a course. A publish reads the
 candidate once, validates exactly those frozen bytes, archives them under
 `versions/<sha256>/`, and switches the manifest over with a single `os.replace` (the
-legacy root-file layout falls back to an atomic single-file replace). `--questions` and
+legacy root-file layout falls back to an atomic single-file replace). `--add` creates a
+course in exactly that shape: the initial bytes are validated first, archived under
+`versions/<sha256>/`, and only then does the manifest (written inside the course's
+publication lock) point at them, so a course directory never carries an unreferenced
+`questions.json`/`glossary.json` that looks like the live content. `--questions` and
 `--glossary` default to the course's working copies
 (`courses/<course_id>/questions_candidate.json` and `glossary_candidate.json`), so a bare
 `--course <course_id>` publishes exactly the candidates a maintainer just edited; an

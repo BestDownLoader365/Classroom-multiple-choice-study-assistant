@@ -224,7 +224,7 @@ python scripts/check_glossary.py \
 
 新增课程时，`--course <course_id>` 在 `courses/<course_id>/course.json` 存在之前无法解析（脚本会报 `Unknown course`，
 因为 loader 只认有 manifest 的课程目录）：先用 `python scripts/publish_course.py --course <course_id> --add ...` 创建
-课程（它会先校验候选），再运行上面的按课程校验；尚未创建课程时就用上面这段显式离线模式先校验候选文件。
+课程（它会先校验候选并归档到 `versions/<sha256>/`），再运行上面的按课程校验；尚未创建课程时就用上面这段显式离线模式先校验候选文件。
 
 校验只读取内容，不会修改 `question_registry`、generation 或任何学习数据。
 

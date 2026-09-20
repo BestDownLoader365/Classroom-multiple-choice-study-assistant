@@ -52,13 +52,13 @@ User ID 仍为全站身份；Exam ID 仍全站唯一；SQLite 仍为共享数据
 ```text
 courses/
 ├── digital_ic/
-│   ├── course.json                 # manifest（课程身份与元数据）
+│   ├── course.json                 # manifest（课程身份与元数据，唯一权威指针）
 │   ├── questions_candidate.json    # 题库候选：日常编辑的工作副本
 │   ├── glossary_candidate.json     # 术语表候选（可选）
-│   ├── questions.json              # 已发布题库（--add 首次写入；发布后 manifest 指向 versions/）
-│   ├── glossary.json               # 已发布术语表（可选）
-│   ├── versions/<sha256>/…         # 每次发布保存的不可变内容副本
-│   └── .publish.lock               # 发布锁（由 publish_course.py 维护）
+│   ├── versions/<sha256>/…         # 已发布内容：新增课程/每次发布保存的不可变副本
+│   ├── .publish.lock               # 发布锁（由 publish_course.py 维护）
+│   ├── questions.json              # 仅 plain-file 布局（旧课程/手工创建）的已发布题库
+│   └── glossary.json               # 同上（可选）
 └── physical_design/
     ├── course.json
     ├── questions_candidate.json
@@ -67,8 +67,14 @@ courses/
 ```
 
 `questions_candidate.json` / `glossary_candidate.json` 是**默认输入**：`check_*.py` 与 `publish_course.py` 在不传
-文件路径时读它们（见 7 节）；`questions.json` / `glossary.json` / `versions/…` 是**已发布内容**，由 worker 读取，
-不要手工原地编辑。`versions/` 与 `.publish.lock` 由发布命令维护，删除课程时随课程目录一起删除。
+文件路径时读它们（见 7 节）；`versions/…`（以及 plain-file 布局下 manifest 直接指向的 `questions.json` /
+`glossary.json`）是**已发布内容**，由 worker 读取，不要手工原地编辑。`--add` 新增课程和后续发布一样把内容归档到
+`versions/<sha256>/`，所以新课程的目录根部**不会**留下无人引用的已发布副本；`versions/` 与 `.publish.lock` 由发布
+命令维护，删除课程时随课程目录一起删除。
+
+⚠️ manifest 一旦指向 `versions/…`，根部的 `questions.json` / `glossary.json` 就**不再被任何进程读取**（loader 只解析
+manifest 声明的路径，`check_*.py` 的 `--published` 也只看 manifest 指向的文件）。它们只可能是旧课程的历史/回滚副本；
+`check_courses.py` 会把这类文件作为提示列出（见 7.1），编辑它不会生效。
 
 manifest（`schema_version: 1`）：
 
@@ -252,9 +258,8 @@ courses/<course_id>/
 ├── course.json                 # manifest（身份与元数据）
 ├── questions_candidate.json    # 题库候选（默认输入）
 ├── glossary_candidate.json     # 术语表候选（默认输入）
-├── questions.json              # 已发布内容（`--add` 或 legacy 布局的落点）
-├── glossary.json
-└── versions/<sha256>/…         # 每次发布保存的不可变内容副本
+├── versions/<sha256>/…         # 已发布内容（`--add` 与每次发布的不可变副本）
+└── questions.json / glossary.json   # 仅 plain-file 布局的旧课程才有
 ```
 
 默认文件解析规则（`check_*.py` 与 `publish_course.py` 一致）：
@@ -276,6 +281,10 @@ python scripts/check_courses.py --json     # 机器可读
 
 全局歧义（重复 `course_id`、manifest 非法）退出码 2；单门课程加载失败退出码 1，但其他课程仍会报告。
 
+报告还会以**提示**（不影响退出码）列出课程目录里没有被 manifest 引用的 `questions.json` / `glossary.json`
+（`--json` 输出中的 `unreferenced_copies` 字段）：这类文件来自 plain-file 布局的旧课程，任何进程都不会读取它，
+编辑它不会生效，通常只作历史/回滚副本保留或直接删除。
+
 ### 7.2 新增课程（从零开始）
 
 **顺序要点：`--course` 只能解析「已声明的课程」。** 声明一门课的只有 `courses/<course_id>/course.json`，而这个
@@ -292,7 +301,7 @@ mkdir -p courses/physical_design
 cp my_questions.json  courses/physical_design/questions_candidate.json
 cp my_glossary.json   courses/physical_design/glossary_candidate.json   # 可选；不需要术语表就跳过
 
-# 2) 创建课程：读取候选 → schema/术语表校验 → 写入 course.json 与已发布副本
+# 2) 创建课程：读取候选 → schema/术语表校验 → 归档到 versions/<sha256>/ → 写入 course.json
 #    （任何一项校验失败都不会创建目录、也不会写入任何文件）
 python scripts/publish_course.py --course physical_design --add \
   --title "Physical Design" --title-zh "物理设计" --order 20
@@ -325,10 +334,14 @@ python scripts/check_courses.py
 
 | 文件 | 内容 |
 | --- | --- |
-| `courses/<course_id>/course.json` | manifest：`course_id`、标题、`enabled`、`order`、内容路径 |
-| `courses/<course_id>/questions.json` | 题库的已发布副本（候选文件保留不动） |
-| `courses/<course_id>/glossary.json` | 术语表的已发布副本（提供候选时才有） |
+| `courses/<course_id>/course.json` | manifest：`course_id`、标题、`enabled`、`order`、指向 `versions/…` 的内容路径 |
+| `courses/<course_id>/versions/<sha256>/questions.json` | 题库的已发布副本（候选文件保留不动） |
+| `courses/<course_id>/versions/<sha256>/glossary.json` | 术语表的已发布副本（提供候选时才有） |
+| `courses/<course_id>/.publish.lock` | 发布锁（创建课程时即建立，供后续发布串行化） |
 | `courses` 表 | 该课程的永久身份与已接受元数据（worker 启动时写入） |
+
+课程目录**根部不会再写入** `questions.json` / `glossary.json`（那是 plain-file 布局，仅保留给旧课程与手工/legacy
+场景），所以新课程从第一天起就不存在「看起来一样、实际无人读取」的副本。
 
 `--add` 只做 schema 校验（新课程没有历史可比对），并提示 `created, pending worker activation`；重启 worker 后
 `/ready/<course_id>` 应返回 `ready`，`check_courses.py` 应列出该课程且状态为 `ok`。已有课程只能用
@@ -367,8 +380,8 @@ python scripts/publish_course.py --course physical_design
 
 要点：
 
-* **先改候选文件**：`questions.json` / `glossary.json` / `versions/…` 是已发布内容，被 worker 直接读取；原地覆盖
-  可能让启动中的 worker 读到半截 JSON。
+* **先改候选文件**：`versions/…`（以及 plain-file 布局下 manifest 直接指向的 `questions.json` / `glossary.json`）是已发布
+  内容，被 worker 直接读取；原地覆盖可能让启动中的 worker 读到半截 JSON。
 * `publish_course.py` 默认会重跑对应的 `check_*.py` 并拒绝未通过的内容（`--skip-preflight` 可跳过，不推荐）。
 * 校验通过、发布成功后输出 `published, pending worker activation`；题库的结构性变化会让**该课程** generation +1，
   因此需要统一重启全部 worker，再用 `/ready/<course_id>` 确认；术语表不参与 generation。

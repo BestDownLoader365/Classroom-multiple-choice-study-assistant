@@ -11,6 +11,14 @@ through the application's own loader.  A *global* catalogue ambiguity (duplicate
 ``course_id``, invalid manifest) exits ``2``; a single broken course package
 exits ``1`` but still reports the other courses.
 
+It also reports — informationally, without changing the exit code — content files
+that no manifest path points at.  A course created before the content-addressed
+layout (or assembled by hand) keeps a plain ``questions.json``/``glossary.json``
+next to its manifest; once the manifest points at ``versions/<sha256>/`` those
+files are read by nothing (the loader resolves only the declared paths and every
+gate follows the manifest), so a stale copy would otherwise sit there unnoticed
+while looking exactly like the live one.
+
 Nothing is written and no database is touched.  Run it after changing any course
 content and before publishing; never publish while it reports a failure.
 """
@@ -26,7 +34,34 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.models import CourseDefinitionError, CourseLoadError  # noqa: E402
+from app.repositories.course_loader import (  # noqa: E402
+    DEFAULT_GLOSSARY_NAME,
+    DEFAULT_QUESTIONS_NAME,
+)
 from scripts.course_tooling import build_loader  # noqa: E402
+
+
+def _unreferenced_copies(definition) -> list[str]:
+    """Return content files in the course directory no manifest path points at.
+
+    The plain-file layout declares ``questions.json``/``glossary.json`` itself, so
+    it has nothing to report.  A course-addressed course (manifest pointing at
+    ``versions/<sha256>/``) may still carry such a file next to the manifest —
+    usually the initial copy of a course created before that layout, kept around
+    as rollback material.  It is *not* read by any process, so it is reported for
+    visibility only and never treated as a failure.
+    """
+    if definition.manifest_path is None:  # legacy adapter: the root files are declared
+        return []
+    declared = {definition.questions_path.resolve()}
+    if definition.glossary_path is not None:
+        declared.add(definition.glossary_path.resolve())
+    root = definition.root
+    return [
+        str(root / name)
+        for name in (DEFAULT_QUESTIONS_NAME, DEFAULT_GLOSSARY_NAME)
+        if (root / name).is_file() and (root / name).resolve() not in declared
+    ]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             "reason": "",
             "question_count": 0,
             "glossary_terms": None,
+            "unreferenced_copies": _unreferenced_copies(definition),
         }
         if not definition.course.enabled:
             entry["status"] = "disabled"
@@ -114,6 +150,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"  questions: {entry['questions']}")
             print(f"  glossary : {entry['glossary'] or '(none declared)'}")
+            for copy in entry["unreferenced_copies"]:
+                print(
+                    f"  提示：{copy} 未被 manifest 引用 —— 任何进程都不会读取它，"
+                    "编辑它不会生效（仅作历史/回滚副本，可删除）"
+                )
             if entry["status"] == "ok":
                 terms = entry["glossary_terms"]
                 print(
