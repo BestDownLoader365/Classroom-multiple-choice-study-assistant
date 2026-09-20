@@ -86,7 +86,6 @@
             <div class="glossary-card-detail" id="glossary-detail-{{ loop.index }}" hidden>
                 <h3>{{ term.term_zh }}</h3>
                 {% if term.definition_zh %}<p>{{ term.definition_zh }}</p>{% endif %}
-                {% if term.definition %}<p class="glossary-definition-en">{{ term.definition }}</p>{% endif %}
             </div>
         </article>
         {% endfor %}

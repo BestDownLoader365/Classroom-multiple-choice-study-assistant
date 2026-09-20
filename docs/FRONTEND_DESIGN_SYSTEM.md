@@ -196,6 +196,7 @@ Display typography signals hierarchy; it is not a default treatment for every pa
 - Use `48–96px` of space above the first major section and approximately `56–88px` below the final section.
 - Keep the top toolbar between `64px` and `66px` high.
 - Separate the toolbar from content with a single subtle bottom border; do not use a shadow.
+- The toolbar may take a second row on narrow screens when it carries a course picker (see "Course selector and course list"): one row of `64–66px` is the single-row target, not a constraint that justifies pushing an action onto a wrapped line.
 - The global content maximum is a default, not a hard limit for every workspace. Learning workspaces, editors, operations tools, dashboards, and data-heavy surfaces may use a wider composition when local text measure remains controlled and hierarchy stays clear.
 - A wide canvas does not require a narrow content island. Use deliberate desktop gutters and useful viewport coverage without stretching short copy into long lines.
 
@@ -423,6 +424,15 @@ Responsive design must change composition, not merely shrink typography.
 - Reflow two-column summaries into stacked label/value groups when content would collide.
 - Keep modals within `18px` of each viewport edge and cap their height to preserve a scrollable interior.
 - Hide low-priority toolbar metadata before hiding actions or accessible labels.
+- In a wrapping toolbar, decide explicitly which items share the first row: a
+  full-width picker that may shrink must still wrap on its own (`flex: 1 0 100%`
+  with an explicit `order`), otherwise it squeezes onto the first row, forces the
+  account actions onto a second line, and the most important control appears to
+  move for no reason. Actions (`退出登录`) stay on the first row; metadata labels
+  (`当前课程`) are the first thing to drop on the narrowest screens.
+- Align repeated action buttons across a card row: pin the action to the bottom
+  of a stretched card (`margin-top: auto`) rather than letting copy length decide
+  the button's vertical position.
 
 # Component Recipes
 
@@ -1140,10 +1150,22 @@ introducing a second look:
   (`.course-card-disabled`, `.course-card-unavailable`, `.course-card-stale`,
   `.course-card-undeployed`) so a non-servable course reads as de-emphasised
   without inventing new colours;
+* a course card is a column (`display: flex; flex-direction: column`) whose last
+  child is pinned to the bottom (`margin-top: auto`) and whose launcher keeps its
+  content width (`align-self: flex-start`, since a flex column would stretch it).
+  Grid rows stretch every card to the same height, so the four characters of
+  `开始学习` share one baseline across a row even when one card's English title
+  takes two lines and another's three — the launcher is never positioned by the
+  length of the copy above it;
 * responsive behaviour hooks into the existing breakpoints: at
-  `max-width: 820px` the header wraps, the course picker takes the full row and
-  its menu becomes an inline list (no floating overlay on a narrow screen), and
-  the course grid collapses to a single column.
+  `max-width: 820px` the toolbar becomes two rows — the brand and the account
+  actions (`用户名` / `退出登录`) keep the first row, and the course picker owns a
+  full-width second row (`flex: 1 0 100%` plus explicit `order`) instead of
+  shrinking next to the brand and pushing an action onto a wrapped line; its menu
+  becomes an inline list (no floating overlay on a narrow screen), and the course
+  grid collapses to a single column. Below `640px` the low-priority `当前课程`
+  label is dropped (the picker keeps the course title with ellipsis and
+  `切换课程`), and long titles truncate instead of wrapping the toolbar.
 
 The header always names the course the current page belongs to, and every page's
 forms post back to the same `course_id`, so the selector is navigation only — it

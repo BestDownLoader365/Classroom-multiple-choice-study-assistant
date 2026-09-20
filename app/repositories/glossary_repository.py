@@ -72,7 +72,6 @@ class GlossaryRepository:
             "term": term.term,
             "term_zh": term.term_zh,
             "aliases": list(term.aliases),
-            "definition": term.definition,
             "definition_zh": term.definition_zh,
             "category": term.category,
         }

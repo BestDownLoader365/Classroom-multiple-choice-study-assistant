@@ -392,7 +392,6 @@ def statistics_glossary() -> dict:
                 "term": "Null Hypothesis",
                 "term_zh": "原假设",
                 "aliases": ["H0"],
-                "definition": "A hypothesis tested for possible rejection.",
                 "category": "Hypothesis Testing",
             },
         ],

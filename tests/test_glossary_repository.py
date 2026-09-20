@@ -38,3 +38,17 @@ def test_serialization_returns_independent_json_ready_data(
 
     assert second["title"] == "Statistics Glossary"
     assert second["terms"][0]["aliases"] == ["SD"]
+
+
+def test_serialization_omits_the_retired_english_definition(
+    tmp_path, statistics_glossary
+):
+    """Only ``definition_zh`` reaches the browser payload."""
+    statistics_glossary["terms"][0]["definition"] = "A measure of dispersion."
+    repository = GlossaryRepository(
+        GlossaryLoader(write_json(tmp_path / "glossary.json", statistics_glossary)).load()
+    )
+
+    serialized = repository.to_dict()["terms"][0]
+    assert "definition" not in serialized
+    assert serialized["definition_zh"] == "衡量数据相对于均值离散程度的统计量。"

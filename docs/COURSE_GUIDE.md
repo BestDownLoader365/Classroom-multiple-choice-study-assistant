@@ -56,6 +56,7 @@ courses/
 │   ├── questions_candidate.json    # 题库候选：日常编辑的工作副本
 │   ├── glossary_candidate.json     # 术语表候选（可选）
 │   ├── versions/<sha256>/…         # 已发布内容：新增课程/每次发布保存的不可变副本
+│   │                               # （每个内容类型只保留当前版本 + 上一版，见 7.11）
 │   ├── .publish.lock               # 发布锁（由 publish_course.py 维护）
 │   ├── questions.json              # 仅 plain-file 布局（旧课程/手工创建）的已发布题库
 │   └── glossary.json               # 同上（可选）
@@ -70,7 +71,9 @@ courses/
 文件路径时读它们（见 7 节）；`versions/…`（以及 plain-file 布局下 manifest 直接指向的 `questions.json` /
 `glossary.json`）是**已发布内容**，由 worker 读取，不要手工原地编辑。`--add` 新增课程和后续发布一样把内容归档到
 `versions/<sha256>/`，所以新课程的目录根部**不会**留下无人引用的已发布副本；`versions/` 与 `.publish.lock` 由发布
-命令维护，删除课程时随课程目录一起删除。
+命令维护，删除课程时随课程目录一起删除。每次发布结束都会自动清理 `versions/`：每个内容类型只保留**当前版本 + 上一版**
+（`--keep-versions N` 可改，`--prune` 可只清理，`--no-prune` 可跳过），既不无限占用空间，又保留一步回退能力
+（见 7.11 节）。
 
 ⚠️ manifest 一旦指向 `versions/…`，根部的 `questions.json` / `glossary.json` 就**不再被任何进程读取**（loader 只解析
 manifest 声明的路径，`check_*.py` 的 `--published` 也只看 manifest 指向的文件）。它们只可能是旧课程的历史/回滚副本；
@@ -484,13 +487,18 @@ python scripts/publish_course.py --course physical_design --questions other_ques
 
 `publish_course.py --questions` 的顺序是：**一次性**读取候选文件字节 → 用同一份字节校验 → 只读预检 → 写入不可变
 的 `versions/<sha256>/questions.json` → 在课程发布锁内**重新验证** baseline → 单次 `os.replace` 原子切换
-manifest → fsync 目录。它输出 `published, pending worker activation`，**不会**自行 bump generation，也
-**不**声称文件系统发布与数据库激活是同一个事务。
+manifest → fsync 目录 → 版本清理（见 7.11）。它输出 `published, pending worker activation`，**不会**自行 bump
+generation，也**不**声称文件系统发布与数据库激活是同一个事务。
 
 `--course` 对本命令是必填；多课程部署请始终显式指定。
 
 回滚走正常流程：把旧内容当作新候选再发布一次（`check_question_bank.py` + `publish_course.py --questions`），
-**不允许**手工 `generation--`。
+**不允许**手工 `generation--`。如果只是回退上一版，可以直接发布保留的上一版副本，无需另存候选文件：
+
+```bash
+python scripts/publish_course.py --course physical_design \
+    --questions courses/physical_design/versions/<previous-sha256>/questions.json
+```
 
 ### 7.8 术语表校验
 
@@ -503,7 +511,8 @@ python scripts/check_glossary.py --questions path/questions.json --glossary path
 
 单课程模式下，语料与术语表同样优先使用该课程的 `questions_candidate.json` / `glossary_candidate.json`，报告里会
 打印实际读取的两个文件与来源（`candidate` / `published`）。校验只读取内容，不修改 registry、generation 或任何学
-习数据。校验通过后再发布：
+习数据。报告里出现 `Retired term fields` 表示词条还留着已退役的 `definition`（英文定义）：Loader 会忽略它，
+命令仍然成功，但请先删掉这些键再发布。校验通过后再发布：
 
 ```bash
 python scripts/publish_course.py --course physical_design --glossary glossary_candidate.json
@@ -539,7 +548,7 @@ journalctl -u mcq-template.service -n 100 --no-pager | grep -E 'is stale|is unav
    `glossary_candidate.json`），不要原地覆盖正在使用的 `questions.json` / `glossary.json`。
 3. **运行校验**：`check_courses.py` 必须始终通过；题库再跑 `check_question_bank.py`，术语表再跑 `check_glossary.py`。
    不传文件参数时它们默认校验上面的候选文件（用 `--published` 可改为只校验已发布内容）。
-4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换，最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
+4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换，末尾会再做一次版本清理（见 7.11），最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
 
 校验未通过时不得发布：schema 校验失败或校验脚本返回非零时，发布命令不会替换、不会创建任何文件，也不会推进 generation。
 
@@ -547,6 +556,42 @@ journalctl -u mcq-template.service -n 100 --no-pager | grep -E 'is stale|is unav
 > `course.json`）的课程，`check_question_bank.py --course <course_id>` / `check_glossary.py --course <course_id>` 在
 > 课程创建前都会报 `Unknown course`（没有 manifest 的目录被 loader 忽略）。新课程的顺序是
 > `publish_course.py --add`（自带题库 schema 与术语表门禁）→ 再用 `--course` 补跑上表的只读校验，完整步骤见 7.2 节。
+
+### 7.11 版本保留与回退（自动维护最新两版）
+
+`versions/<sha256>/` 是内容寻址的不可变副本，所以每次发布都会留下上一份。`publish_course.py` 在**每次**成功发布
+（含 `--add`）之后都会自动做一次版本清理，规则固定且保守：
+
+* **按内容类型分别计数**：`questions.json` 与 `glossary.json` 各保留“当前版本（manifest 指向的那份）+ 上一版”。
+  因此只发布术语表不会挤掉上一版题库，反之亦然；一门课最多留 4 个 digest 目录（常见情况是 2–3 个）。
+* **manifest 指向的版本永不删除**：即使 `--keep-versions 1` 也只清理历史副本。
+* **只删已知文件**：仅删除 `versions/<sha256>/questions.json` 或 `versions/<sha256>/glossary.json`；目录里还有
+  别的文件时整目录保留（内容删空后的空目录才会移除），`versions/` 之外的文件一律不动。
+* **排序依据是文件修改时间**：内容寻址目录本身不记历史，而回退只是把 manifest 指回一个已存在的目录（不重写文件），
+  所以“manifest 引用”优先于 mtime。
+
+```bash
+python scripts/publish_course.py --course physical_design --prune              # 只清理，不发布内容
+python scripts/publish_course.py --course physical_design --prune --keep-versions 3
+python scripts/publish_course.py --course physical_design --glossary g.json --keep-versions 1  # 只留当前版本
+python scripts/publish_course.py --course physical_design --questions q.json --no-prune        # 本次跳过清理
+# --add 之后会自动清理，因此 --add 与 --prune 不能同时使用；--keep-versions 0 是用法错误（退出码 2）
+```
+
+回退一步（不需要手工改 manifest，也不需要手工删文件；归档字节相同，所以不会产生新目录）：
+
+```bash
+# 1) 看有哪些版本（上一版 = 除当前 manifest 指向之外最新的一版）
+ls courses/physical_design/versions
+# 2) 把上一版当作候选重新发布
+python scripts/publish_course.py --course physical_design \
+    --glossary courses/physical_design/versions/<previous-sha256>/glossary.json
+# 3) 统一重启 worker，确认 /ready/physical_design 与页面内容
+```
+
+清理只发生在**发布之后**，所以它失败不会让一次已经生效的发布变成失败：命令会打印告警（退出码仍为 `0`），随时可以
+用 `--prune` 重试。plain-file 布局（没有 manifest）根本没有 `versions/`，这类课程运行清理只会打印“无需清理”。
+
 
 ---
 
@@ -565,6 +610,7 @@ journalctl -u mcq-template.service -n 100 --no-pager | grep -E 'is stale|is unav
 | 课件/章节增删、顺序或归属（catalogue） | 是 | +1 |
 | 课程/课件/章节标题、`lecture`、`filename` | 是 | 不变 |
 | `glossary.json` | 是 | 不变 |
+| 一次成功发布（任意内容） | `versions/` 每个内容类型保留当前 + 上一版，更早的副本被清理（见 7.11） | 不变 |
 
 attempts 保留窗口是"每个 `(learner_id, course_id, question_id)` 最近 10 次"，仍跨 Normal / Review / Exam
 共享该窗口。

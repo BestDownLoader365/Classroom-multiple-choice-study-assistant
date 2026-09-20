@@ -20,7 +20,7 @@ The project has four different kinds of state:
 | State | Storage | Examples |
 |---|---|---|
 | Question-bank state (per course) | `courses/<course_id>/questions.json`, then immutable in-memory objects | question text, options, correct answers, explanations, Chinese translations |
-| Glossary content | `glossary.json`, then immutable in-memory objects | canonical terms, aliases, translations, definitions, dynamic categories |
+| Glossary content | `glossary.json`, then immutable in-memory objects | canonical terms, aliases, Chinese translations, Chinese definitions, dynamic categories |
 | Persistent learner state | `instance/mcq.db` | users, attempts, question correction state and SRS schedule, weak-chapter verification, normal/review progress |
 | Temporary browser state | Flask's signed session cookie | signed-in user ID, flash messages |
 
@@ -112,6 +112,7 @@ MCQ_Template/
 │       ├── questions_candidate.json   # working copy the CLI reads by default
 │       ├── glossary_candidate.json    # optional glossary working copy
 │       ├── versions/<sha256>/     # immutable publications: what --add and every publish write
+│       │                          # (each content type keeps the current + previous version)
 │       ├── .publish.lock          # publication lock taken while a publish switches over
 │       ├── questions.json         # published copy, plain-file layout only (older courses)
 │       └── glossary.json          # same; unread once the manifest points at versions/
@@ -280,12 +281,15 @@ the live content.
 #### `courses/<course_id>/glossary.json` (or the optional legacy root `glossary.json`)
 
 Holds one course's domain-neutral terminology metadata, canonical terms,
-aliases, translations, definitions and optional categories. Every process validates
-and loads it once at startup, and a manifest may declare `"glossary": null` to state
-that the course has none. It is independent of learner state and of every
-question-bank fingerprint (`bank_version` plus the grading, content, placement and
-catalogue fingerprints), so glossary maintenance never triggers reconciliation and
-never fences sibling workers.
+aliases, Chinese translations, the Chinese definition (`definition_zh`) and
+optional categories. Every process validates and loads it once at startup, and a
+manifest may declare `"glossary": null` to state that the course has none. The
+English `definition` field was retired: the loader ignores a leftover key (so a
+previously published copy stays rollback-loadable) and `check_glossary.py`
+reports it as a retired field to delete. It is independent of learner state and
+of every question-bank fingerprint (`bank_version` plus the grading, content,
+placement and catalogue fingerprints), so glossary maintenance never triggers
+reconciliation and never fences sibling workers.
 
 #### `docs/QUESTION_GUIDE.md`, `docs/GLOSSARY_GUIDE.md`, `docs/COURSE_GUIDE.md` and `docs/MULTI_COURSE_MIGRATION.md`
 
@@ -410,6 +414,18 @@ as a misleading `Invalid JSON in question bank at line 1, column N`; this script
 that failure mode. Publishing still requires a coordinated restart of all workers, because
 a structural change advances the bank generation.
 
+After publishing (and after `--add`) the command runs one retention pass over the course's
+`versions/` directory: the digest directory the manifest points at is always kept, and
+each content type (`questions.json` and `glossary.json` counted separately) keeps the
+`keep - 1` most recently written other versions — `--keep-versions N` defaults to `2`,
+i.e. the current version plus the one before it, which is what makes a one-step rollback
+possible without a history journal. Superseded copies lose only the known content file
+(a directory that still holds anything else is left in place), and a failed cleanup is
+reported without failing the publish that already took effect. `--prune` runs the pass
+alone, `--no-prune` skips it, and because rollback re-points the manifest at an existing
+digest directory (no bytes are rewritten), an archived version can be published again
+exactly like a working copy.
+
 #### `instance/mcq.db`
 
 The SQLite database created automatically on first startup. It contains accounts and learner activity, but not question text.
@@ -468,7 +484,7 @@ This file contains immutable dataclasses and the quiz-mode enum:
 - `SourceDocument` / `Chapter`: the normalized course-material catalogue used by all filters and labels.
 - `LEGACY_SOURCE` / `LEGACY_CHAPTER`: the single definition of the synthetic `legacy` / `Uncategorized` catalogue. Both the loader (which materializes it for a bank without a catalogue) and the in-memory repository (which falls back to it) import these, so a legacy question is always filed under the same course material and chapter.
 - `Question`: one validated question, its options, correct answer IDs, explanations, one stable source reference, one or more chapter references, plus optional section/pages.
-- `GlossaryTerm`: one canonical English term, Chinese translation, aliases, optional definitions, and an optional arbitrary category.
+- `GlossaryTerm`: one canonical English term, its Chinese translation, aliases, an optional Chinese definition (`definition_zh`), and an optional arbitrary category.
 - `Glossary`: root glossary metadata and an immutable tuple of `GlossaryTerm` objects.
 - `User`: one local account with a UUID, username, password hash, and creation time.
 - `Attempt`: one persisted answer event.
@@ -822,7 +838,7 @@ Renders both login and registration forms. The route passes a page mode so one t
 
 ### `app/templates/courses.html`
 
-Renders the course selector (`/courses`) from the worker's course states: one card per declared course with its Chinese/English title, `course_id`, and a status badge (可学习 / 等待更新 / 已停用 / 未部署 / 不可用). Only a `ready` course gets a "开始学习" link into `/course/<course_id>/`; every other state explains itself instead of linking into a page that could only answer 503. With no declared course the page shows an empty state pointing at `courses/` and the legacy root `questions.json`.
+Renders the course selector (`/courses`) from the worker's course states: one card per declared course with its Chinese/English title, `course_id`, and a status badge (可学习 / 等待更新 / 已停用 / 未部署 / 不可用). Only a `ready` course gets a "开始学习" link into `/course/<course_id>/`; every other state explains itself instead of linking into a page that could only answer 503. With no declared course the page shows an empty state pointing at `courses/` and the legacy root `questions.json`. Each card is a column whose last child (the launcher or the state note) is pinned to the bottom edge, so a row's launcher buttons share one baseline even when the English titles wrap to a different number of lines.
 
 ### `app/templates/home.html`
 
@@ -912,7 +928,7 @@ Adds small client-side enhancements:
 
 ### `app/static/js/glossary.js`
 
-Safely highlights canonical terms and aliases in marked English content, owns the keyboard-accessible definition popover, and provides client-side glossary search, category filtering, visible counts, empty state, and Chinese reveal behavior.
+Safely highlights canonical terms and aliases in marked English content, owns the keyboard-accessible Chinese-definition popover, and provides client-side glossary search, category filtering, visible counts, empty state, and Chinese reveal behavior.
 
 The server repeats important validation, so client-side JavaScript is not treated as a security boundary.
 
@@ -1493,7 +1509,7 @@ the highlight's own event prevents a term inside an answer row from selecting
 or submitting that answer; the rest of the row retains its normal behavior.
 
 `GET /glossary` renders metadata and terms from the repository. Search covers
-canonical English, aliases, Chinese term, both definitions, and category. Its
+canonical English, aliases, Chinese term, the Chinese definition, and category. Its
 category picker is populated from repository-derived categories. English is
 shown first and each card uses a real button to reveal or hide Chinese. The
 quiz-size, mistake-filter, and glossary-filter pickers share one small

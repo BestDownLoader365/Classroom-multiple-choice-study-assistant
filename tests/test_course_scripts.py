@@ -370,6 +370,27 @@ def test_check_glossary_validates_and_reports_coverage(tmp_path, capsys):
     assert "alpha-term-1" in out
 
 
+def test_check_glossary_reports_a_retired_term_field_without_failing(
+    tmp_path, capsys
+):
+    """A leftover ``definition`` is ignored by the loader and reported, not fatal."""
+    questions = tmp_path / "questions.json"
+    glossary = tmp_path / "glossary.json"
+    write_json(questions, course_bank())
+    payload = course_glossary("alpha")
+    payload["terms"][0]["definition"] = "An English definition."
+    write_json(glossary, payload)
+
+    exit_code = check_glossary_main(
+        ["--questions", str(questions), "--glossary", str(glossary)]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Retired term fields" in out
+    assert '"definition" in 1 term(s): alpha-term-1' in out
+
+
 def test_check_glossary_rejects_an_invalid_glossary(tmp_path, capsys):
     questions = tmp_path / "questions.json"
     glossary = tmp_path / "glossary.json"
@@ -852,6 +873,184 @@ def test_publish_course_uses_the_default_candidates(tmp_path, capsys):
     assert manifest["glossary"] == f"versions/{glossary_digest}/glossary.json"
     assert "使用默认候选" in capsys.readouterr().out
 
+
+
+def _publish_bank_versions(courses_dir, database, tmp_path, texts, *extra):
+    """Publish one changed question bank per text; return the digests in order."""
+    digests = []
+    for index, text in enumerate(texts):
+        candidate = tmp_path / f"candidate-{index}.json"
+        changed = course_bank(("a", "alpha"))
+        changed["questions"][0]["text"] = text
+        payload = write_json(candidate, changed)
+        digests.append(hashlib.sha256(payload.read_bytes()).hexdigest())
+        assert (
+            publish_course_main(
+                [
+                    "--course",
+                    A,
+                    "--questions",
+                    str(candidate),
+                    *extra,
+                    *cli_common(courses_dir, database),
+                ]
+            )
+            == 0
+        )
+    return digests
+
+
+def test_publish_keeps_the_current_and_the_previous_version_only(
+    world, tmp_path, capsys
+):
+    """The retention pass keeps one rollback step and deletes the rest."""
+    app, courses_dir, database, _digest = world
+    del app
+
+    digests = _publish_bank_versions(
+        courses_dir, database, tmp_path, ("one", "two", "three")
+    )
+
+    versions = courses_dir / A / "versions"
+    assert sorted(path.name for path in versions.iterdir()) == sorted(digests[-2:])
+    manifest = json.loads((courses_dir / A / "course.json").read_text())
+    assert manifest["questions"] == f"versions/{digests[-1]}/questions.json"
+    out = capsys.readouterr().out
+    assert f"删除 versions/{digests[0]}/questions.json" in out
+
+
+def test_version_retention_counts_each_content_type_separately(tmp_path, capsys):
+    """A glossary publish never evicts the previous question bank."""
+    courses_dir = tmp_path / "courses"
+    glossary = course_glossary("alpha")
+    write_course(courses_dir, A, course_bank(), glossary=glossary)
+    app = make_multi_app(tmp_path, {A: course_bank()}, glossaries={A: glossary})
+    del app
+    database = tmp_path / "mcq.db"
+
+    question_digests = _publish_bank_versions(
+        courses_dir, database, tmp_path, ("one", "two")
+    )
+    glossary_digests = []
+    for suffix in ("one", "two"):
+        changed = course_glossary("alpha")
+        changed["terms"][0]["term"] = f"alpha glossary {suffix}"
+        candidate = write_json(courses_dir / A / "glossary_candidate.json", changed)
+        glossary_digests.append(hashlib.sha256(candidate.read_bytes()).hexdigest())
+        assert (
+            publish_course_main(
+                [
+                    "--course",
+                    A,
+                    "--glossary",
+                    str(candidate),
+                    *cli_common(courses_dir, database),
+                ]
+            )
+            == 0
+        )
+
+    versions = courses_dir / A / "versions"
+    assert sorted(
+        path.name for path in versions.iterdir() if (path / "questions.json").is_file()
+    ) == sorted(question_digests)
+    assert sorted(
+        path.name for path in versions.iterdir() if (path / "glossary.json").is_file()
+    ) == sorted(glossary_digests)
+    capsys.readouterr()
+
+
+def test_keep_versions_one_leaves_only_the_current_version(world, tmp_path, capsys):
+    """``--keep-versions 1`` trades the rollback copy for the least disk use."""
+    app, courses_dir, database, _digest = world
+    del app
+
+    digests = _publish_bank_versions(
+        courses_dir, database, tmp_path, ("one", "two"), "--keep-versions", "1"
+    )
+
+    versions = courses_dir / A / "versions"
+    assert sorted(path.name for path in versions.iterdir()) == [digests[-1]]
+    capsys.readouterr()
+
+
+def test_keep_versions_must_be_positive(world, tmp_path, capsys):
+    _app, courses_dir, database, _digest = world
+
+    assert (
+        publish_course_main(
+            ["--course", A, "--keep-versions", "0", *cli_common(courses_dir, database)]
+        )
+        == 2
+    )
+    assert "keep-versions" in capsys.readouterr().err
+
+
+def test_prune_is_refused_with_contradictory_flags(world, tmp_path, capsys):
+    _app, courses_dir, database, _digest = world
+    common = cli_common(courses_dir, database)
+
+    assert publish_course_main(["--course", A, "--prune", "--no-prune", *common]) == 2
+    assert "--no-prune" in capsys.readouterr().err
+    assert publish_course_main(["--course", A, "--prune", "--enable", *common]) == 2
+    assert "--enable" in capsys.readouterr().err
+    assert (
+        publish_course_main(["--course", A, "--prune", "--add", "--title", "X", *common])
+        == 2
+    )
+    assert "add" in capsys.readouterr().err
+
+
+def test_prune_only_run_cleans_what_no_prune_left_behind(world, tmp_path, capsys):
+    """``--prune`` works without content, and never deletes an unexpected file."""
+    app, courses_dir, database, _digest = world
+    del app
+    digests = _publish_bank_versions(
+        courses_dir, database, tmp_path, ("one", "two", "three"), "--no-prune"
+    )
+    versions = courses_dir / A / "versions"
+    assert len(list(versions.iterdir())) == 3
+    notes = versions / digests[0] / "notes.txt"
+    notes.write_text("keep me", encoding="utf-8")
+    capsys.readouterr()
+
+    exit_code = publish_course_main(
+        ["--course", A, "--prune", *cli_common(courses_dir, database)]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "状态：pruned" in out
+    remaining = sorted(path.name for path in versions.iterdir())
+    assert digests[-1] in remaining
+    assert digests[-2] in remaining
+    # The superseded copy lost its content, but the directory it shared with an
+    # unrelated file is left in place.
+    assert digests[0] in remaining
+    assert not (versions / digests[0] / "questions.json").exists()
+    assert notes.is_file()
+
+
+def test_prune_is_a_no_op_for_a_course_without_published_copies(
+    tmp_path, capsys
+):
+    """A plain-file course (and a fresh `--add`) has nothing to prune."""
+    courses_dir = tmp_path / "courses"
+    write_course(courses_dir, A, course_bank(), glossary=course_glossary("alpha"))
+    app = make_multi_app(
+        tmp_path, {A: course_bank()}, glossaries={A: course_glossary("alpha")}
+    )
+    del app
+    database = tmp_path / "mcq.db"
+
+    exit_code = publish_course_main(
+        ["--course", A, "--prune", *cli_common(courses_dir, database)]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "没有已发布副本" in out
+    assert not (courses_dir / A / "versions").exists()
 
 
 def test_publish_course_add_uses_the_default_candidates(tmp_path, capsys):

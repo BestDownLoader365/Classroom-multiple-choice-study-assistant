@@ -85,7 +85,7 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 题库与术语库各有与当前 Loader 同步的独立指南，多课程运营请看课程手册：
 
 - [`questions.json` 题库编写指南](docs/QUESTION_GUIDE.md)：题目、目录、多章节归属、内容质量、校验与迁移；
-- [`glossary.json` 专业术语库编写指南](docs/GLOSSARY_GUIDE.md)：术语、别名、翻译、定义、分类、匹配规则、覆盖校验与验收；
+- [`glossary.json` 专业术语库编写指南](docs/GLOSSARY_GUIDE.md)：术语、别名、中文翻译、中文释义（`definition_zh`，英文 `definition` 已退役）、分类、匹配规则、覆盖校验与验收；
 - [课程模型与运营手册](docs/COURSE_GUIDE.md)：课程 manifest、URL、切课、就绪检查、按课程发布与故障隔离；
 - [多课程迁移与回滚手册](docs/MULTI_COURSE_MIGRATION.md)：命名空间迁移、字段级验证、故障注入与回滚；
 - [技术架构说明](docs/ARCHITECTURE.md)：模块职责、请求流程、SQLite schema、测试架构与部署；
@@ -169,7 +169,7 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 4. 停用/启用用 `python scripts/publish_course.py --course <course_id> --disable` / `--enable`；删除课程用 `python scripts/delete_course.py --course <course_id> --dry-run` 预览后再删除（**不要**手工 `rm -rf courses/<course_id>`）。
 5. 统一重启应用 worker，并用 `/ready/<course_id>` 确认该课程已激活。
 
-无需修改 Python、Jinja template、JavaScript、CSS 或数据库 schema。`glossary.json` 不参与 question-bank fingerprint；单独修改术语、翻译或定义不会清空答题记录、错题、纠正/强化状态或练习进度。
+无需修改 Python、Jinja template、JavaScript、CSS 或数据库 schema。`glossary.json` 不参与 question-bank fingerprint；单独修改术语、中文翻译或中文释义不会清空答题记录、错题、纠正/强化状态或练习进度。
 
 最小的 Statistics 示例：
 
@@ -186,7 +186,6 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
       "term": "Standard Deviation",
       "term_zh": "标准差",
       "aliases": ["SD"],
-      "definition": "A measure of dispersion around the mean.",
       "definition_zh": "衡量数据相对于均值离散程度的统计量。",
       "category": "Descriptive Statistics"
     }
@@ -194,7 +193,7 @@ Normal coverage、当前 Normal/Review 队列、题目角色、答案 token、�
 }
 ```
 
-Root 必填字段为 `schema_version`、`title`、`title_zh`、`terms`；`description` 和 `description_zh` 可选。每个 term 必须包含 `id`、`term`、`term_zh`，可选字段为 `aliases`、`definition`、`definition_zh`、`category`。分类直接按 `terms[].category` 首次出现顺序生成，不需要维护第二份 categories 数组。详细的字段表、alias 设计、Unicode 边界与冲突规则见专业术语库指南。
+Root 必填字段为 `schema_version`、`title`、`title_zh`、`terms`；`description` 和 `description_zh` 可选。每个 term 必须包含 `id`、`term`、`term_zh`，可选字段为 `aliases`、`definition_zh`、`category`。术语只写**中文释义** `definition_zh`：英文定义字段 `definition` 已经退役，词汇卡片与高亮弹层都不再展示英文解释（Loader 会忽略遗留的 `definition` 键，`check_glossary.py` 会把它列为 `Retired term fields` 提示删除）。分类直接按 `terms[].category` 首次出现顺序生成，不需要维护第二份 categories 数组。详细的字段表、alias 设计、Unicode 边界与冲突规则见专业术语库指南。
 
 Loader 会拒绝重复 ID、标准化后重复的 canonical term、空 alias、term/alias 冲突和同一 alias 指向多个词条。发布前运行统一命名的术语表校验脚本 `check_glossary.py`：
 
@@ -204,11 +203,11 @@ python scripts/check_glossary.py --all                       # 校验全部启�
 python scripts/check_glossary.py --questions path/to/questions.json --glossary path/to/glossary.json  # 显式离线
 ```
 
-校验只读取内容，不会修改 `question_registry`、generation 或任何学习数据。它会验证 schema、报告未在学习语料中出现的 orphan entries，并给出大写缩写、括号缩写和连字符 token 等“可能遗漏候选”；候选只供人工复核，不会自动写入 glossary 或生成翻译。
+校验只读取内容，不会修改 `question_registry`、generation 或任何学习数据。它会验证 schema、报告未在学习语料中出现的 orphan entries、列出仍带着已退役 `definition` 字段的词条，并给出大写缩写、括号缩写和连字符 token 等“可能遗漏候选”；候选只供人工复核，不会自动写入 glossary 或生成翻译。
 
 `sources` 和 `chapters` 是**该课程**题库内唯一的课程目录；题目通过 `chapter_ids` 可以同时属于同一份课程资料下的一个或多个章节，筛选任一所属章节都能找到该题。
 
-课程内容不在版本控制内（`courses/` 已被 `.gitignore` 排除），部署时把内容放进 `courses/<course_id>/`。本地示例课程：`eek5101`（EEK5101 集成电路技术与设计方法：50 题，按 3 份课件划分为 12 个章节；术语库 83 个词条、19 个 aliases、22 个分类，manifest 指向 `versions/<sha256>/` 中的不可变发布副本）和 `eek5106`（EEK5106 半导体良率与失效分析：225 题，按 5 份原始课件（`eek5106-week1`…`week5`）划分为 38 个可练习主题；术语库 220 个词条、150 个 aliases、13 个分类）。`section` 和 `pages` 提供更精确的回溯位置。旧题库可以继续加载：旧的单值 `chapter_id` 会自动转换成单元素章节集合；未提供课程目录时，题目自动归入 `Uncategorized`。
+课程内容不在版本控制内（`courses/` 已被 `.gitignore` 排除），部署时把内容放进 `courses/<course_id>/`。本地示例课程：`eek5101`（EEK5101 集成电路技术与设计方法：50 题，按 3 份课件划分为 12 个章节；术语库为 ASIC 物理设计词汇 94 个词条、28 个 aliases、8 个分类，只有中文释义）和 `eek5106`（EEK5106 半导体良率与失效分析：225 题，按 5 份原始课件（`eek5106-week1`…`week5`）划分为 38 个可练习主题；术语库 220 个词条、150 个 aliases、13 个分类）。两个课程的 manifest 都指向 `versions/<sha256>/` 中的不可变发布副本，每次发布后每个内容类型只保留“当前 + 上一版”。`section` 和 `pages` 提供更精确的回溯位置。旧题库可以继续加载：旧的单值 `chapter_id` 会自动转换成单元素章节集合；未提供课程目录时，题目自动归入 `Uncategorized`。
 
 基础校验规则：
 
@@ -230,6 +229,7 @@ python scripts/check_glossary.py --questions path/to/questions.json --glossary p
 | 课程目录 / manifest / 整门课能否加载 | `python scripts/check_courses.py` | `python scripts/publish_course.py --add` / `--enable` / `--disable` |
 | `questions.json` | `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db` | `python scripts/publish_course.py --course <course_id> --questions questions_candidate.json` |
 | `glossary.json` | `python scripts/check_glossary.py --course <course_id>` | `python scripts/publish_course.py --course <course_id> --glossary glossary_candidate.json` |
+| `versions/` 保留数量（当前 + 上一版） | 无需单独校验：`--prune` 会打印保留/删除清单 | `python scripts/publish_course.py --course <course_id> --prune [--keep-versions N]`（发布后也会自动执行） |
 | 删除整门课程 | `python scripts/delete_course.py --course <course_id> --dry-run` | `python scripts/delete_course.py --course <course_id>`（有学习数据时先确认再加 `--force`） |
 
 > 新增一门课时上表的顺序要调整：`check_courses.py` 只报告已声明（已有 `course.json`）的课程，而且 `check_question_bank.py --course <course_id>` / `check_glossary.py --course <course_id>` 在课程创建前都会报 `Unknown course`。新课程先运行 `python scripts/publish_course.py --course <course_id> --add ...`（它自带题库 schema 与术语表门禁），再用 `--course` 补跑上表的只读校验；完整步骤见[课程模型与运营手册](docs/COURSE_GUIDE.md)第 7.2 节。
@@ -237,8 +237,9 @@ python scripts/check_glossary.py --questions path/to/questions.json --glossary p
 1. **准备校验脚本**：确认该内容种类已有 `check_<校验对象>.py`；没有就先补齐脚本和测试。
 2. **修改内容**：只编辑候选文件（`courses/<course_id>/questions_candidate.json` / `glossary_candidate.json`），不要原地覆盖正在使用的 `questions.json` / `glossary.json`。
 3. **运行校验**：`check_courses.py` 必须始终通过；题库再用 `check_question_bank.py`，术语表再用 `check_glossary.py`。不传文件参数时它们默认读取该课程的候选文件（用 `--published` 可以强制只校验已发布内容）。
-4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换，最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
-5. **删除课程不要手工 `rm`**：课程目录之外还有 `courses` 身份、学习数据、`question_bank_state`、`question_registry` 退役记录和 `default_course_id` 偏好。`python scripts/delete_course.py --course <course_id> --dry-run` 会先列出全部将删除/清理的内容，确认后再去掉 `--dry-run` 执行（默认自动备份数据库；仍有学习数据时需要 `--force`），它同样支持只清理“数据库里有身份、内容已不在”的课程。
+4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换，末尾自动做一次版本清理（每个内容类型保留当前 + 上一版，`--keep-versions N` 可改、`--prune` 可只清理、`--no-prune` 可跳过），最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
+5. **回退一步不需要手工操作**：把保留的上一版当作候选重新发布即可（`python scripts/publish_course.py --course <course_id> --glossary courses/<course_id>/versions/<previous-sha256>/glossary.json`，题库同理换 `--questions`）；归档字节相同，所以不会产生新目录，也不允许手工 `generation--`。细节见[课程模型与运营手册](docs/COURSE_GUIDE.md)第 7.11 节。
+6. **删除课程不要手工 `rm`**：课程目录之外还有 `courses` 身份、学习数据、`question_bank_state`、`question_registry` 退役记录和 `default_course_id` 偏好。`python scripts/delete_course.py --course <course_id> --dry-run` 会先列出全部将删除/清理的内容，确认后再去掉 `--dry-run` 执行（默认自动备份数据库；仍有学习数据时需要 `--force`），它同样支持只清理“数据库里有身份、内容已不在”的课程。
 
 校验失败时，发布命令不会替换或创建任何文件，也不会推进 generation；课程创建 / 修改 / 删除的完整教程见[课程模型与运营手册](docs/COURSE_GUIDE.md)第 7 节。
 

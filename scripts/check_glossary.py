@@ -34,8 +34,8 @@ Nothing is published by this script.  Run it *before* publishing; the publish
 command (``publish_course.py``) re-runs the matching check by default and refuses
 to switch over content that does not pass it.
 
-Exit codes: ``0`` the glossary is valid (orphan/candidate reports are advisory),
-``1`` the glossary (or its corpus) fails to load or fails validation.
+Exit codes: ``0`` the glossary is valid (orphan/candidate/retired-field reports are
+advisory), ``1`` the glossary (or its corpus) fails to load or fails validation.
 """
 
 import argparse
@@ -50,6 +50,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.repositories import GlossaryError, GlossaryLoader  # noqa: E402
+
+#: Term fields that were removed from the glossary contract.  The loader ignores
+#: a leftover key on purpose (an older published copy stays rollback-safe), so
+#: the check reports it instead: a term carries its meaning in ``definition_zh``
+#: only, and everything else has to be deleted from the file.
+RETIRED_TERM_FIELDS = ("definition",)
 
 
 def corpus_strings(payload: dict[str, Any]) -> Iterable[str]:
@@ -114,6 +120,29 @@ def candidates(corpus: str) -> list[tuple[str, int]]:
     )
 
 
+def retired_term_fields(glossary_path: Path) -> list[tuple[str, str]]:
+    """Return ``(field, term_id)`` pairs still carrying a retired term field."""
+    try:
+        payload = json.loads(glossary_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    raw_terms = payload.get("terms")
+    if not isinstance(raw_terms, list):
+        return []
+    found: list[tuple[str, str]] = []
+    for index, term in enumerate(raw_terms, start=1):
+        if not isinstance(term, dict):
+            continue
+        for field in RETIRED_TERM_FIELDS:
+            if field in term:
+                raw_id = term.get("id")
+                label = raw_id if isinstance(raw_id, str) and raw_id else f"#{index}"
+                found.append((field, label))
+    return found
+
+
 def check_one(questions_path: Path, glossary_path: Path) -> int:
     """Check one (questions, glossary) pair and print its report."""
     try:
@@ -147,6 +176,17 @@ def check_one(questions_path: Path, glossary_path: Path) -> int:
         f"Validated {len(glossary.terms)} canonical terms, {alias_count} aliases, "
         f"and {category_count} categories."
     )
+    retired = retired_term_fields(glossary_path)
+    if retired:
+        grouped: dict[str, list[str]] = {}
+        for field, term_id in retired:
+            grouped.setdefault(field, []).append(term_id)
+        print("Retired term fields (ignored by the loader; delete them):")
+        for field, term_ids in grouped.items():
+            preview = ", ".join(term_ids[:8]) + (" …" if len(term_ids) > 8 else "")
+            print(f'  - "{field}" in {len(term_ids)} term(s): {preview}')
+    else:
+        print("Retired term fields: none")
     if orphaned:
         print("Orphan entries (no canonical term or alias found in corpus):")
         for term_id in orphaned:

@@ -15,7 +15,7 @@ courses/<course_id>/
 └── glossary.json
 ```
 
-应用启动时读取并完整校验它，修改后需要重启开发服务器或生产 worker 才会生效。manifest 声明了 glossary 但文件缺失/损坏时，该课程会被标记为 `unavailable`（不会假装“没有术语表”）；`glossary: null` 才是明确的“本课程没有术语表”。旧版的根目录 `glossary.json` 仍然可用：它会作为 `legacy` 课程的术语表加载。
+应用启动时读取并完整校验它，修改后需要重启开发服务器或生产 worker 才会生效。manifest 声明了 glossary 但文件缺失/损坏时，该课程会被标记为 `unavailable`（不会假装“没有术语表”）；`glossary: null` 才是明确的“本课程没有术语表”。旧版的根目录 `glossary.json` 仍然可用：它会作为 `legacy` 课程的术语表加载。发布后 manifest 指向 `versions/<sha256>/glossary.json`，每次发布只保留“当前 + 上一版”两份副本（见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节），上一版可随时当作候选重新发布以回退。
 
 两个 JSON 文件职责不同：
 
@@ -41,7 +41,6 @@ courses/<course_id>/
       "term": "Standard Deviation",
       "term_zh": "标准差",
       "aliases": ["SD"],
-      "definition": "A measure of dispersion around the mean.",
       "definition_zh": "衡量数据相对于均值离散程度的统计量。",
       "category": "Descriptive Statistics"
     },
@@ -50,7 +49,6 @@ courses/<course_id>/
       "term": "Null Hypothesis",
       "term_zh": "原假设",
       "aliases": ["H0"],
-      "definition": "A hypothesis tested for possible rejection.",
       "definition_zh": "统计检验中等待数据证据判断是否拒绝的假设。",
       "category": "Hypothesis Testing"
     }
@@ -83,9 +81,10 @@ courses/<course_id>/
 | `term` | 必填 | 非空字符串 | 规范英文术语，也是词汇卡片主标题。 |
 | `term_zh` | 必填 | 非空字符串 | 中文名称，供主动回忆和释义弹层使用。 |
 | `aliases` | 可选 | 字符串数组 | 缩写、全称变体或常见写法；省略时等同于 `[]`。每项必须非空。 |
-| `definition` | 可选 | 非空字符串 | 英文定义。 |
-| `definition_zh` | 可选 | 非空字符串 | 中文定义。 |
+| `definition_zh` | 可选 | 非空字符串 | 中文释义；术语页“显示中文”与高亮弹层显示的就是它。 |
 | `category` | 可选 | 非空字符串 | 任意课程自己的分类名称；省略后卡片显示 `General`。 |
+
+术语只需要**中文释义**：英文定义字段 `definition` 已经退役，词条不再提供英文解释。Loader 会**忽略**遗留的 `definition` 键（这样一份更早发布的术语表仍然可以回滚加载），但 `check_glossary.py` 会在报告里列出它（见 9.3、11 节），请从文件里删除。
 
 建议为 ID 使用稳定的 kebab-case，例如 `standard-deviation`、`setup-time`。当前 Loader 只要求它是唯一的非空字符串，并不强制某种字符格式。修改翻译或释义时应保留原 ID；删除词条后也不要把其 ID 分配给含义无关的新词条。
 
@@ -137,12 +136,12 @@ Loader 会对每个 canonical term 和 alias 执行 Unicode NFKC 规范化、大
 
 例如 `"EDA"`、`"eda"` 和 `"  EDA  "` 会被视为同一个标签。出现冲突时，应先判断它们是否属于同一概念：属于同一概念就合并为一个词条；含义不同则不要使用这个歧义 alias，改用课程文本中更明确的写法。
 
-## 7. 翻译、定义与分类建议
+## 7. 翻译、释义与分类建议
 
 - `term_zh` 应优先使用课程教材或行业通行译法，必要时保留英文缩写。
 - `definition_zh` 用一到三句话解释“它是什么、在本课程中做什么”，不要只重复中文名称。
-- `definition` 应与中文定义含义一致；两个定义都可省略，但建议至少提供中文定义。
-- 同一概念在不同语境有不同含义时，定义应限定当前课程语境。
+- 只写中文释义：英文定义字段 `definition` 已退役，词汇卡片与释义弹层都不再展示英文解释。
+- 同一概念在不同语境有不同含义时，释义应限定当前课程语境。
 - 分类应使用稳定、粒度一致的名称，例如 `Descriptive Statistics`、`Hypothesis Testing`，不要把近义类别拆成大小写或单复数不同的多组。
 - 术语数组的顺序就是词汇卡片的显示顺序；建议按课程顺序或分类后概念顺序排列。
 
@@ -231,6 +230,7 @@ python scripts/check_glossary.py \
 输出含义：
 
 - `Validated ...`：术语 JSON 已通过 Loader；
+- `Retired term fields`：词条里还留着已退役的 `definition`（英文定义）。Loader 会忽略它，命令也仍然成功，但请删除这些键；
 - `Orphan entries`：该词条的 term 和 aliases 都没有在校验语料中出现，可能是多余词条、缺少 alias，或题库还未覆盖该概念；
 - `Possible uncovered glossary candidates`：脚本从大写缩写、括号缩写和连字符 token 中找出的人工复核候选；它不是“必须加入”的错误清单。
 
@@ -249,9 +249,9 @@ pytest -q
 
 1. 首页“专业词汇”入口显示新术语库的中文标题。
 2. `/glossary` 显示正确标题、简介、术语数量和动态分类数量。
-3. 搜索可以匹配英文 term、alias、中文、定义和分类。
+3. 搜索可以匹配英文 term、alias、中文释义和分类。
 4. 选择分类后卡片立即筛选，无需提交按钮；选择“全部分类”可恢复全部词条。
-5. “显示中文 / 隐藏中文”按钮能显示术语翻译和定义。
+5. “显示中文 / 隐藏中文”按钮能显示中文术语与中文释义；卡片与弹层里都不再出现英文定义。
 6. 题目、反馈和错题中的 term/alias 被正确高亮，点击、Enter 和 Space 均可打开释义。
 7. 短词没有误命中较长单词，重叠短语由更长术语优先匹配。
 8. 手机宽度下词汇卡片、分类下拉框和弹层可正常阅读。
@@ -269,6 +269,7 @@ pytest -q
 | `duplicate field "id"` | 两个词条 ID 相同 | 为每个概念分配唯一稳定 ID。 |
 | `duplicates another term or alias after normalization` | 同一词条内 term/alias 重复 | 删除重复标签。 |
 | `collides with glossary term ... after normalization` | 标签已由另一词条占用 | 合并同义词条，或删除/改写歧义 alias。 |
+| 报告出现 `Retired term fields ... "definition"` | 词条还带着已退役的英文定义字段；Loader 会忽略它，所以不会报错 | 删除每个词条的 `definition` 键，再按第 12 节重新校验并发布。 |
 | 术语页有词条但正文没有高亮 | 正文拼写不是 term/alias 的字面形式，或正文不属于高亮区域 | 添加准确 alias，并确认目标是题干、选项、反馈、解析或错题内容。 |
 | 修改后页面仍是旧内容 | 应用只在启动时加载文件 | 重启开发进程或生产 worker。 |
 
@@ -278,10 +279,10 @@ pytest -q
 2. 从题干、选项、解析和课程目录收集需要学习的专业概念。
 3. 为每个概念确定 canonical term、中文译名、稳定 ID 和分类。
 4. 根据题库真实写法补充无歧义 aliases。
-5. 编写简洁、课程语境明确的中英文定义。
+5. 编写简洁、课程语境明确的中文释义 `definition_zh`（英文定义 `definition` 已退役，不要再写）。
 6. 运行 `python -m json.tool`、`python scripts/check_glossary.py --course <course_id>` 覆盖校验；课程目录或 manifest 有改动时再跑 `python scripts/check_courses.py`。
-7. 人工处理 orphan 与候选报告，不要把候选结果直接批量写入术语库。
-8. 校验通过后再部署 `questions.json` 和 `glossary.json`（`python scripts/publish_course.py --course <course_id> --questions questions_candidate.json --glossary glossary_candidate.json` 可一次发布两者，不传内容参数时默认发布的也正是这两个候选文件；默认会重跑对应校验），重启应用进程并完成浏览器验收。
+7. 人工处理 retired field、orphan 与候选报告，不要把候选结果直接批量写入术语库。
+8. 校验通过后再部署 `questions.json` 和 `glossary.json`（`python scripts/publish_course.py --course <course_id> --questions questions_candidate.json --glossary glossary_candidate.json` 可一次发布两者，不传内容参数时默认发布的也正是这两个候选文件；默认会重跑对应校验），重启应用进程并完成浏览器验收。发布结束会打印版本保留结果：每个内容类型只保留**当前版本 + 上一版**（见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节），因此上一版随时可以回退。
 
 更换 `questions.json` 时按 [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) 第 11.6 节发布：先预检（`--course <course_id>`）、再原子发布（`publish_course.py --questions`）、最后更新 worker。题库按 `question.id` **在该课程内**逐题增量同步，**不会重置该课程的学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进**该课程**的 generation，让仍在运行旧内容的 worker 只在该课程的学习页面返回 503，因此这类发布要更新 worker，但**不影响其他课程**。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。发布新课程时建议两个文件一起审核，避免旧术语出现在新题库中。
 
@@ -294,9 +295,11 @@ pytest -q
 - [ ] 每个 alias 都是课程中实际使用、含义明确的非空字符串。
 - [ ] 没有 canonical term/alias 的标准化冲突。
 - [ ] 需要识别的复数、缩写、空格和连字符变体已显式加入 aliases。
-- [ ] 中文译名和定义已经过课程内容审核。
+- [ ] 中文译名和中文释义（`definition_zh`）已经过课程内容审核。
+- [ ] 没有任何词条还带着已退役的 `definition` 字段（`check_glossary.py` 报告 `Retired term fields: none`）。
 - [ ] 分类名称与粒度一致，词条顺序符合学习需要。
 - [ ] 标准 JSON、GlossaryLoader、`check_glossary.py` 覆盖校验、`check_courses.py` 和完整测试集已运行且通过。
 - [ ] orphan 和候选报告已经人工复核。
 - [ ] 校验全部通过后才执行 publish course（`publish_course.py --glossary …`，默认会重跑 `check_glossary.py`）；任一校验失败时没有发布任何内容。
+- [ ] 发布输出里的版本保留结果符合预期（默认每个内容类型保留当前版本 + 上一版，见 `COURSE_GUIDE.md` 第 7.11 节）。
 - [ ] 已更新 worker 并完成桌面端、手机端、鼠标和键盘验收。

@@ -81,7 +81,9 @@ class GlossaryLoader:
             term = self._required_string(raw_term, "term", context)
             term_zh = self._required_string(raw_term, "term_zh", context)
             aliases = self._aliases(raw_term, context)
-            definition = self._optional_string(raw_term, "definition", context)
+            # "definition" (English definition) was retired: a term carries its
+            # meaning in ``definition_zh`` only.  A leftover key is ignored, not
+            # rejected, so a previously published copy stays loadable.
             definition_zh = self._optional_string(raw_term, "definition_zh", context)
             category = self._optional_string(raw_term, "category", context)
 
@@ -110,7 +112,6 @@ class GlossaryLoader:
                     term=term,
                     term_zh=term_zh,
                     aliases=aliases,
-                    definition=definition,
                     definition_zh=definition_zh,
                     category=category,
                 )

@@ -93,7 +93,6 @@ class GlossaryTerm:
     term: str
     term_zh: str
     aliases: tuple[str, ...] = ()
-    definition: str | None = None
     definition_zh: str | None = None
     category: str | None = None
 

@@ -63,8 +63,6 @@
     popoverChinese.className = "glossary-popover-zh";
     const popoverDefinitionZh = document.createElement("p");
     popoverDefinitionZh.className = "glossary-popover-definition";
-    const popoverDefinitionEn = document.createElement("p");
-    popoverDefinitionEn.className = "glossary-popover-definition-en";
     const popoverClose = document.createElement("button");
     popoverClose.className = "glossary-popover-close";
     popoverClose.type = "button";
@@ -76,7 +74,6 @@
         popoverTerm,
         popoverChinese,
         popoverDefinitionZh,
-        popoverDefinitionEn,
     );
     document.body.append(popover);
 
@@ -129,8 +126,6 @@
         popoverChinese.textContent = term.term_zh;
         popoverDefinitionZh.textContent = term.definition_zh || "";
         popoverDefinitionZh.hidden = !term.definition_zh;
-        popoverDefinitionEn.textContent = term.definition || "";
-        popoverDefinitionEn.hidden = !term.definition;
         trigger.setAttribute("aria-expanded", "true");
         popover.hidden = false;
         requestAnimationFrame(() => {
@@ -254,7 +249,6 @@
             term.term,
             ...(term.aliases || []),
             term.term_zh,
-            term.definition,
             term.definition_zh,
             term.category,
         ].filter(Boolean).join(" ").toLocaleLowerCase(),

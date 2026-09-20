@@ -15,7 +15,7 @@ def test_loads_arbitrary_course_into_immutable_objects(tmp_path, statistics_glos
     assert glossary.title == "Statistics Glossary"
     assert glossary.title_zh == "统计学专业词汇"
     assert glossary.terms[0].aliases == ("SD",)
-    assert glossary.terms[1].definition.startswith("A hypothesis")
+    assert glossary.terms[0].definition_zh == "衡量数据相对于均值离散程度的统计量。"
     assert glossary.terms[1].definition_zh is None
 
 
@@ -61,10 +61,20 @@ def test_optional_fields_must_be_nonempty_strings_when_present(
     tmp_path, statistics_glossary
 ):
     invalid = copy.deepcopy(statistics_glossary)
-    invalid["terms"][0]["definition"] = ""
-    with pytest.raises(GlossaryError, match='standard-deviation.*definition'):
+    invalid["terms"][0]["definition_zh"] = ""
+    with pytest.raises(GlossaryError, match='standard-deviation.*definition_zh'):
         load(tmp_path, invalid)
 
     statistics_glossary["terms"][0]["category"] = "Arbitrary Domain Category"
     glossary = load(tmp_path, statistics_glossary)
     assert glossary.terms[0].category == "Arbitrary Domain Category"
+
+
+def test_retired_english_definition_field_is_ignored(tmp_path, statistics_glossary):
+    """``definition`` was retired; a leftover key must not break a published copy."""
+    statistics_glossary["terms"][0]["definition"] = "A measure of dispersion."
+
+    glossary = load(tmp_path, statistics_glossary)
+
+    assert glossary.terms[0].definition_zh == "衡量数据相对于均值离散程度的统计量。"
+    assert not hasattr(glossary.terms[0], "definition")

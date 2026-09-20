@@ -31,6 +31,10 @@ change follows the same check-then-publish flow: run the matching
     python scripts/publish_course.py --course physical_design --disable
     python scripts/publish_course.py --course physical_design --enable
 
+    # prune superseded versions/ copies without publishing anything
+    python scripts/publish_course.py --course physical_design --prune
+    python scripts/publish_course.py --course physical_design --prune --keep-versions 3
+
 ``--questions`` defaults to ``courses/<course_id>/questions_candidate.json`` and
 ``--glossary`` to ``courses/<course_id>/glossary_candidate.json`` (only for a
 course that declares a glossary).  When no content flag is given the defaults are
@@ -53,6 +57,25 @@ question bank is gated by schema validation only.  Nothing here restarts a
 worker or bumps a generation.
 
 Exit codes: ``0`` success, ``1`` validation/publish refused, ``2`` usage.
+
+Version retention
+-----------------
+
+``versions/<sha256>/`` is content-addressed, so publishing a change leaves the
+previous copy behind.  Every publish therefore ends with one retention pass:
+for **each** content type (``questions.json`` and ``glossary.json`` separately)
+the directory the manifest points at is kept, plus the ``keep - 1`` most
+recently written other versions — by default the current version and the one
+before it, which is what makes a one-step rollback possible:
+
+    python scripts/publish_course.py --course physical_design \\
+        --glossary courses/physical_design/versions/<previous-sha256>/glossary.json
+
+Only ``versions/<sha256>/{questions.json,glossary.json}`` is ever deleted (a
+directory holding anything else is left alone), and a pruned version is a
+derived copy: the working copy next to the manifest stays the source of truth.
+``--keep-versions N`` changes the number kept, ``--prune`` runs the pass alone,
+and ``--no-prune`` skips it for one run.
 """
 
 from __future__ import annotations
@@ -68,6 +91,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.models import CourseDefinitionError  # noqa: E402
 from scripts.course_tooling import (  # noqa: E402
+    DEFAULT_KEPT_VERSIONS,
     GLOSSARY_CANDIDATE_NAME,
     QUESTIONS_CANDIDATE_NAME,
     VERSIONS_DIRECTORY,
@@ -76,6 +100,7 @@ from scripts.course_tooling import (  # noqa: E402
     default_candidate_path,
     freeze_candidate,
     preflight_baseline,
+    prune_versions,
     publication_lock,
     publish_glossary,
     publish_questions,
@@ -121,6 +146,34 @@ def build_parser() -> argparse.ArgumentParser:
             "publish without running the matching check script first "
             "(not recommended): check_question_bank.py for --questions, "
             "check_glossary.py for --glossary"
+        ),
+    )
+    parser.add_argument(
+        "--keep-versions",
+        type=int,
+        default=DEFAULT_KEPT_VERSIONS,
+        metavar="N",
+        help=(
+            "how many published versions of each content type to keep after "
+            "this command: the one the manifest points at plus N-1 predecessors "
+            f"(default: {DEFAULT_KEPT_VERSIONS} = current + previous, so one "
+            "rollback stays possible; 1 keeps only the current version)"
+        ),
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help=(
+            "only prune superseded versions/ copies and publish nothing "
+            "(the retention pass runs automatically after a publish)"
+        ),
+    )
+    parser.add_argument(
+        "--no-prune",
+        action="store_true",
+        help=(
+            "publish without the version-retention pass; a rollback copy then "
+            "keeps accumulating (emergency use only)"
         ),
     )
     parser.add_argument(
@@ -177,6 +230,50 @@ def _apply_default_candidates(
                     f"提示：{default} 存在，但该课程 manifest 的 glossary 为 null；"
                     "如需启用术语表请显式传 --glossary。"
                 )
+
+
+def _prune_versions(definition, keep: int) -> int:
+    """Run one retention pass under the course's publication lock.
+
+    ``prune_versions`` only deletes copies that no manifest points at, but it
+    still takes the lock so it cannot race a publisher that is switching the
+    manifest over to a version this pass is about to look at.
+    """
+    try:
+        with publication_lock(definition.root):
+            kept, removed = prune_versions(definition, keep=keep)
+    except (ToolingError, OSError) as exc:
+        print(f"版本清理失败：\n{exc}", file=sys.stderr)
+        return 1
+    root = definition.root / VERSIONS_DIRECTORY
+    if not kept and not removed:
+        print(f"版本清理：{root} 没有已发布副本，无需清理。")
+        return 0
+    print(
+        f"版本清理：保留 {len(kept)} 个（每个内容类型最多 {keep} 个：当前版本 + 上一版），"
+        f"删除 {len(removed)} 个。"
+    )
+    for path in removed:
+        print(f"  - 删除 {path.relative_to(definition.root)}")
+    return 0
+
+
+def _prune_after_publish(args: argparse.Namespace, definition) -> None:
+    """Best-effort retention after a successful publish.
+
+    The publish is already committed at this point, so a failed cleanup must not
+    turn a successful publication into a failed command: it is reported and can
+    be retried with ``--prune``.
+    """
+    if args.no_prune:
+        print("按 --no-prune 跳过版本清理：旧版本会继续累积。")
+        return
+    if _prune_versions(definition, args.keep_versions) != 0:
+        print(
+            "提示：内容已发布生效，但版本清理没有完成；可单独运行 "
+            f"--course {definition.course_id} --prune 重试。",
+            file=sys.stderr,
+        )
 
 
 def _add_course(args: argparse.Namespace) -> int:
@@ -275,6 +372,11 @@ def _add_course(args: argparse.Namespace) -> int:
         f'"{course_id}" ready，然后用 /ready/{course_id} 验证。'
     )
     print(f"（内容指纹 sha256={digest[:16]}…）")
+    definition = build_loader(
+        args.courses_dir, args.question_file, args.glossary_file
+    ).find_definition(course_id)
+    if definition is not None:
+        _prune_after_publish(args, definition)
     return 0
 
 
@@ -312,6 +414,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.add and (args.enable or args.disable):
         print("--add 已由 --disable 决定初始状态，不能同时指定。", file=sys.stderr)
         return 2
+    if args.add and args.prune:
+        print("--add 之后会自动做版本清理，不能同时指定 --prune。", file=sys.stderr)
+        return 2
+    if args.prune and (args.enable or args.disable):
+        print("--prune 只做版本清理，不能与 --enable / --disable 同时使用。", file=sys.stderr)
+        return 2
+    if args.prune and args.no_prune:
+        print("--prune 与 --no-prune 互相矛盾。", file=sys.stderr)
+        return 2
+    if args.keep_versions < 1:
+        print(
+            "--keep-versions 必须是 >= 1 的整数（1 = 只保留当前版本，无法回退）。",
+            file=sys.stderr,
+        )
+        return 2
     if args.add:
         return _add_course(args)
 
@@ -325,6 +442,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.enable or args.disable:
         return _set_enabled(args, definition, bool(args.enable))
+
+    if args.prune and args.questions is None and args.glossary is None:
+        # Retention only: no content flag and no default-candidate fallback,
+        # because cleaning up versions must never publish a working copy.
+        code = _prune_versions(definition, args.keep_versions)
+        print("状态：pruned（只清理 versions/，没有发布任何内容）。")
+        return code
 
     if args.questions is None and args.glossary is None:
         _apply_default_candidates(
@@ -419,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not published_any:  # pragma: no cover - guarded above
         return 2
+    _prune_after_publish(args, definition)
     print(
         "\n状态：published, pending worker activation（已发布，等待 worker 激活）。"
         "\n文件系统发布与数据库激活不是同一个事务：请统一重启全部应用工作进程。"

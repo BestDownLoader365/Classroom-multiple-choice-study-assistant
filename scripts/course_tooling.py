@@ -58,6 +58,18 @@ from app.repositories import CourseLoader  # noqa: E402
 VERSIONS_DIRECTORY = "versions"
 LOCK_FILE_NAME = ".publish.lock"
 
+#: Content file names that live inside a content-addressed ``versions/<sha256>/``
+#: directory.  Retention counts each type separately, because one publish may
+#: only touch one of them (a glossary publish must never evict the previous
+#: question bank, and the other way round).
+VERSIONED_CONTENT_FILES = ("questions.json", "glossary.json")
+
+#: How many versions of one content type a publish keeps: the version the
+#: manifest currently points at plus the one before it, so exactly one rollback
+#: step stays possible without a history journal.  Override per command with
+#: ``publish_course.py --keep-versions N``.
+DEFAULT_KEPT_VERSIONS = 2
+
 #: Working-copy file names the CLI falls back to when a command is not given an
 #: explicit path.  A candidate belongs to exactly one course, so the default is
 #: resolved inside that course's own directory (``courses/<course_id>/``) and
@@ -418,4 +430,103 @@ def publish_glossary(
 def preflight_baseline(definition: CourseDefinition) -> tuple[str, str]:
     """Record the ``(course_root, publication_digest)`` a publish re-validates."""
     return str(definition.root), publication_digest(definition)
+
+
+# ---------------------------------------------------------------- retention
+
+
+def manifest_version_directories(definition: CourseDefinition) -> set[str]:
+    """Return the ``versions/<sha256>`` directory names the manifest points at.
+
+    The manifest is read fresh: the paths cached on ``definition`` are the ones
+    the *previous* worker loaded, so right after a switch-over they still name
+    the superseded version.  A manifest that points outside ``versions/`` (the
+    plain-file layout) protects nothing, because nothing in ``versions/`` is in
+    use by that course.
+    """
+    if definition.manifest_path is None:
+        return set()
+    manifest = read_manifest(definition)
+    versions_root = definition.root / VERSIONS_DIRECTORY
+    referenced: set[str] = set()
+    for key in ("questions", "glossary"):
+        value = manifest.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        try:
+            relative = (definition.root / value).relative_to(versions_root)
+        except ValueError:
+            continue
+        if len(relative.parts) > 1:
+            referenced.add(relative.parts[0])
+    return referenced
+
+
+def prune_versions(
+    definition: CourseDefinition, *, keep: int = DEFAULT_KEPT_VERSIONS
+) -> tuple[list[Path], list[Path]]:
+    """Delete superseded ``versions/<sha256>/`` copies and report what happened.
+
+    Retention is per content type and deliberately conservative:
+
+    * the digest directory the manifest points at is **never** deleted;
+    * the ``keep - 1`` most recently written other versions of that type are
+      kept, so one rollback step is always available (``keep`` defaults to
+      ``DEFAULT_KEPT_VERSIONS``: current + previous);
+    * only the two known content file names are touched, only directly inside
+      ``versions/<sha256>/``; a directory that still holds anything else is left
+      in place, and an empty one is removed;
+    * recency is the content file's mtime, the only ordering signal the
+      content-addressed layout has — a rollback re-points the manifest at an
+      existing directory instead of rewriting it, which is why the manifest
+      reference outranks mtime.
+
+    Returns ``(kept, removed)`` paths.  Callers hold the course's publication
+    lock, so a concurrent publisher cannot slip a new version in mid-prune.
+    """
+    if keep < 1:
+        raise ToolingError(
+            "版本保留数量必须是 >= 1 的整数（1 = 只保留当前版本，无法回退）。"
+        )
+    versions_root = definition.root / VERSIONS_DIRECTORY
+    if definition.manifest_path is None or not versions_root.is_dir():
+        # Legacy/plain-file layout has no content-addressed copies at all.
+        return [], []
+    referenced = manifest_version_directories(definition)
+    kept: list[Path] = []
+    removed: list[Path] = []
+    for name in VERSIONED_CONTENT_FILES:
+        entries: list[tuple[int, str]] = []
+        for digest_directory in sorted(versions_root.iterdir()):
+            if not digest_directory.is_dir():
+                continue
+            content = digest_directory / name
+            if content.is_file():
+                entries.append((content.stat().st_mtime_ns, digest_directory.name))
+        if not entries:
+            continue
+        entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected = [digest for _, digest in entries if digest in referenced]
+        for _, digest in entries:
+            if len(selected) >= keep:
+                break
+            if digest not in selected:
+                selected.append(digest)
+        for _, digest in entries:
+            content = versions_root / digest / name
+            if digest in selected:
+                kept.append(content)
+                continue
+            content.unlink()
+            removed.append(content)
+            try:
+                content.parent.rmdir()
+            except OSError:
+                # Anything else in the directory (an unrelated file) means it is
+                # not this command's to delete.
+                continue
+    if removed:
+        fsync_directory(versions_root)
+    return kept, removed
+
 

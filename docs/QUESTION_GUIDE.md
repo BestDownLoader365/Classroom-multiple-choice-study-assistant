@@ -2,7 +2,7 @@
 
 本文面向生成、审核和维护题库的开发者。目标是生成一份可以被当前应用直接加载的 `questions.json`，无需为不同课程修改 Python、HTML 或 JavaScript 代码。
 
-本文描述的是当前项目实际支持的题库契约。最终校验逻辑以 [`app/repositories/question_loader.py`](../app/repositories/question_loader.py) 为准。专业术语、别名、翻译、定义和分类不写在题库中，请使用独立的 [`glossary.json` 专业术语库编写指南](GLOSSARY_GUIDE.md)。
+本文描述的是当前项目实际支持的题库契约。最终校验逻辑以 [`app/repositories/question_loader.py`](../app/repositories/question_loader.py) 为准。专业术语、别名、中文翻译、中文释义和分类不写在题库中，请使用独立的 [`glossary.json` 专业术语库编写指南](GLOSSARY_GUIDE.md)。
 
 ## 1. 适用范围
 
@@ -647,6 +647,7 @@ courses/<course_id>/questions_candidate.json
     ↓  （省略 --questions 时发布的同样是这个默认候选文件）
     ↓  冻结候选字节 → 写入不可变 versions/<sha256>/questions.json
     ↓  发布锁内重新校验 baseline → 单次 os.replace 原子切换 course.json
+    ↓  版本清理：每个内容类型保留当前 + 上一版（--keep-versions N / --prune / --no-prune）
     ↓  更新 worker（systemctl restart mcq-template.service）
     ↓  curl http://127.0.0.1:8001/ready/<course_id> 确认 200
 ```
@@ -655,7 +656,7 @@ courses/<course_id>/questions_candidate.json
 `python scripts/check_question_bank.py --course <course_id> other_questions.json --db instance/mcq.db`），
 `publish_course.py` 则显式传 `--questions other_questions.json`；显式路径始终优先于默认值。
 
-`publish_course.py --questions` 只读一次候选文件，校验与发布使用**同一份字节**；它输出 `published, pending worker activation`，**不会**自行推进 generation（由 worker 启动时的 reconciliation 完成），也不声称文件系统发布与数据库激活是同一个事务。回滚就是把旧内容当作新候选再发布一次，不要手工改 `generation`。
+`publish_course.py --questions` 只读一次候选文件，校验与发布使用**同一份字节**；它输出 `published, pending worker activation`，**不会**自行推进 generation（由 worker 启动时的 reconciliation 完成），也不声称文件系统发布与数据库激活是同一个事务。回滚就是把旧内容当作新候选再发布一次，不要手工改 `generation`：发布结束后 `versions/` 只保留每个内容类型的**当前版本 + 上一版**，所以回退一步可以直接发布保留的上一版副本（`--questions courses/<course_id>/versions/<previous-sha256>/questions.json`），归档字节相同、不会产生新目录；保留数量与 `--prune` / `--keep-versions` / `--no-prune` 的规则见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节。
 
 预检脚本的退出码含义：`0` 可部署（可能同时打印“将清理学习状态”的警告），`1` 题库校验失败，`2` 非法复用退役 ID（该课程会被标记为不可用），`3` 仅在使用 `--strict` 时出现，表示更新会清理学习状态，`4` 课程无法解析或数据库尚未迁移（未迁移的数据库只能映射到 legacy 课程）。**只要输出中出现清理学习状态的警告，脚本就不会打印“可以安全部署”**；请确认可以接受后再部署。
 
