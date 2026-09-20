@@ -156,7 +156,9 @@ repository 与 service 装配流程。不存在第二套业务逻辑。
   其中 `operation` 是**表单提交目标**的操作（即 action URL 指向的路由），而不是渲染该表单的页面：
   守卫用它与请求真正到达的端点比对，签成页面操作会让每次提交都被判为 stale form（409）。
   模板统一写成 `form_context(<form action 的 endpoint>)`。
-* Quiz / Review 继续保留 `answer_token`；
+* Quiz / Review 继续保留 `answer_token`；`answer_token` 与 `csrf_token` 都由
+  `app/web/auth.py::tokens_match()` 按 UTF-8 字节做常量时间比较：任何缺失、被篡改或非 ASCII 的提交
+  都返回 400（invalid submission），不会把拒绝变成未捕获异常（500）。
 * Exam 表单额外绑定 `position` 与 `question_id`，事务内重新确认 `position -> 同一 question_id`，
   防止 startup reconciliation 重排槽位后旧页面写到别的题目。
 
@@ -184,6 +186,7 @@ Web 层负责映射：stale worker → 503、stale form → 409、missing course
 | 课程不存在 | 404 |
 | 课程已知但不可用/未加载 | 503 |
 | B 的 URL + A 的 exam | 409 |
+| 伪造 / 缺失 / 非 ASCII 的 `answer_token` 或 `csrf_token` | 400，零写入（不产生 500） |
 
 旧 URL：
 

@@ -1236,9 +1236,7 @@ def create_web_blueprint(
 
         submitted_token = request.form.get("answer_token", "")
         expected_token = state.get("answer_token", "")
-        if not submitted_token or not secrets.compare_digest(
-            submitted_token, expected_token
-        ):
+        if not _web_auth.tokens_match(submitted_token, expected_token):
             abort(400, description="答题页面已经过期，请返回后重新进入。")
 
         current_index = state["current_index"]
@@ -1323,9 +1321,7 @@ def create_web_blueprint(
             return redirect(url_for(endpoint, course_id=g.course_id))
 
         submitted_token = request.form.get("answer_token", "")
-        if not submitted_token or not secrets.compare_digest(
-            submitted_token, state["answer_token"]
-        ):
+        if not _web_auth.tokens_match(submitted_token, state["answer_token"]):
             abort(400, description="答题页面已经过期，请返回后重新进入。")
 
         state["current_index"] += 1

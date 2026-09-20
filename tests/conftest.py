@@ -33,6 +33,23 @@ def operation_for_course_url(path: str) -> str | None:
     return None
 
 
+#: ``form_context`` hidden field of a rendered learning form.
+_SIGNED_FORM_CONTEXT = re.compile(rb'(name="form_context" value=")[^"]*(")')
+
+
+def mask_signed_form_context(body: bytes) -> bytes:
+    """Blank the time-stamped signed ``form_context`` values of a page body.
+
+    ``form_context`` is minted by an ``itsdangerous`` ``URLSafeTimedSerializer``,
+    whose signature carries the *second* it was signed: two renders a second
+    apart differ in that field even when the page is otherwise identical.  Tests
+    that compare two independent renders byte for byte must ignore exactly that
+    field, otherwise they fail whenever the pair straddles a second boundary.
+    Every other byte still has to match.
+    """
+    return _SIGNED_FORM_CONTEXT.sub(rb"\1<context>\2", body)
+
+
 def course_id_for_path(path: str) -> str | None:
     """Return the ``course_id`` encoded in a course-scoped path, if any."""
     match = re.match(r"^/course/(?P<course_id>[^/]+)(?:/|$)", path)

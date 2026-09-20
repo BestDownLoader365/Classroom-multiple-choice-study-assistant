@@ -749,7 +749,7 @@ The blueprint's second `before_request` hook, `resolve_course_context`, does thr
 
 Three small modules keep cross-cutting HTTP concerns out of the route functions:
 
-- `app/web/auth.py` holds the authentication, CSRF, and login rate-limit helpers. It resolves `session["user_id"]` to a real user for the blueprint's account requirement, issues and checks the CSRF token carried by mutating forms, and consults `RateLimitRepository` to throttle repeated failed logins.
+- `app/web/auth.py` holds the authentication, CSRF, and login rate-limit helpers. It resolves `session["user_id"]` to a real user for the blueprint's account requirement, issues and checks the CSRF token carried by mutating forms, and consults `RateLimitRepository` to throttle repeated failed logins. Its `tokens_match()` is the single token comparison used by both the CSRF check and the quiz `answer_token` checks: it compares UTF-8 bytes in constant time, so a caller-controlled form field can never raise (the previous `secrets.compare_digest(str, str)` raised `TypeError` for non-ASCII input and turned a 400 into a 500).
 - `app/web/course_context.py` holds the signed `form_context` that binds every learning form to `(course_id, operation, generation)`, its reader (`read_form_context()`, which verifies the signature and the 12-hour age window), the endpoint-to-operation mapping, and the course-aware template `url_for`. The signed `operation` is always the operation the form **posts to** — the endpoint a template passes to `form_context(<form action endpoint>)`, never the page that rendered it — because the write guard compares it with the endpoint the submit actually reached; signing the rendering page's endpoint would make every submit answer 409.
 - `app/web/view_helpers.py` holds the template and catalogue helpers that assemble the course/chapter selection lists and other view models shared by the practice and review screens, plus the display-timezone-aware timestamp/duration formatters injected into every template.
 
@@ -770,7 +770,7 @@ Each state dictionary contains fields such as:
 | `current_index` | Position in the queue |
 | `correct_count` / `incorrect_count` | Attempt counters for the current round |
 | `status` | Whether the current question is pending or answered |
-| `answer_token` | Token for the current question occurrence, checked by answer and next forms and rotated on advance; the status check prevents duplicate grading |
+| `answer_token` | Token for the current question occurrence, checked by answer and next forms and rotated on advance; the status check prevents duplicate grading. It is compared with `app/web/auth.py::tokens_match()` (constant time over UTF-8 bytes), so any mismatched, missing or non-ASCII submission is a 400, never an unhandled error |
 | `option_seed` | Seed used to keep option order stable for the round |
 | `requested_size` | Selected normal-practice size |
 | `chapter_ids` / `source_ids` | Stable curriculum filters for restarting the same focused round |
@@ -793,7 +793,7 @@ The queue ends only when its selected scope has no uncorrected original, no due 
 
 ### Error handling
 
-The blueprint converts common HTTP errors into the Chinese `error.html` page. This covers invalid submissions, expired quiz state, missing pages, removed questions, unsupported methods, server errors, the stale-course 503 (which also gets a `Retry-After` header), the unavailable/disabled-course 503, the unknown-course 404, and the stale-form 409. The page names the affected course and offers navigation that still works on this worker (the course selector, and the course glossary when it exists).
+The blueprint converts common HTTP errors into the Chinese `error.html` page. This covers invalid submissions, expired quiz state, missing pages, removed questions, unsupported methods, server errors, the stale-course 503 (which also gets a `Retry-After` header), the unavailable/disabled-course 503, the unknown-course 404, and the stale-form 409. The page names the affected course and offers navigation that still works on this worker (the course selector, and the course glossary when it exists). A missing, rotated, mismatched or non-ASCII `answer_token`/`csrf_token` is an *invalid submission*: `app/web/auth.py::tokens_match()` compares the two tokens as UTF-8 bytes in constant time, so every caller-controlled string is rejected with 400 and no submission can turn a rejection into an unhandled error.
 
 ## 10. Presentation Layer
 
@@ -1161,9 +1161,11 @@ Browser GET /dashboard
 
 The tests use temporary question/glossary files and temporary SQLite databases, so they do not modify `instance/mcq.db`.
 
+Two rules keep request-level tests honest. First, a `POST` must carry the signed `form_context` a real template renders: `tests/conftest.py` signs one automatically unless a test is deliberately exercising the guard. Second, a test that compares **two independent renders** byte for byte must pass both bodies through `mask_signed_form_context()`: `form_context` is signed with a `TimestampSigner`, so its signature encodes the second it was signed in and the two renders legitimately differ there whenever they straddle a second boundary. Masking exactly that field keeps the comparison strict (everything else still has to match) while removing a flake that would otherwise hide real regressions.
+
 | Test file | Main coverage |
 |---|---|
-| `tests/conftest.py` | Shared domain objects, valid JSON fixtures, generated course trees, and the autouse fixture that signs a `form_context` for tests that do not render a template |
+| `tests/conftest.py` | Shared domain objects, valid JSON fixtures, generated course trees, the autouse fixture that signs a `form_context` for tests that do not render a template, and `mask_signed_form_context()` — the helper that blanks the time-stamped signed context before two independent renders are compared byte for byte |
 | `tests/test_bundled_glossary.py` | Bundled glossary validity, coverage, scale, aliases, and categories |
 | `tests/test_bundled_question_bank.py` | Completeness and quality rules for the real bundled bank |
 | `tests/test_course_loader.py` | Manifest discovery, validation, bundle loading, and the worker registry |
@@ -1186,10 +1188,11 @@ The tests use temporary question/glossary files and temporary SQLite databases, 
 | `tests/test_srs.py` | SRS interval ladder and cap, due boundary inclusivity, UTC/naive handling, schedule persistence, due queries, legacy schema migration, correction/advance/reset state machine, review selection priority |
 | `tests/test_srs_web.py` | End-to-end SRS flow through HTTP: correction schedules +1 day, home due entry, srs_review role and badge, level advance, failure returning to correction, per-user isolation, session resume |
 | `tests/test_progress_state.py` | Characterization coverage for the progress-state helpers: validation, resume summaries, session keys, and quiz-size parsing |
-| `tests/test_progress_sync.py` | Independent clients/workers, resume and completion, concurrency, stale forms, reset, legacy migration, transaction rollback, wording-only bank differences never rewriting progress |
-| `tests/test_web.py` | Public health response, login, registration, page flows, shared progress, duplicate protection, feedback, errors |
+| `tests/test_progress_sync.py` | Independent clients/workers, resume and completion, concurrency, stale forms, reset, legacy migration, transaction rollback, wording-only bank differences never rewriting progress, two-render comparisons that mask the time-stamped form context |
+| `tests/test_web.py` | Public health response, login, registration, page flows, shared progress, duplicate protection, feedback, errors, non-ASCII `answer_token`/CSRF submissions staying a 400 instead of a server error, and the masked two-render comparison that keeps refresh assertions from going flaky |
+| `tests/test_write_concurrency.py` | Real threads over one database: eight simultaneous submissions of the same answer grade exactly once, a concurrent replay cannot change the verdict, and six simultaneous exam submissions finalize the exam once |
 | `tests/test_view_helpers.py` | Roman-statement stem rendering helper and its template wiring |
-| `tests/test_security.py` | Security headers, CSP, CSRF enforcement, login rate limiting, and payload limits |
+| `tests/test_security.py` | Security headers, CSP, CSRF enforcement, login rate limiting, payload limits, and the constant-time token comparison (`tokens_match`) never raising on caller input |
 | `tests/test_exam_service.py` | Exam creation/frozen sets, config validation, answer persistence, ownership, grading, idempotent submit, mistake sync, SRS reopening, deadline rules, expiry sweep, reports, history |
 | `tests/test_exam_web.py` | Exam pages end to end: no feedback during exams, refresh stability, resume, submission results, locked answers, history links, expiry settlement via home/dashboard visits, legacy attempts-table migration |
 | `tests/test_statistics_service.py` | Dashboard aggregation: totals, accuracy, 7/30-day boundaries, chapter mastery bands, low-sample flags, zero-filled trends, display-timezone bucketing, isolation |
@@ -1275,6 +1278,7 @@ Developers should preserve these rules when extending the application:
 24. Keep the worker fence and each course's structure consistent: the question set, grading identities, a question's `chapter_ids`/`source_id` placement, and the catalogue *shape* advance **that course''s** `question_bank_state.generation` (labels never do), a stale worker answers 503 on that course's learning pages until it is updated, other courses keep serving, and `generation` is never hand-edited to bypass the check.
 25. Keep every course namespace closed under its own `course_id`: repositories are constructed with a required `course_id`, every query is restricted to it, `get_all()`/`list_all()`/`count()`/`distinct_question_ids()` mean "this course", and genuinely cross-course work goes through `CrossCourseQueries` or the migration tooling.
 26. Never reinterpret content across courses: a missing, disabled, or unavailable course answers 404/503 and is never served another course's questions, chapters, glossary or learner state.
+27. Never let caller-controlled input raise: a form field (including `csrf_token`/`answer_token`) may hold arbitrary text, so reject it with the documented status code instead of crashing — compare tokens with `app/web/auth.py::tokens_match()`, never with `secrets.compare_digest(str, str)`.
 
 ## 17. Common Extension Points
 

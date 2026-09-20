@@ -6,6 +6,7 @@ from app import create_app
 LEGACY_HOME = "/course/legacy/"
 from app.models import QuizMode
 from tests.test_web import learner_id, make_app, register
+from tests.conftest import mask_signed_form_context
 
 
 def current_state(app, user_id, mode):
@@ -220,7 +221,9 @@ def test_generated_transfer_is_stable_across_refresh_and_devices(
     )
     second.get(LEGACY_HOME)
 
-    assert first.get("/course/legacy/review").data == second.get("/course/legacy/review").data
+    assert mask_signed_form_context(
+        first.get("/course/legacy/review").data
+    ) == mask_signed_form_context(second.get("/course/legacy/review").data)
     assert current_state(other_app, user_id, QuizMode.REVIEW) == generated
     stale = second.post(
         "/course/legacy/review/answer",

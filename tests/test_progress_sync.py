@@ -8,8 +8,16 @@ import pytest
 from app import create_app
 from app.models import QuizMode
 from tests.test_web import make_app, register, learner_id
+from tests.conftest import mask_signed_form_context
 
 LEGACY_HOME = "/course/legacy/"
+
+
+def pages_match(first, second, path):
+    """Compare two renders of one page, ignoring time-stamped form contexts."""
+    return mask_signed_form_context(first.get(path).data) == mask_signed_form_context(
+        second.get(path).data
+    )
 
 
 def login(app):
@@ -50,16 +58,16 @@ def test_two_devices_resume_feedback_next_and_completion(tmp_path, valid_payload
         current = state(app, user, mode)
         if current['current_index'] == len(current['question_ids']):
             break
-        assert first.get(path).data == second.get(path).data
+        assert pages_match(first, second, path)
         question = services.question_repository.get_by_id(current['question_ids'][current['current_index']])
         form = {'answer_token': current['answer_token'], 'answers': list(question.correct_answers)}
         assert first.post(path + '/answer', data=form).status_code == 302
         count = services.attempt_repository.count()
         assert second.post(path + '/answer', data=form).status_code == 302
         assert services.attempt_repository.count() == count
-        assert first.get(path).data == second.get(path).data
+        assert pages_match(first, second, path)
         assert second.post(path + '/next', data={'answer_token': current['answer_token']}).status_code == 302
-    assert first.get(path).data == second.get(path).data
+    assert pages_match(first, second, path)
     if mode is QuizMode.REVIEW:
         assert services.wrong_question_repository.get_by_id(user, 'q1').corrected
         point = services.weak_knowledge_point_repository.get_by_id(user, 'legacy')

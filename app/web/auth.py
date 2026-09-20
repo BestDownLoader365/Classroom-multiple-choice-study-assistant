@@ -10,6 +10,7 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
+import hmac
 import secrets
 from flask import current_app, g, redirect, request, session, url_for
 
@@ -94,12 +95,29 @@ def csrf_token() -> str:
     return token
 
 
+def tokens_match(submitted: object, expected: object) -> bool:
+    """Compare two form tokens in constant time, tolerating any input.
+
+    ``secrets.compare_digest`` raises ``TypeError`` as soon as one of two
+    ``str`` operands contains a non-ASCII character, and every form field is
+    fully caller-controlled.  A crafted ``csrf_token`` or ``answer_token``
+    therefore used to turn a rejection (400) into an unhandled server error
+    (500), reachable even without signing in.  Comparing UTF-8 bytes keeps the
+    constant-time property and makes every byte string comparable; the tokens
+    this application mints are always URL-safe ASCII, so a non-ASCII submission
+    can still never match one.
+    """
+    if not isinstance(submitted, str) or not isinstance(expected, str):
+        return False
+    if not submitted or not expected:
+        return False
+    return hmac.compare_digest(submitted.encode("utf-8"), expected.encode("utf-8"))
+
+
 def validate_csrf() -> None:
     from flask import abort
 
     submitted = request.form.get("csrf_token", "")
     expected = session.get("csrf_token")
-    if not isinstance(expected, str) or not submitted or not secrets.compare_digest(
-        submitted, expected
-    ):
+    if not tokens_match(submitted, expected):
         abort(400, description="请求验证失败，请刷新页面后重试。")

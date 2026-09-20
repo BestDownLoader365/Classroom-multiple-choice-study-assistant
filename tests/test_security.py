@@ -128,6 +128,64 @@ def test_successful_login_cannot_reset_failed_login_budget(tmp_path, valid_paylo
     ).status_code == 429
 
 
+def test_tokens_match_keeps_equality_without_raising_on_non_ascii():
+    """The CSRF/answer-token comparison must survive any submitted string."""
+    from app.web.auth import tokens_match
+
+    assert tokens_match("abc123", "abc123") is True
+    assert tokens_match("abc123", "abc124") is False
+    assert tokens_match("abc123", "abc1234") is False
+    assert tokens_match("", "abc123") is False
+    assert tokens_match(None, "abc123") is False
+    assert tokens_match("abc123", None) is False
+    # ``secrets.compare_digest`` raises TypeError here; equality semantics stay.
+    assert tokens_match("é", "abc123") is False
+    assert tokens_match("é", "é") is True
+
+
+def test_non_ascii_csrf_token_is_rejected_without_a_server_error(
+    tmp_path, valid_payload
+):
+    """A crafted CSRF token must be a 400, never an unhandled 500.
+
+    This is reachable without signing in, so an unhandled error here would let
+    anyone flood the log with tracebacks from a single unauthenticated loop.
+    """
+    app = make_app(
+        tmp_path,
+        valid_payload,
+        TESTING=False,
+        ENABLE_CSRF=True,
+        SESSION_COOKIE_SECURE=True,
+    )
+    client = app.test_client()
+    assert client.get("/login", base_url="https://localhost").status_code == 200
+
+    for token in ("\u202e", "é", "答题", "🚀"):
+        response = client.post(
+            "/login",
+            base_url="https://localhost",
+            data={"username": "tampered", "password": "secret1", "csrf_token": token},
+        )
+        assert response.status_code == 400
+        assert "请求验证失败" in response.text
+
+    # The genuine token keeps working: the comparison itself was not weakened.
+    assert (
+        client.post(
+            "/register",
+            base_url="https://localhost",
+            data={
+                "username": "csrf-robust-user",
+                "password": "secret1",
+                "password_confirmation": "secret1",
+                "csrf_token": _csrf(client),
+            },
+        ).status_code
+        == 302
+    )
+
+
 def test_registration_is_rate_limited(tmp_path, valid_payload):
     app = make_app(
         tmp_path,

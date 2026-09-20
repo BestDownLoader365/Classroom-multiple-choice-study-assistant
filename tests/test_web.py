@@ -2,11 +2,13 @@ import copy
 import re
 from contextlib import contextmanager
 
+import itsdangerous
+
 from app import create_app
 
 LEGACY_HOME = "/course/legacy/"
 from app.models import QuizMode
-from tests.conftest import write_json
+from tests.conftest import mask_signed_form_context, write_json
 
 
 def make_app(tmp_path, valid_payload, **overrides):
@@ -413,13 +415,47 @@ def test_normal_refresh_preserves_round_and_does_not_consume_fairness(
     second_page = client.get("/course/legacy/quiz")
     after = repository.get(user_id, QuizMode.NORMAL)[1]
 
-    assert first_page.data == second_page.data
+    assert mask_signed_form_context(first_page.data) == mask_signed_form_context(
+        second_page.data
+    )
     assert after == before
     assert after["question_ids"] == before["question_ids"]
     assert after["option_seed"] == before["option_seed"]
     assert after["fairness_remaining_ids"] == before["fairness_remaining_ids"]
     assert "fairness_remaining_ids" not in first_page.text
     assert "coverage cycle" not in first_page.text
+
+
+def test_page_comparison_masks_the_time_stamped_form_context(
+    tmp_path, valid_payload, monkeypatch
+):
+    """Two renders a second apart may differ only in the signed form context.
+
+    ``form_context`` is signed by an ``itsdangerous`` ``URLSafeTimedSerializer``
+    whose signature embeds the signing second, so comparing two pages byte for
+    byte without masking that field is flaky by construction.  This test pins
+    both halves: the field really does change, and masking it makes the pages
+    compare equal again.
+    """
+    app = make_app(tmp_path, valid_payload)
+    client = app.test_client()
+    register(client)
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+    first_page = client.get("/course/legacy/quiz").data
+
+    original_timestamp = itsdangerous.timed.TimestampSigner.get_timestamp
+    monkeypatch.setattr(
+        itsdangerous.timed.TimestampSigner,
+        "get_timestamp",
+        lambda self: original_timestamp(self) + 1,
+    )
+    second_page = client.get("/course/legacy/quiz").data
+
+    assert first_page != second_page
+    assert mask_signed_form_context(first_page) == mask_signed_form_context(second_page)
+    assert b'name="form_context" value="<context>"' in mask_signed_form_context(
+        first_page
+    )
 
 
 def test_legacy_normal_progress_without_fairness_fields_is_compatible(
@@ -776,6 +812,134 @@ def test_account_and_wrong_question_survive_app_restart(tmp_path, valid_payload)
     ].default_services.wrong_question_repository.get_by_id(user_id, "q1")
     assert record is not None
     assert record.wrong_count == 1
+
+
+def current_question(client, mode=QuizMode.NORMAL):
+    """Return the question the rendered round is currently asking."""
+    services = client.application.extensions["mcq_services"].default_services
+    with client.session_transaction() as browser_session:
+        row = services.progress_repository.get(browser_session["user_id"], mode)
+    state = row[1]
+    return services.question_repository.get_by_id(
+        state["question_ids"][state["current_index"]]
+    )
+
+
+def rendered_answer_token(client, path):
+    page = client.get(path)
+    return re.search(r'name="answer_token" value="([^"]+)"', page.text).group(1)
+
+
+def test_non_ascii_answer_token_is_rejected_without_a_server_error(
+    tmp_path, valid_payload
+):
+    """A tampered token must be a 400, never an unhandled server error.
+
+    ``secrets.compare_digest`` refuses ``str`` operands that contain non-ASCII
+    characters, so a caller could turn the expired-token rejection into an
+    unhandled ``TypeError`` (HTTP 500).  A non-ASCII submission can never be
+    valid because the server only mints URL-safe ASCII tokens.
+    """
+    app = make_app(tmp_path, valid_payload)
+    client = app.test_client()
+    register(client)
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+    selected = list(current_question(client).correct_answers)
+
+    for token in ("\u202e", "é", "答题页面", "🚀", "tokené"):
+        response = client.post(
+            "/course/legacy/quiz/answer",
+            data={"answer_token": token, "answers": selected},
+        )
+        assert response.status_code == 400
+        assert "答题页面已经过期" in response.text
+
+    # The rejected submissions changed nothing: the real token still works.
+    real_token = rendered_answer_token(client, "/course/legacy/quiz")
+    accepted = client.post(
+        "/course/legacy/quiz/answer",
+        data={"answer_token": real_token, "answers": selected},
+    )
+    assert accepted.status_code == 302
+
+
+def test_non_ascii_answer_token_is_rejected_by_the_next_form(tmp_path, valid_payload):
+    """The advance form compares the same token and must reject it the same way."""
+    app = make_app(tmp_path, valid_payload)
+    client = app.test_client()
+    register(client)
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+
+    real_token = rendered_answer_token(client, "/course/legacy/quiz")
+    answered = client.post(
+        "/course/legacy/quiz/answer",
+        data={
+            "answer_token": real_token,
+            "answers": list(current_question(client).correct_answers),
+        },
+    )
+    assert answered.status_code == 302
+
+    for token in ("\u202e", "é", "🚀"):
+        response = client.post(
+            "/course/legacy/quiz/next", data={"answer_token": token}
+        )
+        assert response.status_code == 400
+        assert "答题页面已经过期" in response.text
+
+    # The genuine token still advances the round.
+    advanced = client.post(
+        "/course/legacy/quiz/next", data={"answer_token": real_token}
+    )
+    assert advanced.status_code == 302
+
+
+def test_non_ascii_answer_token_is_rejected_in_review(tmp_path, valid_payload):
+    """Review answer and next forms share the token check and behave identically."""
+    app = make_app(tmp_path, valid_payload)
+    client = app.test_client()
+    register(client)
+    client.post("/course/legacy/quiz/start", data={"quiz_size": "all"})
+    question = current_question(client)
+    wrong_option = next(
+        option.id
+        for option in question.options
+        if option.id not in question.correct_answers
+    )
+    token = rendered_answer_token(client, "/course/legacy/quiz")
+    client.post(
+        "/course/legacy/quiz/answer",
+        data={"answer_token": token, "answers": wrong_option},
+    )
+    client.post("/course/legacy/quiz/next", data={"answer_token": token})
+    client.post("/course/legacy/review/start", data={})
+
+    review_token = rendered_answer_token(client, "/course/legacy/review")
+    for token_value in ("\u202e", "é", "🚀"):
+        response = client.post(
+            "/course/legacy/review/answer",
+            data={"answer_token": token_value, "answers": wrong_option},
+        )
+        assert response.status_code == 400
+        assert "答题页面已经过期" in response.text
+
+    accepted = client.post(
+        "/course/legacy/review/answer",
+        data={
+            "answer_token": review_token,
+            "answers": list(current_question(client, QuizMode.REVIEW).correct_answers),
+        },
+    )
+    assert accepted.status_code == 302
+
+    rejected_next = client.post(
+        "/course/legacy/review/next", data={"answer_token": "\u202e"}
+    )
+    assert rejected_next.status_code == 400
+    advanced = client.post(
+        "/course/legacy/review/next", data={"answer_token": review_token}
+    )
+    assert advanced.status_code == 302
 
 
 def test_changed_question_bank_preserves_progress_silently(tmp_path, valid_payload):
