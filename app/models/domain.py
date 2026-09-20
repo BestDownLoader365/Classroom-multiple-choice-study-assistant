@@ -54,6 +54,19 @@ class Chapter:
     order: int = 0
 
 
+#: The synthetic catalogue of a question bank that declares no sources or
+#: chapters (the legacy root ``questions.json`` layout and any hand-written
+#: bank).  Both the loader (which materializes it) and the in-memory
+#: repository (which falls back to it) use *this* definition, so a legacy
+#: question is always filed under the same course material and chapter.
+LEGACY_SOURCE = SourceDocument(
+    id="legacy", title="Uncategorized course material", lecture="Legacy question bank"
+)
+LEGACY_CHAPTER = Chapter(
+    id="legacy", source_id="legacy", title="Uncategorized", order=1
+)
+
+
 @dataclass(frozen=True)
 class Question:
     """An immutable question loaded from ``questions.json``."""

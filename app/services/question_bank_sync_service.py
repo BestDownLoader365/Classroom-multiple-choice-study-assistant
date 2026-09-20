@@ -396,13 +396,17 @@ class QuestionBankSyncService:
                     "removed, reordered or re-assigned; bumping the generation.",
                     self.course_id,
                 )
+            # The state row doubles as the diagnostic bank version and the
+            # catalogue baseline, so it is (re)written when that baseline is
+            # missing or moved — even though neither is a change to the bank.
+            baseline_needs_recording = (
+                catalogue_baseline or state is None or state[0] != bank_version
+            )
             if (
                 diff.has_changes
                 or backfill
-                or catalogue_baseline
                 or catalogue_changed
-                or state is None
-                or state[0] != bank_version
+                or baseline_needs_recording
             ):
                 if diff.structural or catalogue_changed:
                     generation += 1

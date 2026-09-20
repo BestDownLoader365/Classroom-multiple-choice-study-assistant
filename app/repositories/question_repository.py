@@ -2,14 +2,12 @@
 
 from collections.abc import Iterable
 
-from app.models import Chapter, Question, SourceDocument
-
-
-LEGACY_SOURCE = SourceDocument(
-    id="legacy", title="Uncategorized course material", lecture="Legacy question bank"
-)
-LEGACY_CHAPTER = Chapter(
-    id="legacy", source_id="legacy", title="Uncategorized", order=1
+from app.models import (
+    LEGACY_CHAPTER,
+    LEGACY_SOURCE,
+    Chapter,
+    Question,
+    SourceDocument,
 )
 
 

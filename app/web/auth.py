@@ -6,13 +6,9 @@ instead of capturing them in a large closure, so each can be reasoned about
 and tested in isolation.
 """
 
-from collections.abc import Callable
-from functools import wraps
-from typing import Any
-
 import hmac
 import secrets
-from flask import current_app, g, redirect, request, session, url_for
+from flask import abort, current_app, request, session
 
 from app.repositories import RateLimitRepository
 
@@ -28,18 +24,6 @@ def registration_error(username: str, password: str, confirmation: str) -> str |
     if password != confirmation:
         return "两次输入的密码不一致。"
     return None
-
-
-def require_account(view: Callable[..., Any]) -> Callable[..., Any]:
-    """Redirect anonymous visitors to the login page."""
-
-    @wraps(view)
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        if getattr(g, "learner_id", None):
-            return view(*args, **kwargs)
-        return redirect(url_for("web.login", next=request.path))
-
-    return wrapped
 
 
 def login_ip_allowed(rate_limits: RateLimitRepository, address: str | None) -> bool:
@@ -115,8 +99,6 @@ def tokens_match(submitted: object, expected: object) -> bool:
 
 
 def validate_csrf() -> None:
-    from flask import abort
-
     submitted = request.form.get("csrf_token", "")
     expected = session.get("csrf_token")
     if not tokens_match(submitted, expected):

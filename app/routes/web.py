@@ -428,15 +428,26 @@ def create_web_blueprint(
 
     def _run_with_progress(view, args, kwargs) -> Any:
         """Load, expose and persist the course's resumable rounds around a view."""
-        services = g.course
-        progress_repository = services.progress_repository
-        question_repository = services.question_repository
+        _load_practice_progress()
+        response = view(*args, **kwargs)
+        _persist_practice_progress()
+        return response
+
+    def _load_practice_progress() -> None:
+        """Expose this learner's stored rounds of this course on ``g``.
+
+        Each mode's row is validated and reconciled against the live bank
+        before a view can read it, so a round written against an older or
+        invalid state can never be resumed as-is.  Any ancient cookie copy is
+        purged without being read: the server-side row is the only source of
+        practice progress.
+        """
+        progress_repository = g.course.progress_repository
+        question_repository = g.course.question_repository
         g.quiz_progress = {}
         for mode in _progress_state.PRACTICE_MODES:
-            stored = progress_repository.get(g.learner_id, mode)
-            # Purge any ancient cookie copy without ever reading it:
-            # server-side state is the only source of progress.
             session.pop(_progress_state.session_key(mode), None)
+            stored = progress_repository.get(g.learner_id, mode)
             state = stored[1] if stored is not None else None
             if not _progress_state.is_valid_progress_state(state, mode):
                 state = None
@@ -455,22 +466,25 @@ def create_web_blueprint(
             g.quiz_progress[_progress_state.session_key(mode)] = state
         session.pop("quiz_progress", None)
         session.pop("question_bank_version", None)
-        response = view(*args, **kwargs)
+
+    def _persist_practice_progress() -> None:
+        """Write back only the modes whose stored practice state really changed.
+
+        ``bank_version`` is diagnostic, so two workers running banks that
+        differ only in wording must not rewrite this row back and forth.
+        """
+        services = g.course
+        progress_repository = services.progress_repository
         for mode in _progress_state.PRACTICE_MODES:
             state = g.quiz_progress.get(_progress_state.session_key(mode))
             stored = progress_repository.get(g.learner_id, mode)
             stored_state = stored[1] if stored is not None else None
-            # Only a real change of the learner's practice state is worth a
-            # write.  ``bank_version`` is diagnostic, so two workers running
-            # banks that differ only in wording must not rewrite this row back
-            # and forth.
             if (stored is not None or state is not None) and (
                 stored is None or stored_state != state
             ):
                 progress_repository.save(
                     g.learner_id, mode, services.bank_version, state
                 )
-        return response
 
     @blueprint.after_request
     def prevent_stale_progress_cache(response):
@@ -872,9 +886,7 @@ def create_web_blueprint(
         except ExamConfigError as exc:
             flash(str(exc), "error")
             return redirect(url_for("web.exam_setup", course_id=g.course_id))
-        return redirect(
-            url_for("web.exam", course_id=g.course_id, exam_id=exam_session.id)
-        )
+        return _to_exam(exam_session.id)
 
     @course_route("/exam/<exam_id>")
     @shared_progress
@@ -892,21 +904,15 @@ def create_web_blueprint(
         except ExamNotFoundError:
             abort(404)
         if exam_session.status.finished:
-            return redirect(
-                url_for("web.exam_report", course_id=g.course_id, exam_id=exam_id)
-            )
+            return _to_exam_report(exam_id)
         if exam_service.finalize_if_expired(exam_session):
             flash("考试时间已结束，系统已自动交卷。", "info")
-            return redirect(
-                url_for("web.exam_report", course_id=g.course_id, exam_id=exam_id)
-            )
+            return _to_exam_report(exam_id)
         if exam_service.reconcile_session(exam_session):
             # Slots were dropped silently; the exam may even have finished.
             exam_session = exam_service.get_session(g.learner_id, exam_id)
             if exam_session.status.finished:
-                return redirect(
-                    url_for("web.exam_report", course_id=g.course_id, exam_id=exam_id)
-                )
+                return _to_exam_report(exam_id)
         position = _exam_position(request.args.get("q"), exam_session)
         slots = exam_service.get_questions(exam_session)
         slot = slots[position]
@@ -954,9 +960,7 @@ def create_web_blueprint(
             # Slots shifted or the exam finished, so the posted position no
             # longer refers to the same question; drop this submission and
             # let the form reload at the reconciled layout.
-            return redirect(
-                url_for("web.exam", course_id=g.course_id, exam_id=exam_id)
-            )
+            return _to_exam(exam_id)
         try:
             position = int(request.form.get("position", "-1"))
         except ValueError:
@@ -974,9 +978,7 @@ def create_web_blueprint(
             posted_question_id and posted_question_id != slot.question_id
         ):
             flash("页面已经过期，请刷新后重新作答。", "info")
-            return redirect(
-                url_for("web.exam", course_id=g.course_id, exam_id=exam_id)
-            )
+            return _to_exam(exam_id)
         try:
             exam_service.save_answer(
                 g.learner_id,
@@ -986,9 +988,7 @@ def create_web_blueprint(
             )
         except ExamStateError as exc:
             flash(str(exc), "info")
-            return redirect(
-                url_for("web.exam_report", course_id=g.course_id, exam_id=exam_id)
-            )
+            return _to_exam_report(exam_id)
         except ExamConfigError as exc:
             abort(400, description=str(exc))
         except AnswerValidationError:
@@ -1002,9 +1002,7 @@ def create_web_blueprint(
             target = position
         else:
             target = min(position + 1, exam_session.question_count - 1)
-        return redirect(
-            url_for("web.exam", course_id=g.course_id, exam_id=exam_id, q=target)
-        )
+        return _to_exam(exam_id, position=target)
 
     @course_route("/exam/<exam_id>/submit", methods=("POST",))
     @shared_progress
@@ -1022,9 +1020,7 @@ def create_web_blueprint(
                 flash("考试时间已到，已自动交卷。", "info")
             else:
                 flash("交卷成功，已生成成绩报告。", "success")
-        return redirect(
-            url_for("web.exam_report", course_id=g.course_id, exam_id=exam_id)
-        )
+        return _to_exam_report(exam_id)
 
     @course_route("/exam/<exam_id>/report")
     @shared_progress
@@ -1044,9 +1040,7 @@ def create_web_blueprint(
         except ExamNotFoundError:
             abort(404)
         except ExamStateError:
-            return redirect(
-                url_for("web.exam", course_id=g.course_id, exam_id=exam_id)
-            )
+            return _to_exam(exam_id)
         wrong_details = [
             {
                 "item": item,
@@ -1072,6 +1066,20 @@ def create_web_blueprint(
         if owner is not None and owner != g.course_id:
             abort(409, description=CROSS_COURSE_EXAM_MESSAGE)
 
+    def _to_exam(exam_id: str, *, position: int | None = None) -> Any:
+        """Send the learner to one page of a still-unfinished exam."""
+
+        query = {} if position is None else {"q": position}
+        return redirect(
+            url_for("web.exam", course_id=g.course_id, exam_id=exam_id, **query)
+        )
+
+    def _to_exam_report(exam_id: str) -> Any:
+        """Send the learner to the score report of a finished exam."""
+
+        return redirect(
+            url_for("web.exam_report", course_id=g.course_id, exam_id=exam_id)
+        )
 
 
     # ------------------------------------------------------------ practice helpers
@@ -1234,10 +1242,7 @@ def create_web_blueprint(
         if state["status"] != "pending":
             abort(409, description="当前题目暂时不能提交，请重新进入练习。")
 
-        submitted_token = request.form.get("answer_token", "")
-        expected_token = state.get("answer_token", "")
-        if not _web_auth.tokens_match(submitted_token, expected_token):
-            abort(400, description="答题页面已经过期，请返回后重新进入。")
+        _require_current_answer_token(state)
 
         current_index = state["current_index"]
         question_ids = state["question_ids"]
@@ -1272,6 +1277,22 @@ def create_web_blueprint(
             g.quiz_progress[_progress_state.session_key(mode)] = state
             return redirect(url_for(endpoint, course_id=g.course_id))
 
+        _record_answer_outcome(state, mode, result, review_item)
+        return redirect(url_for(endpoint, course_id=g.course_id))
+
+    def _record_answer_outcome(
+        state: dict[str, Any],
+        mode: QuizMode,
+        result: AnswerResult,
+        review_item: dict[str, Any] | None,
+    ) -> None:
+        """Store one graded answer's outcome in the resumable round state.
+
+        The counters, the per-slot entry and the temporary ``feedback``
+        payload are exactly what a refreshed page renders, so they are written
+        here and nowhere else.
+        """
+        question_ids = state["question_ids"]
         state["status"] = "answered"
         counter = "correct_count" if result.is_correct else "incorrect_count"
         state[counter] += 1
@@ -1309,7 +1330,6 @@ def create_web_blueprint(
         state["question_results"] = results
         state["feedback"] = feedback
         g.quiz_progress[_progress_state.session_key(mode)] = state
-        return redirect(url_for(endpoint, course_id=g.course_id))
 
 
     def _next(mode: QuizMode) -> Any:
@@ -1320,9 +1340,7 @@ def create_web_blueprint(
         if state["status"] != "answered":
             return redirect(url_for(endpoint, course_id=g.course_id))
 
-        submitted_token = request.form.get("answer_token", "")
-        if not _web_auth.tokens_match(submitted_token, state["answer_token"]):
-            abort(400, description="答题页面已经过期，请返回后重新进入。")
+        _require_current_answer_token(state)
 
         state["current_index"] += 1
         if (
@@ -1350,6 +1368,16 @@ def create_web_blueprint(
 
     def _state_for(mode: QuizMode) -> dict[str, Any] | None:
         return _progress_state.valid_state_for(g.quiz_progress, mode)
+
+    def _require_current_answer_token(state: dict[str, Any]) -> None:
+        """Reject a form that does not carry this question's current token.
+
+        The token is rotated on every advance, so a stale tab or a replayed
+        form can neither answer nor advance a later question.
+        """
+        submitted = request.form.get("answer_token", "")
+        if not _web_auth.tokens_match(submitted, state.get("answer_token", "")):
+            abort(400, description="答题页面已经过期，请返回后重新进入。")
 
     def _active_progress(mode: QuizMode) -> dict[str, Any] | None:
         """Return a small resume summary for an unfinished mode."""

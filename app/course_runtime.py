@@ -21,7 +21,6 @@ course access entry point.  It does not expose a single global
 """
 
 import logging
-from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import tzinfo
 from enum import Enum

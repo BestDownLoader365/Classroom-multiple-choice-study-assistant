@@ -50,7 +50,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.models import (  # noqa: E402
     CourseDefinition,
-    CourseDefinitionError,
     validate_course_id,
 )
 from app.models.course import CourseIdError  # noqa: E402

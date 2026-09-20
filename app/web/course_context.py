@@ -108,15 +108,17 @@ def submitted_form_context(
 
 
 def operation_for_endpoint(endpoint: str | None) -> str | None:
-    """Return the logical operation name a route performs, if any."""
+    """Return the logical operation name a route performs, if any.
+
+    Endpoints are registered as ``web.<operation>``, so the signed form
+    context stores the bare operation the transaction guard compares against
+    the endpoint the request actually reached.
+    """
     if not endpoint:
         return None
-    name = endpoint
-    for prefix in ("web.", "web."):
-        if name.startswith(prefix):
-            name = name[len(prefix) :]
-            break
-    return name
+    if endpoint.startswith("web."):
+        return endpoint[len("web.") :]
+    return endpoint
 
 
 def install_course_aware_url_for(app, scoped_endpoints) -> None:

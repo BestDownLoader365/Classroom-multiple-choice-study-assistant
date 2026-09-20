@@ -38,7 +38,7 @@ migration with a report instead of silently dropping rows.
 
 import os
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path

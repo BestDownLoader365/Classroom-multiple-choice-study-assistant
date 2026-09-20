@@ -97,8 +97,6 @@ from app.repositories import (  # noqa: E402
 )
 from app.repositories.schema_migrations import (  # noqa: E402
     LEGACY_COURSE_KEY,
-    SCHEMA_VERSION,
-    SCHEMA_VERSION_KEY,
 )
 from app.services import catalogue_fingerprint, diff_questions  # noqa: E402
 from scripts.course_tooling import (  # noqa: E402

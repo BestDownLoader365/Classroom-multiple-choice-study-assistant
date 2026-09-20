@@ -5,7 +5,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from app.models import Chapter, Option, Question, SourceDocument
+from app.models import (
+    LEGACY_CHAPTER,
+    LEGACY_SOURCE,
+    Chapter,
+    Option,
+    Question,
+    SourceDocument,
+)
 
 
 class QuestionBankError(RuntimeError):
@@ -98,21 +105,9 @@ class QuestionLoader:
             questions.append(question)
         self._validate_question_references(questions)
         if not self.sources:
-            self.sources = (
-                SourceDocument(
-                    id="legacy",
-                    title="Uncategorized course material",
-                    lecture="Legacy question bank",
-                ),
-            )
-            self.chapters = (
-                Chapter(
-                    id="legacy",
-                    source_id="legacy",
-                    title="Uncategorized",
-                    order=1,
-                ),
-            )
+            # A bank without a catalogue gets the shared legacy defaults.
+            self.sources = (LEGACY_SOURCE,)
+            self.chapters = (LEGACY_CHAPTER,)
         return questions
 
     def _parse_question(
