@@ -449,6 +449,31 @@ def read_meta(connection: sqlite3.Connection, key: str) -> str | None:
     return None if row is None else str(row["value"])
 
 
+def read_legacy_course_id(database_path: Path) -> str | None:
+    """Return the persisted legacy namespace without writing anything.
+
+    The persisted value — not the module default — decides which namespace owns
+    pre-multi-course data, so application assembly and the CLI must read it
+    *before* they build the course loader or run the migration.  Returns ``None``
+    for a missing/empty file, a database without ``schema_meta``, or a database
+    that never recorded the key (a fresh one); the caller then uses
+    :data:`~app.models.course.LEGACY_COURSE_ID`.
+
+    Read-only by construction: the connection is opened with ``mode=ro`` so a
+    probe can never create or modify the file it inspects.
+    """
+    if not database_path.is_file() or database_path.stat().st_size == 0:
+        return None
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        if not _table_names(connection):
+            return None
+        return read_meta(connection, LEGACY_COURSE_KEY)
+    finally:
+        connection.close()
+
+
 def _write_meta(connection: sqlite3.Connection, key: str, value: str) -> None:
     connection.execute(
         f'INSERT INTO "{SCHEMA_META_TABLE}" (key, value) VALUES (?, ?) '

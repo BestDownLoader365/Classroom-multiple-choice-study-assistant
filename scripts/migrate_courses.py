@@ -11,7 +11,10 @@ learner reconciliation — those are separate steps performed by the workers.
 
 ``--dry-run`` only reads.  A real run first copies the database to a timestamped
 backup next to it (unless ``--no-backup``) and then migrates.  ``--layout``
-additionally materialises the legacy root files as ``courses/<legacy>/``.
+additionally materialises the legacy root files as
+``courses/<--legacy-course-id>/`` (directory name **and** manifest ``course_id``
+both use the requested id, so the layout never disagrees with the namespace the
+rows were migrated into).
 Exit codes: ``0`` success, ``1`` migration refused (reported, nothing written),
 ``2`` usage/IO problem.
 """
@@ -30,6 +33,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.models import LEGACY_COURSE_ID  # noqa: E402
+from app.models.course import CourseDefinitionError, CourseIdError  # noqa: E402
 from app.repositories import CourseLoader, Database  # noqa: E402
 from app.repositories.schema_migrations import (  # noqa: E402
     LEGACY_COURSE_KEY,
@@ -38,6 +42,8 @@ from app.repositories.schema_migrations import (  # noqa: E402
     SchemaMigrationError,
     read_meta,
 )
+from app.models import validate_course_id  # noqa: E402
+from scripts.course_tooling import contained_path  # noqa: E402
 
 
 def _inspect(database_path: Path) -> int:
@@ -99,16 +105,30 @@ def _inspect(database_path: Path) -> int:
 
 
 def _migrate_layout(
-    courses_dir: Path, question_file: Path, glossary_file: Path
+    courses_dir: Path,
+    question_file: Path,
+    glossary_file: Path,
+    legacy_course_id: str,
 ) -> int:
     """Materialise the legacy root files as one manifest course.
 
     The root files are **copied**, never moved, so a rollback is a plain
-    ``rm -rf`` of the new directory.  The ``course_id`` is the persisted legacy
-    namespace, which keeps every historical row owned by the same course.
+    ``rm -rf`` of the new directory.  The directory name, the manifest's
+    ``course_id`` and the namespace the rows were just migrated into are all
+    ``legacy_course_id`` — the value the caller gave to (or read back from) the
+    schema migration — so the layout can never disagree with the database.  A
+    custom ``--legacy-course-id`` therefore produces ``courses/<id>/`` and
+    ``"course_id": "<id>"``, and the root-file legacy adapter (which claims the
+    persisted namespace) sees a duplicate only when both really exist.
     """
-    target = courses_dir / LEGACY_COURSE_ID
+    target = courses_dir / legacy_course_id
     manifest_path = target / "course.json"
+    if not contained_path(target, courses_dir):
+        print(
+            f"legacy course id 会逃出 --courses-dir，拒绝执行：{legacy_course_id}",
+            file=sys.stderr,
+        )
+        return 2
     if target.exists() and any(target.iterdir()):
         print(
             f"目标目录已存在且非空：{target}\n"
@@ -127,7 +147,7 @@ def _migrate_layout(
         glossary_name = "glossary.json"
     manifest = {
         "schema_version": 1,
-        "course_id": LEGACY_COURSE_ID,
+        "course_id": legacy_course_id,
         "title": "Legacy course namespace",
         "title_zh": "旧版课程命名空间",
         "enabled": True,
@@ -167,7 +187,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--legacy-course-id",
         default=LEGACY_COURSE_ID,
-        help="namespace for the pre-existing rows (default: legacy)",
+        help=(
+            "namespace for the pre-existing rows, and the course_id/--layout "
+            f"directory name (default: {LEGACY_COURSE_ID}); must be a valid "
+            "lowercase course slug"
+        ),
     )
     parser.add_argument(
         "--courses-dir",
@@ -190,7 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--layout",
         action="store_true",
-        help="also materialise the legacy root files as courses/<legacy>/",
+        help=(
+            "also materialise the legacy root files as "
+            "courses/<--legacy-course-id>/"
+        ),
     )
     return parser
 
@@ -199,11 +226,28 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    # Validated before *any* write: the namespace ends up in ``schema_meta``, in
+    # a directory name and in a manifest, and ``Course.__post_init__`` would
+    # otherwise raise inside ``register_courses`` *after* the migration has
+    # committed, leaving a migrated database that records an illegal id.
+    try:
+        legacy_course_id = validate_course_id(args.legacy_course_id)
+    except CourseIdError as exc:
+        print(f"--legacy-course-id 不合法：{exc}", file=sys.stderr)
+        return 2
+
     database_path = args.db.resolve()
     if args.dry_run:
         return _inspect(database_path)
     if not database_path.is_file():
         print(f"数据库不存在：{database_path}", file=sys.stderr)
+        return 2
+    courses_dir = args.courses_dir.resolve()
+    if not contained_path(courses_dir / legacy_course_id, courses_dir):
+        print(
+            f"--legacy-course-id 会逃出 --courses-dir，拒绝执行：{legacy_course_id}",
+            file=sys.stderr,
+        )
         return 2
 
     if not args.no_backup:
@@ -213,16 +257,32 @@ def main(argv: list[str] | None = None) -> int:
         shutil.copystat(database_path, backup)
         print(f"已备份：{backup}")
 
-    definitions = CourseLoader(
-        args.courses_dir,
-        legacy_directory=args.question_file.parent,
-        legacy_questions_name=args.question_file.name,
-        legacy_glossary_name=args.glossary_file.name,
-    ).discover_definitions()
+    try:
+        definitions = CourseLoader(
+            courses_dir,
+            legacy_directory=args.question_file.parent,
+            legacy_questions_name=args.question_file.name,
+            legacy_glossary_name=args.glossary_file.name,
+            legacy_course_id=legacy_course_id,
+        ).discover_definitions()
+    except CourseDefinitionError as exc:
+        # A global catalogue ambiguity aborts assembly, so it must abort the
+        # migration too — and it must be reported, not raised, because the most
+        # likely cause is the documented "root files + courses/<legacy>/ both
+        # present" state rather than a bug.
+        print(
+            "课程目录配置错误（应用本身也无法启动）：\n"
+            f"{exc}\n"
+            "迁移未执行。若这是 --layout 之后遗留的根 questions.json/"
+            "glossary.json，请在确认新布局可加载后删除根文件再重试。",
+            file=sys.stderr,
+        )
+        return 1
+
 
     database = Database(database_path)
     try:
-        info = database.initialize(legacy_course_id=args.legacy_course_id)
+        info = database.initialize(legacy_course_id=legacy_course_id)
     except SchemaMigrationError as exc:
         print(f"迁移被拒绝，未写入任何数据：\n{exc}", file=sys.stderr)
         return 1
@@ -236,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.layout:
         return _migrate_layout(
-            args.courses_dir, args.question_file, args.glossary_file
+            courses_dir, args.question_file, args.glossary_file, legacy_course_id
         )
     return 0
 

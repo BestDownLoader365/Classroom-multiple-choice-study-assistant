@@ -26,6 +26,7 @@ from .schema_migrations import (
     SchemaInfo,
     SchemaMigrationError,
     ensure_schema,
+    read_legacy_course_id,
     read_meta,
 )
 from .user_repository import UserRepository, UsernameAlreadyExistsError
@@ -65,6 +66,7 @@ __all__ = [
     "WrongQuestionRepository",
     "ensure_schema",
     "normalize_glossary_label",
+    "read_legacy_course_id",
     "read_meta",
     "require_course_id",
 ]

@@ -465,7 +465,7 @@ The thin shared tooling layer behind every course CLI script. It resolves a cour
 
 #### `scripts/migrate_courses.py`
 
-The transactional multi-course migration and inspection CLI: `--dry-run` only reads (table list, `schema_version`, persisted `legacy_course_id`, whether a migration is needed, per-table row counts, orphan `exam_questions` rows); a real run copies the database to a timestamped backup next to it unless `--no-backup`, then migrates. `--layout` additionally materialises the legacy root files as `courses/<legacy>/` (see [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)). Exit codes: `0` success, `1` migration refused (nothing written), `2` usage/IO.
+The transactional multi-course migration and inspection CLI: `--dry-run` only reads (table list, `schema_version`, persisted `legacy_course_id`, whether a migration is needed, per-table row counts, orphan `exam_questions` rows); a real run copies the database to a timestamped backup next to it unless `--no-backup`, then migrates. `--layout` additionally materialises the legacy root files as `courses/<--legacy-course-id>/`, using that same id for the directory name, the manifest `course_id` and the persisted `schema_meta.legacy_course_id`; the flag is validated as a course slug before anything is written (an invalid or traversing value exits `2` with no writes). A global catalogue ambiguity — most likely a root `questions.json` left next to `courses/<id>/course.json` — is reported and exits `1` rather than aborting with a traceback (see [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)). Exit codes: `0` success, `1` migration refused (nothing written), `2` usage/IO.
 
 #### `scripts/rename_course.py`
 

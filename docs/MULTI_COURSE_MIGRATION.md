@@ -149,19 +149,23 @@ python scripts/migrate_courses.py --db instance/mcq.db
 
 ```bash
 python scripts/migrate_courses.py --db instance/mcq.db --layout
+python scripts/migrate_courses.py --db instance/mcq.db --layout --legacy-course-id <id>
 ```
 
 `--layout` 的准确行为：
 
-* 它把根 `questions.json` / `glossary.json` **复制**到 `courses/<legacy>/`（不移动、不删除根文件），并把 manifest 写入
-  `courses/<legacy>/course.json`（`course_id` 为 `legacy`，`order` 为 `-1000000`，内容指向目录内的 `questions.json` /
-  `glossary.json`）——复制而非移动让回滚变成一句 `rm -rf courses/<legacy>`；
+* 它把根 `questions.json` / `glossary.json` **复制**到 `courses/<legacy-course-id>/`（不移动、不删除根文件），并把 manifest 写入
+  `courses/<legacy-course-id>/course.json`（`course_id` 为该 legacy id，`order` 为 `-1000000`，内容指向目录内的 `questions.json` /
+  `glossary.json`）——复制而非移动让回滚变成一句 `rm -rf courses/<legacy-course-id>`；
+* **目录名、manifest 的 `course_id` 与数据库 `schema_meta.legacy_course_id` 使用同一个 `--legacy-course-id`**（默认
+  `legacy`）：`--legacy-course-id custom-id` 会同时得到 `courses/custom-id/`、`"course_id": "custom-id"` 与持久化的自定义
+  namespace，三者不可能不一致；
+* `--legacy-course-id` 必须是合法的 course slug（小写 ASCII、可用 `_`/`-` 分隔、最长 64 字符）。非法值（大写、空格、`../` 等）
+  在**任何写入之前**以退出码 `2` 拒绝：它既不会被写进数据库，也不会被用作目录名（避免路径穿越）；
 * 目标目录已存在且非空时它拒绝执行（退出码 1），不会覆盖任何内容；根题库不存在时也返回 1；
-* **目录名和 `course_id` 固定使用 `LEGACY_COURSE_ID`（`legacy`）**，即使给数据库迁移部分传了自定义
-  `--legacy-course-id <id>`：`--layout` 仍然写 `courses/legacy/` 和 `course_id: "legacy"`。因此“自定义 legacy namespace +
-  `--layout`”是**不支持的组合**——要么使用默认的 `legacy`，要么先 `--layout` 再按第 5 节的方法把课程重命名到目标 ID；
-* 复制完成后**必须删除根文件**：根 `questions.json` 与 `courses/legacy/course.json` 同时存在会被判定为重复 `course_id`，
-  导致应用无法启动。确认新布局的课程能正常加载（`check_courses.py`）之后再删除，并且**不要在删除之前启动应用**。
+* 复制完成后**必须删除根文件**：根 `questions.json` 与 `courses/<legacy-id>/course.json` 同时存在会被判定为重复 `course_id`，
+  导致应用无法启动（`migrate_courses.py` 会明确报出这一点并返回 1）。确认新布局的课程能正常加载（`check_courses.py`）
+  之后再删除，并且**不要在删除之前启动应用**。
 
 ### 2.4 验证
 
@@ -232,8 +236,10 @@ python scripts/publish_course.py --course physical_design --questions old_questi
   （退出码 4），因为把任意新课程候选与全库历史比较会给出误导性的结论。先迁移，再逐课程检查。
 * 历史考试不会获得完整的历史题目内容快照；报告仍基于当前 live 内容。
 * 聚合 `/ready` 的失败只表示"至少一门课程在本 worker 上不可服务"，**不**表示健康课程的路由也会失败。
-* `migrate_courses.py --layout` 固定使用 `legacy` 目录与 `legacy` 这个 `course_id`，与自定义
-  `--legacy-course-id` 组合不受支持（见 2.3）。
+* 根 `questions.json` / `glossary.json` 与 `courses/<legacy-id>/course.json` **不能共存**：legacy adapter 声明的
+  `course_id` 就是持久化的 legacy namespace，两者同名即重复 `course_id`，应用启动与 `migrate_courses.py` 都会明确失败
+  （后者返回 1）。这是有意的收紧——以前 adapter 硬编码 `legacy`，与改名后的 namespace 并存时会静默多出一门没有历史的
+  幻影课程。处理方法：确认新布局可加载后删除根文件。
 
 ---
 

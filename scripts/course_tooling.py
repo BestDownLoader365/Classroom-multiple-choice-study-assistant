@@ -83,14 +83,25 @@ class ToolingError(RuntimeError):
 
 
 def build_loader(
-    courses_dir: Path, question_file: Path, glossary_file: Path
+    courses_dir: Path,
+    question_file: Path,
+    glossary_file: Path,
+    *,
+    legacy_course_id: str | None = None,
 ) -> CourseLoader:
-    """Build the application's own course loader for the CLI."""
+    """Build the application's own course loader for the CLI.
+
+    ``legacy_course_id`` is the namespace the root-file legacy adapter should
+    claim.  ``None`` means "use the loader default"; a caller that knows the
+    persisted value (``migrate_courses.py``) passes it so the adapter and the
+    database agree.
+    """
     return CourseLoader(
         courses_dir,
         legacy_directory=question_file.parent,
         legacy_questions_name=question_file.name,
         legacy_glossary_name=glossary_file.name,
+        **({} if legacy_course_id is None else {"legacy_course_id": legacy_course_id}),
     )
 
 
@@ -252,6 +263,25 @@ def read_manifest(definition: CourseDefinition) -> dict:
 
 
 # ------------------------------------------------------------------- filesystem
+
+
+def contained_path(candidate: Path, root: Path) -> bool:
+    """Return whether ``candidate`` is ``root`` itself or lives inside it.
+
+    The one containment check every course CLI uses before it renames or deletes
+    anything: a resolved path that escapes the course root is never touched.  It
+    mirrors ``app.repositories.course_loader._is_contained`` so the CLI and the
+    loader cannot disagree about what "inside the course directory" means.
+    """
+    try:
+        candidate = Path(candidate).resolve()
+        root = Path(root).resolve()
+    except OSError:  # pragma: no cover - defensive for exotic paths
+        return False
+    try:
+        return candidate == root or candidate.is_relative_to(root)
+    except ValueError:  # pragma: no cover - different drives on Windows
+        return False
 
 
 def fsync_directory(directory: Path) -> None:

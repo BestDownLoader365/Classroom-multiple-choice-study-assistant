@@ -138,11 +138,25 @@ class CourseLoader:
         legacy_directory: Path | None = None,
         legacy_questions_name: str = DEFAULT_QUESTIONS_NAME,
         legacy_glossary_name: str = DEFAULT_GLOSSARY_NAME,
+        legacy_course_id: str = LEGACY_COURSE_ID,
     ) -> None:
+        """Bind the course directory and the root-file legacy adapter.
+
+        ``legacy_course_id`` is the namespace the root ``questions.json``/
+        ``glossary.json`` adapter claims.  It is a *parameter* because the
+        namespace is decided once by the schema migration and persisted in
+        ``schema_meta``: after ``scripts/rename_course.py`` renames it, the
+        adapter must claim the same id the learner rows use, otherwise the root
+        files would look like a second, history-less course.  Callers that know
+        the persisted value (``app/__init__.py``,
+        ``scripts/migrate_courses.py``) pass it; everything else keeps the
+        default.
+        """
         self.courses_root = Path(courses_root)
         self.legacy_directory = Path(legacy_directory) if legacy_directory else None
         self.legacy_questions_name = legacy_questions_name
         self.legacy_glossary_name = legacy_glossary_name
+        self.legacy_course_id = validate_course_id(legacy_course_id)
 
     # ------------------------------------------------------------------ discovery
 
@@ -349,7 +363,12 @@ class CourseLoader:
         return resolved
 
     def _legacy_definition(self) -> CourseDefinition | None:
-        """Adapt the root ``questions.json`` files into one virtual course."""
+        """Adapt the root ``questions.json`` files into one virtual course.
+
+        The adapter claims ``self.legacy_course_id`` — the namespace the schema
+        migration persisted — not a hard-coded ``"legacy"``, so a renamed legacy
+        namespace still owns the root files' history.
+        """
         if self.legacy_directory is None:
             return None
         legacy_dir = self.legacy_directory.resolve()
@@ -363,7 +382,7 @@ class CourseLoader:
         title, title_zh = self._peek_legacy_titles(questions_path)
         return CourseDefinition(
             course=Course(
-                course_id=LEGACY_COURSE_ID,
+                course_id=self.legacy_course_id,
                 title=title,
                 title_zh=title_zh,
                 enabled=True,

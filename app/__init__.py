@@ -33,6 +33,7 @@ from app.course_runtime import (
     CourseStatus,
     build_course_registry,
 )
+from app.models import LEGACY_COURSE_ID
 from app.repositories import (
     CourseLoader,
     CourseRepository,
@@ -40,6 +41,7 @@ from app.repositories import (
     Database,
     RateLimitRepository,
     UserRepository,
+    read_legacy_course_id,
 )
 from app.routes import create_web_blueprint
 from app.services import resolve_display_timezone
@@ -105,16 +107,26 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
     question_file = Path(app.config["QUESTION_FILE"]).resolve()
     glossary_file = Path(app.config["GLOSSARY_FILE"]).resolve()
     courses_dir = Path(app.config["COURSES_DIR"]).resolve()
+    database = Database(Path(app.config["DATABASE"]).resolve())
+
+    # The legacy namespace is decided once by the schema migration and persisted
+    # in ``schema_meta``; read it *before* the loader is built (a read-only probe,
+    # so nothing is created here) and hand the same id to both the loader's
+    # root-file adapter and ``Database.initialize``.  Otherwise a renamed legacy
+    # namespace would make the root files look like a second, history-less course.
+    legacy_course_id = (
+        read_legacy_course_id(database.database_path) or LEGACY_COURSE_ID
+    )
 
     loader = CourseLoader(
         courses_dir,
         legacy_directory=question_file.parent,
         legacy_questions_name=question_file.name,
         legacy_glossary_name=glossary_file.name,
+        legacy_course_id=legacy_course_id,
     )
 
-    database = Database(Path(app.config["DATABASE"]).resolve())
-    database.initialize()
+    database.initialize(legacy_course_id=legacy_course_id)
     user_repository = UserRepository(database)
     rate_limit_repository = RateLimitRepository(database)
     course_repository = CourseRepository(database)
