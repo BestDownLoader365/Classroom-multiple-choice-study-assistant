@@ -436,8 +436,9 @@ python scripts/publish_course.py --course physical_design
 * `schema_meta.default_course_id` 这类导航偏好仍指向已删除的课程；
 * `versions/<sha256>/` 之外的引用（candidate 文件）与已发布内容同时消失，但数据库仍认为课程存在。
 
-结果是仓库进入不一致状态：内容没了、历史还在，以后同名 `course_id` 一旦重新加入就会继承旧的退役 ID；
-`check_courses.py` 会把数据库里的身份报告为 `undeployed`。
+结果是仓库进入不一致状态：内容没了、历史还在，以后同名 `course_id` 一旦重新加入就会继承旧的退役 ID。
+（注意：`check_courses.py` **不读数据库**，它只校验 `courses/` 目录，因此**不能**用来确认数据库侧的清理结果；
+`undeployed` 是运行时注册表的状态，重启应用后看 `/courses` 页面或 `GET /ready/<course_id>` 才能看到。）
 
 用正式脚本删除（先看，后删）：
 
@@ -451,8 +452,12 @@ python scripts/delete_course.py --course physical_design
 # 课程仍有学习数据时，必须先明确确认（否则拒绝执行）
 python scripts/delete_course.py --course physical_design --force
 
-# 3) 统一重启全部 worker，并复核
+# 3) 统一重启全部 worker，并复核（check_courses.py 只校验课程目录，不读数据库；
+#    数据库侧请看 /courses 页面或 GET /ready/<course_id>）
 python scripts/check_courses.py
+
+# 若上次运行留下待清理条目（退出码 3），单独完成清理：
+python scripts/delete_course.py --purge --dry-run
 ```
 
 安全机制：
@@ -460,10 +465,11 @@ python scripts/check_courses.py
 | 机制 | 说明 |
 | --- | --- |
 | `--dry-run` | 只报告：课程目录、`courses` 行、每张 course-scoped 表的行数、`question_registry` 退役记录、将清除的 `default_course_id` |
-| 时间戳备份 | 默认先复制 `instance/mcq.db` 为 `mcq.db.bak-<UTC 时间戳>`（`--no-backup` 可关闭，不推荐） |
+| 时间戳备份 | 默认先生成 `instance/mcq.db.bak-<UTC 时间戳>`（SQLite 在线备份 API + `PRAGMA quick_check` 校验 + 原子发布，失败即中止；`--no-backup` 可关闭，不推荐） |
 | 学习数据确认 | 课程还有学习数据但没有 `--force` 时拒绝执行（退出码 1），且不写任何内容 |
 | 单课程范围 | 所有 SQL 都以 `course_id` 为条件；提交前会重新统计每张表的总行数，必须恰好减少被删除的行数，否则回滚 |
-| 目录白名单 | 只删除位于 `--courses-dir` 之内、且 manifest 声明的 `course_id` 与目标一致的目录 |
+| 目录白名单 | 只移动位于 `--courses-dir` 之内、且 manifest 声明的 `course_id` 与目标一致的目录 |
+| 可恢复目录 | 目录先原子移动到 `courses/.trash/`，数据库提交成功后才物理删除；失败时可恢复原路径或事后 `--purge` |
 | legacy 保护 | 根目录 `questions.json` 的 legacy adapter 没有课程目录，拒绝执行（先用 `migrate_courses.py --layout` 迁移）；持久化的 `legacy_course_id` 也不能删除（它的行会在每次启动时重建，改归属请用 `rename_course.py`） |
 
 删除后该课程的题目 ID 退役记录一并消失：如果以后重新加入同名课程，它的 ID 从零开始，不会继承旧的退役状态。
@@ -472,17 +478,28 @@ python scripts/check_courses.py
 **执行顺序与失败语义（文件系统和数据库不是同一个事务）：**
 
 ```text
---dry-run 报告（不写任何内容）
-  → 复制带时间戳的数据库备份
-  → 删除课程目录（如果该课程有目录）
-  → 在一个事务里清理该课程的全部数据库行（提交前重新统计每张表的总行数）
+--dry-run 报告（不写任何内容，并打印阶段计划）
+  → 复制带时间戳的数据库备份（SQLite 在线备份 API + quick_check 校验，失败即中止）
+  → 阶段 1（可补偿）：把 courses/<course_id>/ 原子移动到 courses/.trash/<id>.<时间戳>
+  → 阶段 2（提交点）：在一个事务里清理该课程的全部数据库行（提交前重新统计每张表的总行数）
+  → 阶段 3（提交之后）：物理删除隔离目录
 ```
 
-* 数据库清理失败时（例如被占用或约束冲突），**目录已经被删除**，而数据库保持原样：命令会打印
-  「数据库清理失败（目录已删除，数据库保持原样）」并以退出码 1 结束。
-* 这种情况下课程会变成 `undeployed`（数据库有身份、内容已不在）。修复报错原因后**重新执行同一条命令**即可
-  只清理数据库记录（此时没有目录可删，命令会把它当作未部署身份处理），不需要手工写 SQL。
-* 目录删除失败时不会进入数据库清理阶段，数据库完全没有被改动。
+* **阶段 1 失败**（权限、跨文件系统、被占用）→ 什么都没改，退出码 1，数据库完全没有被改动。
+* **阶段 2 失败** → 事务回滚，并把隔离目录恢复回 `courses/<course_id>/`：退出码 1，打印
+  「数据库清理失败，已回滚并恢复课程目录，未删除任何内容」。
+  如果**补偿也失败**，退出码 **3**，打印「需要人工介入」与两个绝对路径、可直接复制的 `mv` 命令，
+  并且**保留**隔离目录（绝不删除，避免数据丢失）。
+* **阶段 3 失败** → 数据库变更已提交，课程目录仍在隔离目录中：退出码 **3**，打印待清理路径，
+  修复权限/占用后运行 `python scripts/delete_course.py --purge` 即可完成清理。
+* **进程在阶段 1 与阶段 2 之间被杀** → 下次运行同一条命令会**自动接管**该课程在隔离目录中的
+  唯一条目，从阶段 2 继续（幂等续跑）；隔离目录中有多个同课程条目、或目录与隔离条目同时存在时
+  命令会拒绝执行并提示人工确认，不会猜测。
+* 退出码：`0` 已删除（或 `--dry-run`）、`1` 被拒绝/已完整补偿、`2` 参数或 IO 问题、
+  `3` 数据库变更已提交但需要人工清理隔离目录。
+
+`--purge`（可配 `--dry-run`、`--course`）只清理 `courses/.trash/` 中上次运行留下的条目，
+**不写数据库**；每条都会重新做包含性校验，因此不可能删除 `courses/.trash/` 之外的路径。
 
 ### 7.5 停用 / 重新启用
 

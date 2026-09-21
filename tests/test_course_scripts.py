@@ -1292,7 +1292,9 @@ def test_delete_course_removes_directory_and_every_namespace_row(tmp_path, capsy
         == 0
     )
     out = capsys.readouterr().out
-    assert "已删除课程目录" in out
+    # The protocol reports both the reversible step and the final removal.
+    assert "已隔离课程目录" in out
+    assert f"{courses_dir / '.trash'}" in out
 
     # The directory is gone; the other course is untouched.
     assert not (courses_dir / A).exists()

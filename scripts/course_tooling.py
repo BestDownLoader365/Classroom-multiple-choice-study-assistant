@@ -55,6 +55,16 @@ from app.models import (  # noqa: E402
 from app.models.course import CourseIdError  # noqa: E402
 from app.repositories import CourseLoader  # noqa: E402
 
+#: The CLIs used to each implement their own ``shutil.copy2`` backup.  They now
+#: share the application's verified, atomically published snapshot so an operator
+#: gets the same artifact (and the same failure behaviour) from every command.
+from app.repositories.database_backup import (  # noqa: E402
+    BACKUP_MARKER,
+    BackupError,
+    backup_name,
+    timestamped_backup,
+)
+
 VERSIONS_DIRECTORY = "versions"
 LOCK_FILE_NAME = ".publish.lock"
 
@@ -264,6 +274,26 @@ def read_manifest(definition: CourseDefinition) -> dict:
 
 # ------------------------------------------------------------------- filesystem
 
+#: Directory inside ``courses/`` that holds course directories whose database
+#: half has not been committed yet, or whose final removal failed.  It is
+#: dot-prefixed so the loader's ``entry.name.startswith(".")`` rule ignores it,
+#: and it lives inside the course root so a move into it is always a rename on
+#: the same filesystem.
+ISOLATED_DIRECTORY = ".trash"
+
+#: Separator between the course id and the timestamp in ``.trash/<id>.<stamp>``.
+ISOLATED_SEPARATOR = "."
+
+
+class FilesystemTransactionError(ToolingError):
+    """Raised when a filesystem step could not be applied or compensated.
+
+    Callers distinguish two situations with it: the *main* step failed (nothing
+    changed, or the change was fully undone) versus the *compensation* failed too,
+    which needs a human.  The message always names the paths involved so an
+    operator can act on it without re-reading the code.
+    """
+
 
 def contained_path(candidate: Path, root: Path) -> bool:
     """Return whether ``candidate`` is ``root`` itself or lives inside it.
@@ -282,6 +312,136 @@ def contained_path(candidate: Path, root: Path) -> bool:
         return candidate == root or candidate.is_relative_to(root)
     except ValueError:  # pragma: no cover - different drives on Windows
         return False
+
+
+def atomic_rename(source: Path, target: Path) -> None:
+    """Rename ``source`` onto ``target`` in one filesystem operation.
+
+    Both sides must be on the same filesystem, which the callers guarantee by
+    keeping ``target`` inside the course root.  ``os.rename`` is atomic, so a
+    reader either sees the old name or the new one — never a half-moved
+    directory.  Every failure mode is translated into a
+    :class:`FilesystemTransactionError` that says what to check, because a bare
+    ``[Errno 18] Invalid cross-device link`` is not an actionable message.
+    """
+    import errno
+
+    try:
+        os.rename(source, target)
+    except OSError as exc:
+        hint = {
+            errno.EXDEV: "源与目标不在同一个文件系统（不要跨挂载点移动）",
+            errno.EACCES: "权限不足（检查目录属主与写权限）",
+            errno.EPERM: "权限不足（检查目录属主与写权限）",
+            errno.ENOTEMPTY: "目标目录非空（绝不覆盖已有目录）",
+            errno.EEXIST: "目标已存在（绝不覆盖已有目录）",
+            errno.ENOENT: "源或目标的父目录不存在",
+        }.get(exc.errno, "见下面的系统错误")
+        raise FilesystemTransactionError(
+            f"无法重命名 {source} -> {target}：{hint}（{exc}）"
+        ) from exc
+    fsync_directory(Path(target).parent)
+
+
+
+def isolated_directory(courses_dir: Path) -> Path:
+    """Return (creating it if needed) the quarantine directory inside ``courses``."""
+    directory = Path(courses_dir) / ISOLATED_DIRECTORY
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return directory
+
+
+def unique_isolated_path(
+    courses_dir: Path, course_id: str, *, stamp: str | None = None
+) -> Path:
+    """Return a quarantine path for ``course_id`` that does not exist yet.
+
+    The name is ``<course_id>.<UTC stamp>`` with a ``-N`` ordinal on collision,
+    which makes the entry self-describing (whose directory it is, when it was
+    quarantined) **and** uniquely attributable back to one course.  An existing
+    entry is never reused, so a crashed run's evidence cannot be overwritten.
+    """
+    from datetime import datetime, timezone
+
+    directory = isolated_directory(courses_dir)
+    stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for ordinal in range(100):
+        suffix = "" if ordinal == 0 else f"-{ordinal}"
+        candidate = directory / f"{course_id}{ISOLATED_SEPARATOR}{stamp}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise FilesystemTransactionError(  # pragma: no cover - 100 same-second runs
+        f"隔离目录中同名条目过多，拒绝继续：{directory}（{course_id}{ISOLATED_SEPARATOR}{stamp}）"
+    )
+
+
+def isolated_entries(courses_dir: Path, course_id: str | None = None) -> list[Path]:
+    """List quarantined course directories, optionally for one ``course_id``.
+
+    Containment is re-checked on every entry, so nothing outside
+    ``courses/<ISOLATED_DIRECTORY>`` can ever be reported or removed by a
+    ``--purge``.
+    """
+    directory = Path(courses_dir) / ISOLATED_DIRECTORY
+    if not directory.is_dir():
+        return []
+    prefix = None if course_id is None else f"{course_id}{ISOLATED_SEPARATOR}"
+    entries: list[Path] = []
+    for entry in sorted(directory.iterdir(), key=lambda item: item.name):
+        if not entry.is_dir() or not contained_path(entry, directory):
+            continue
+        if prefix is not None and not entry.name.startswith(prefix):
+            continue
+        entries.append(entry)
+    return entries
+
+
+def adopt_or_report(courses_dir: Path, course_id: str) -> tuple[Path | None, str]:
+    """Return ``(course_directory, note)``, adopting a crashed run's quarantine.
+
+    A deletion interrupted between "renamed into ``.trash``" and "the database
+    transaction committed" leaves the course with no directory at its documented
+    path but a quarantine entry that *is* that directory.  Rather than asking an
+    operator to interpret that, the next run adopts the single entry for this
+    ``course_id`` and continues where the previous run stopped, which is what
+    makes re-running the command idempotent.
+
+    Ambiguity is refused instead of guessed: two entries (or an entry *and* a
+    directory at the documented path) means something else happened, and the
+    operator is told to inspect ``--purge`` output first.
+    """
+    documented = Path(courses_dir) / course_id
+    entries = isolated_entries(courses_dir, course_id)
+    if not entries:
+        return (documented if documented.is_dir() else None), ""
+    if len(entries) > 1:
+        raise FilesystemTransactionError(
+            f'课程 "{course_id}" 在隔离目录中有 {len(entries)} 个待处理条目，无法判断该接管哪一个：'
+            + "".join(f"\n  - {entry}" for entry in entries)
+            + "\n请先用 --purge --dry-run 查看并人工确认后再执行。"
+        )
+    entry = entries[0]
+    if documented.is_dir():
+        raise FilesystemTransactionError(
+            f'课程 "{course_id}" 同时存在于 {documented} 与隔离目录 {entry}：'
+            "这是协议不应产生的状态，请人工确认后再处理。"
+        )
+    return entry, (
+        f"接管上次中断留下的隔离目录：{entry}\n"
+        f"（课程目录已不在 {documented}；本次继续删除流程，失败时恢复回该路径）"
+    )
+
+
+def discard_isolated(entry: Path, courses_dir: Path) -> None:
+    """Remove one quarantined directory, refusing to escape ``courses/.trash``."""
+    import shutil
+
+    directory = Path(courses_dir) / ISOLATED_DIRECTORY
+    if not contained_path(entry, directory):
+        raise FilesystemTransactionError(
+            f"拒绝删除隔离目录之外的路径：{entry}（隔离目录为 {directory}）"
+        )
+    shutil.rmtree(entry)
 
 
 def fsync_directory(directory: Path) -> None:

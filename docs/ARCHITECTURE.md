@@ -360,13 +360,23 @@ copies, `.publish.lock`) *and* every database reference in one audited operation
 `courses` identity row, all course-scoped learner rows (`quiz_progress`, `attempts`,
 `wrong_questions`, `weak_knowledge_points`, `exam_sessions` plus the `exam_questions`
 slots they own), `question_bank_state`, `question_registry` and — when it points at the
-deleted course — `schema_meta.default_course_id`. Safety comes from a `--dry-run` report,
-a timestamped database backup, a refusal while learner rows exist unless `--force` is
-given, a strict `--courses-dir` containment check, a refusal for the persisted
+deleted course — `schema_meta.default_course_id`.
+
+The order of operations is the protocol: after a verified timestamped backup the
+directory is moved atomically into `courses/.trash/<id>.<stamp>` (reversible), the
+database transaction commits (the commit point), and only then is the quarantined
+directory removed. A failed transaction restores the directory to its original path; a
+failed restore (or a failed final removal) exits `3` and keeps the recognizable
+quarantine entry, `--purge` finishes that cleanup, and a run interrupted between the
+phases is resumed by the next one, which adopts that course's single quarantine entry.
+Safety also comes from a `--dry-run` report that includes the phase plan, a refusal
+while learner rows exist unless `--force` is given, a strict `--courses-dir` and
+`courses/.trash` containment check on every path, a refusal for the persisted
 `legacy_course_id` namespace and the legacy root-file layout, and a per-table total
 row-count re-check inside the transaction that rolls back rather than commit a partially
-scoped deletion. Exit codes: `0` deleted (or dry run), `1` refused (nothing written),
-`2` usage/IO.
+scoped deletion. Exit codes: `0` deleted (or dry run), `1` refused (nothing written, or
+fully compensated), `2` usage/IO, `3` committed but a quarantine directory still needs
+manual cleanup.
 
 #### `scripts/check_question_bank.py`
 

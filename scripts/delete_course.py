@@ -12,6 +12,11 @@ behind that the application still reads and serves::
     # a course that still owns learner data needs an explicit --force
     python scripts/delete_course.py --course physical_design --force
 
+    # finish a cleanup a crashed/killed run left behind (quarantine directory)
+    python scripts/delete_course.py --purge --dry-run
+    python scripts/delete_course.py --purge
+    python scripts/delete_course.py --purge --course physical_design
+
 What a manual ``rm`` misses, and this script removes, is:
 
 * the content directory itself (``course.json``, the published content, the
@@ -38,8 +43,20 @@ Guarantees:
 * every statement is scoped to one ``course_id``; before committing, each
   table's total row count is re-read and must have dropped by exactly the
   deleted count, so another course can never lose a row to this command;
-* the directory is removed only when it is a strict child of ``--courses-dir``
-  and its manifest declares exactly this ``course_id``;
+* the database transaction is the *commit point*, and the irreversible filesystem
+  work happens after it: the directory is first moved atomically into
+  ``courses/.trash/``, then the transaction commits, and only then is the
+  quarantined copy physically removed;
+* a failed database transaction restores the quarantined directory to its
+  original path, so the course is left exactly as it was;
+* a failure to remove the quarantined copy does **not** undo the committed
+  deletion: it is reported, the entry is kept, and the exit code says the cleanup
+  is pending (``--purge`` finishes the job);
+* a run interrupted between the two steps is resumed automatically: the next run
+  adopts the single quarantine entry for that ``course_id`` and continues;
+* the directory is moved only when it is a strict child of ``--courses-dir`` and
+  its manifest declares exactly this ``course_id``, and the quarantine directory
+  is re-checked against ``courses/.trash`` before anything is removed;
 * the persisted ``legacy_course_id`` namespace is refused, because
   ``Database.initialize`` recreates that row on every startup (use
   ``rename_course.py`` to move a namespace instead);
@@ -50,18 +67,19 @@ Guarantees:
 
 A course that exists only in the database (``undeployed`` identity) is handled
 too: it has no directory, so only its rows are removed.  Exit codes: ``0``
-deleted (or dry run), ``1`` refused (nothing written), ``2`` usage/IO problem.
+deleted (or dry run), ``1`` refused (nothing written, or fully compensated),
+``2`` usage/IO problem, ``3`` the database change is committed but a quarantine
+directory still has to be removed by hand (``--purge``), i.e. manual
+intervention is required.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sqlite3
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -80,7 +98,20 @@ from app.repositories.schema_migrations import (  # noqa: E402
     LEGACY_COURSE_KEY,
     SCHEMA_META_TABLE,
 )
-from scripts.course_tooling import build_loader  # noqa: E402
+from scripts.course_tooling import (  # noqa: E402
+    BackupError,
+    FilesystemTransactionError,
+    ISOLATED_DIRECTORY,
+    ToolingError,
+    adopt_or_report,
+    atomic_rename,
+    build_loader,
+    contained_path,
+    discard_isolated,
+    isolated_entries,
+    timestamped_backup,
+    unique_isolated_path,
+)
 
 #: Course-scoped tables that hold per-course bookkeeping instead of learner
 #: history: the generation row and the permanent ID-retirement tombstones.
@@ -98,6 +129,16 @@ class DeleteError(RuntimeError):
 
 class Refused(DeleteError):
     """Raised when a precondition refuses the deletion (nothing was written)."""
+
+
+class CleanupPendingError(DeleteError):
+    """Raised when the database change committed but a directory is left behind.
+
+    This is *not* a rollback: the course is gone from the database and the
+    quarantined copy still exists.  It exists so ``main`` can report the pending
+    cleanup with its own exit code instead of degrading it into a silent success
+    or into "nothing was written".
+    """
 
 
 @dataclass(frozen=True)
@@ -312,17 +353,17 @@ def delete_namespace(database_path: Path, course_id: str) -> dict[str, int]:
         connection.close()
     return deleted
 
-    return _count(
-        connection,
-        "SELECT COUNT(*) AS total FROM exam_questions q WHERE q.exam_id IN "
-        "(SELECT id FROM exam_sessions WHERE course_id = ?)",
-        (course_id,),
-    )
 
+def validate_course_directory(definition: CourseDefinition, courses_dir: Path) -> Path:
+    """Prove one manifest course's directory may be moved aside, and return it.
 
-
-def remove_course_directory(definition: CourseDefinition, courses_dir: Path) -> Path:
-    """Delete one manifest course's directory after proving it is safe to delete."""
+    Nothing is modified here: this is the precondition half of the filesystem
+    work, so a refusal happens before anything is renamed.  The checks are that
+    the directory is a strict child of ``--courses-dir`` (never the root itself,
+    never outside it), that its manifest is readable, and that the manifest
+    really declares this ``course_id`` — a directory whose manifest disagrees is
+    not this course's to delete.
+    """
     manifest_path = definition.manifest_path
     if manifest_path is None:
         raise Refused(
@@ -331,7 +372,7 @@ def remove_course_directory(definition: CourseDefinition, courses_dir: Path) -> 
         )
     root = definition.root.resolve()
     base = courses_dir.resolve()
-    if root == base or not root.is_relative_to(base):
+    if root == base or not contained_path(root, base):
         raise Refused(f"课程目录不在 --courses-dir 内，拒绝删除：{root}")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -341,8 +382,55 @@ def remove_course_directory(definition: CourseDefinition, courses_dir: Path) -> 
         raise Refused(f"{manifest_path} 声明的 course_id 与解析结果不一致，拒绝删除目录。")
     if not root.is_dir():
         raise DeleteError(f"课程目录不存在：{root}")
-    shutil.rmtree(root)
     return root
+
+
+def quarantine_course_directory(
+    root: Path, courses_dir: Path, course_id: str, *, stamp: str | None = None
+) -> Path:
+    """Move ``root`` into ``courses/.trash`` in one atomic rename.
+
+    This is the only reversible half of the filesystem work: everything before it
+    can be redone, and everything after it (the database transaction, then the
+    physical removal) is either validated by the transaction or reported.  The
+    move is a plain ``os.rename`` into a sibling directory, so it cannot cross a
+    filesystem boundary; a failure leaves the course exactly where it was.
+    """
+    target = unique_isolated_path(courses_dir, course_id, stamp=stamp)
+    atomic_rename(root, target)
+    return target
+
+
+def restore_quarantined_directory(entry: Path, root: Path) -> None:
+    """Undo :func:`quarantine_course_directory` (the compensation step)."""
+    atomic_rename(entry, root)
+
+
+def purge_isolated(
+    courses_dir: Path, course_id: str | None = None, *, dry_run: bool = False
+) -> tuple[list[Path], list[Path]]:
+    """Remove quarantined course directories; return ``(removed, kept)``.
+
+    A quarantine entry is by construction a directory this tooling moved aside
+    and could not finish deleting, so removing it is the completion of an
+    already-committed operation — never a new deletion.  Every entry is
+    containment-checked again by :func:`discard_isolated`, and a failure on one
+    entry does not stop the others: the caller reports what is left.
+    """
+    entries = isolated_entries(courses_dir, course_id)
+    removed: list[Path] = []
+    kept: list[Path] = []
+    for entry in entries:
+        if dry_run:
+            kept.append(entry)
+            continue
+        try:
+            discard_isolated(entry, courses_dir)
+        except (FilesystemTransactionError, OSError):
+            kept.append(entry)
+            continue
+        removed.append(entry)
+    return removed, kept
 
 
 def _report(
@@ -350,11 +438,15 @@ def _report(
     definition: CourseDefinition | None,
     directory: Path | None,
     plan: DatabasePlan,
+    adoption_note: str = "",
 ) -> None:
     """Print exactly what the command is about to remove."""
     print(f"课程 (course_id): {course_id}")
     print(f"声明布局 (layout): {definition.layout if definition else '(未声明)'}")
     print(f"课程目录 (directory): {directory or '(无：数据库里只有未部署的课程身份)'}")
+    if adoption_note:
+        for line in adoption_note.splitlines():
+            print(f"  {line}")
     if not plan.exists:
         print(f"数据库 (database): {plan.path}（不存在，没有记录可清理）")
         return
@@ -406,11 +498,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
         epilog=(
-            "exit codes: 0 已删除（或 --dry-run）；1 被拒绝（未写入任何内容）；"
-            "2 参数或 IO 问题。"
+            "exit codes: 0 已删除（或 --dry-run）；1 被拒绝且未写入任何内容"
+            "（或已完成补偿）；2 参数或 IO 问题；"
+            "3 数据库变更已提交，但隔离目录仍需人工/--purge 清理。"
         ),
     )
-    parser.add_argument("--course", required=True, help="course_id to delete")
+    parser.add_argument(
+        "--course",
+        required=False,
+        help="course_id to delete (optional with --purge: limits the cleanup to it)",
+    )
     parser.add_argument(
         "--db",
         default=PROJECT_ROOT / "instance" / "mcq.db",
@@ -453,19 +550,66 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip the timestamped database backup copy (not recommended)",
     )
+    parser.add_argument(
+        "--purge",
+        action="store_true",
+        help=(
+            "only remove directories left in the quarantine directory "
+            f"({ISOLATED_DIRECTORY}) by a previous run that could not finish; "
+            "writes nothing to the database"
+        ),
+    )
     return parser
+
+
+def _report_purge(courses_dir: Path, course_id: str | None, *, dry_run: bool) -> int:
+    """Handle ``--purge``: list and remove quarantined directories only."""
+    entries = isolated_entries(courses_dir, course_id)
+    scope = f'课程 "{course_id}" 的' if course_id else "全部"
+    print(f"隔离目录：{courses_dir / ISOLATED_DIRECTORY}")
+    if not entries:
+        print(f"没有{scope}待清理条目。")
+        return 0
+    print(f"{scope}待清理条目（{len(entries)} 个）：")
+    for entry in entries:
+        print(f"  - {entry}")
+    if dry_run:
+        print("\n--dry-run：以上目录都会被删除，但本次没有写入任何内容。")
+        return 0
+    removed, kept = purge_isolated(courses_dir, course_id)
+    for entry in removed:
+        print(f"已清理：{entry}")
+    if kept:
+        print(
+            f"\n以下 {len(kept)} 个条目无法删除（权限/占用？），仍留在隔离目录中：",
+            file=sys.stderr,
+        )
+        for entry in kept:
+            print(f"  - {entry}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    try:
-        course_id = validate_course_id(args.course)
-    except CourseIdError as exc:
-        print(f"--course 不合法：{exc}", file=sys.stderr)
+    courses_dir = args.courses_dir.resolve()
+
+    course_id: str | None = None
+    if args.course is not None:
+        try:
+            course_id = validate_course_id(args.course)
+        except CourseIdError as exc:
+            print(f"--course 不合法：{exc}", file=sys.stderr)
+            return 2
+    elif not args.purge:
+        print("--course 必填（只有 --purge 可以不带 --course）。", file=sys.stderr)
         return 2
 
+    if args.purge:
+        return _report_purge(courses_dir, course_id, dry_run=args.dry_run)
+
+    assert course_id is not None  # guarded above
     database_path = args.db.resolve()
-    courses_dir = args.courses_dir.resolve()
     loader = build_loader(courses_dir, args.question_file, args.glossary_file)
     try:
         definition = loader.find_definition(course_id)
@@ -474,18 +618,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"课程目录配置错误（全局，应用本身也无法启动）：\n{exc}", file=sys.stderr)
         return 1
 
-    directory = (
-        definition.root.resolve()
-        if definition is not None and definition.manifest_path is not None
-        else None
-    )
     try:
         plan = inspect_database(database_path, course_id)
     except sqlite3.Error as exc:
         print(f"无法读取数据库 {database_path}：{exc}", file=sys.stderr)
         return 2
 
-    _report(course_id, definition, directory, plan)
+    # A previous run may have been interrupted between quarantining the directory
+    # and committing the database change; adopting its entry is what makes
+    # re-running this command idempotent.
+    try:
+        directory, adoption_note = adopt_or_report(courses_dir, course_id)
+    except FilesystemTransactionError as exc:
+        print(f"\n拒绝删除，未写入任何内容：\n{exc}", file=sys.stderr)
+        return 1
+
+    _report(course_id, definition, directory, plan, adoption_note)
 
     if definition is not None and definition.manifest_path is None:
         print(
@@ -517,36 +665,59 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.dry_run:
-        print("\n--dry-run：以上内容都会被删除，但本次没有写入任何内容。")
+        print(
+            "\n--dry-run：以上内容都会被删除，但本次没有写入任何内容。"
+            f"\n阶段计划：目录先移动到 {courses_dir / ISOLATED_DIRECTORY}/<{course_id}·时间戳>，"
+            "然后在单事务内清理数据库，最后删除隔离目录（失败会先恢复目录）。"
+        )
         return 0
 
     if plan.exists and not args.no_backup:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup = database_path.with_suffix(database_path.suffix + f".bak-{stamp}")
         try:
-            shutil.copy2(database_path, backup)
-            shutil.copystat(database_path, backup)
-        except OSError as exc:
+            backup = timestamped_backup(database_path)
+        except BackupError as exc:
             print(f"备份失败，未删除任何内容：{exc}", file=sys.stderr)
             return 2
-        print(f"\n已备份：{backup}")
+        print(f"\n已备份（quick_check 通过）：{backup}")
 
+    # Phase 1 (reversible): move the directory aside *before* the database changes.
+    quarantine: Path | None = None
     if directory is not None:
         try:
-            removed = remove_course_directory(definition, courses_dir)
-        except (Refused, DeleteError, OSError) as exc:
-            print(f"\n删除课程目录失败，未写入任何数据：{exc}", file=sys.stderr)
+            if definition is not None and definition.manifest_path is not None:
+                root = validate_course_directory(definition, courses_dir)
+            else:
+                root = directory
+            quarantine = quarantine_course_directory(root, courses_dir, course_id)
+        except (Refused, DeleteError, FilesystemTransactionError, OSError) as exc:
+            print(f"\n移动课程目录失败，数据库未改动：{exc}", file=sys.stderr)
             return 1
-        print(f"已删除课程目录：{removed}")
+        print(f"已隔离课程目录：{root} -> {quarantine}")
 
+    # Phase 2 (transactional): the commit point of the whole operation.
     if plan.has_namespace:
         try:
             deleted = delete_namespace(database_path, course_id)
         except (DeleteError, sqlite3.Error) as exc:
+            if quarantine is None:
+                print(f"\n数据库清理失败（数据库保持原样）：\n{exc}", file=sys.stderr)
+                return 1
+            try:
+                restore_quarantined_directory(quarantine, root)
+            except FilesystemTransactionError as restore_exc:
+                print(
+                    "\n数据库清理失败，且补偿（恢复课程目录）也失败，需要人工介入：\n"
+                    f"  主操作失败：{exc}\n"
+                    f"  补偿失败：{restore_exc}\n"
+                    f"  隔离目录：{quarantine}\n"
+                    f"  期望位置：{root}\n"
+                    f"  请手工执行：mv {quarantine} {root}",
+                    file=sys.stderr,
+                )
+                return 3
             print(
-                "\n数据库清理失败（目录已删除，数据库保持原样）：\n"
-                f"{exc}\n"
-                "修复后重新运行本命令即可只清理数据库记录。",
+                "数据库清理失败，已回滚并恢复课程目录，未删除任何内容：\n"
+                f"{exc}",
                 file=sys.stderr,
             )
             return 1
@@ -556,6 +727,21 @@ def main(argv: list[str] | None = None) -> int:
             "数据库尚未迁移到多课程 schema（没有 course_id 命名空间）："
             "没有该课程的记录可清理。"
         )
+
+    # Phase 3 (after the commit): physically remove the quarantined copy.
+    if quarantine is not None:
+        try:
+            discard_isolated(quarantine, courses_dir)
+        except (FilesystemTransactionError, OSError) as exc:
+            print(
+                "\n数据库变更已提交，但隔离目录无法删除（需要人工清理）：\n"
+                f"  待清理目录：{quarantine}\n"
+                f"  原因：{exc}\n"
+                "请修复权限或占用后运行："
+                f"python scripts/delete_course.py --purge --courses-dir {courses_dir}",
+                file=sys.stderr,
+            )
+            return 3
 
     print(
         f"\n课程 {course_id} 已删除：课程目录、默认候选文件、数据库身份、"
