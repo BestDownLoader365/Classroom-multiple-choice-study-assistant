@@ -19,7 +19,7 @@ Nothing in this document is a promise about the current repository. When a recip
 What actually ships today:
 
 * Templates (`app/templates/`): `base.html`, `auth.html`, `courses.html`, `home.html`, `quiz_setup.html`, `quiz.html`, `mistakes.html`, `review` (rendered through `quiz.html`), `dashboard.html`, `stats.html`, `exam_setup.html`, `exam.html`, `exam_report.html`, `glossary.html`, `error.html`.
-* Main CSS classes (`app/static/css/style.css`): page shell `page-shell` / `page-shell-workspace` / `content-stack`; headers `site-header` / `brand` / `header-actions` / `header-link`; course navigation `course-switcher` / `course-current` / `course-menu` / `course-menu-trigger` / `course-menu-list` / `course-menu-link` / `course-status`; surfaces `question-card` / `summary-card` / `auth-card` / `result-card` / `table-card` / `error-card`; data `data-table` / `table-wrap` / `metric-strip` / `report-metrics` / `trend-chart` / `mastery-bar` / `mastery-cell`; task continuation `task-band` / `task-progress` / `exam-resume`; controls `button` (`button-primary` / `button-secondary` / `button-ghost` / `button-danger` / `button-large`) / `field-group` / `size-picker-*` / `chapter-picker` / `chapter-option` / `option-row`; feedback `feedback` / `feedback-correct` / `feedback-wrong` / `flash` / `status` (`status-mastered` / `status-progressing` / `status-good` / `status-weak` / `status-pending` / `status-not-started`) / `empty-state`; glossary `glossary-grid` / `glossary-card` / `glossary-popover` / `glossary-reveal`.
+* Main CSS classes (`app/static/css/style.css`): page shell `page-shell` / `page-shell-workspace` / `content-stack`; headers `site-header` / `brand` / `header-actions` / `header-link`; course navigation `course-switcher` / `course-current` / `course-menu` / `course-menu-trigger` / `course-menu-list` / `course-menu-link` / `course-status`; surfaces `question-card` / `summary-card` / `auth-card` / `result-card` / `table-card` / `error-card`; data `data-table` / `table-wrap` / `metric-strip` / `report-metrics` / `trend-chart` / `mastery-bar` / `mastery-cell`; task continuation `task-band` / `task-progress` / `exam-resume`; controls `button` (`button-primary` / `button-secondary` / `button-ghost` / `button-danger` / `button-large`, plus the application modifiers `restart-button` and `submit-answer`, both labeled buttons) / `glossary-popover-close` (the only icon-only button) / `field-group` / `size-picker-*` / `chapter-picker` / `chapter-option` / `option-row`; feedback `feedback` / `feedback-correct` / `feedback-wrong` / `flash` / `status` (`status-mastered` / `status-progressing` / `status-good` / `status-weak` / `status-pending` / `status-not-started`) / `empty-state`; glossary `glossary-grid` / `glossary-card` / `glossary-popover` / `glossary-reveal`.
 * `app.js` behavior: enable/disable the answer submit button and selection hint; confirm dialogs on restart/reset/submit forms; the bilingual toggle backed by `localStorage["mcq-bilingual"]`; focus management for the feedback region; the shared `initializePicker` listbox behavior for the quiz-size, mistake-filter and glossary-category pickers (hidden input + server-rendered option buttons); the global/per-source chapter checkbox synchronization (the “all chapters” box mirrors whether any specific chapter is ticked, and each per-source group toggle goes indeterminate when only part of that source is selected); the exam selection hint; the exam countdown mirror.
 * `glossary.js` behavior: longest-first literal term highlighting inside `data-glossary-highlight` containers, the keyboard-accessible definition popover, glossary search, category filtering, visible counts, empty state, and Chinese reveal.
 * `data-*` hooks in use: `data-answer-form`, `data-submit-answer`, `data-selection-hint`, `data-feedback`, `data-bilingual-toggle`, `data-confirm` / `data-confirm-restart` / `data-confirm-reset`, `data-picker` / `data-picker-value` / `data-picker-option` / `data-picker-submit-on-change` / `data-select-picker` / `data-select-menu` / `data-select-current` / `data-value`, `data-all-chapters` / `data-chapter-group` / `data-chapter-group-all` / `data-specific-chapter`, `data-exam-answer-form` / `data-exam-hint` / `data-exam-submit-form` / `data-exam-timer` / `data-remaining-seconds`, `data-course-id` / `data-current-course`, `data-glossary-highlight` / `data-glossary-page` / `data-glossary-grid` / `data-glossary-card` / `data-glossary-term` / `data-glossary-search` / `data-glossary-reveal` / `data-glossary-skip` / `data-glossary-visible-count` / `data-glossary-empty` / `data-term-id`, `data-option-row` / `data-correct-option` / `data-selected-option` / `data-corrected-question`, `data-table` / `data-label`, `data-error-course-id`.
@@ -463,7 +463,7 @@ Each recipe below is marked either **Implemented** (present in `app/templates/` 
 
 ## Button — Implemented
 
-Implemented as `.button` plus the variants `.button-primary`, `.button-secondary`, `.button-ghost`, `.button-danger` and the size modifier `.button-large`, together with the text-only affordance `.header-link` and the small square/circular controls `.agenda-arrow`, `.restart-button`, `.submit-answer` and `.glossary-popover-close`.
+Implemented as `.button` plus the variants `.button-primary`, `.button-secondary`, `.button-ghost`, `.button-danger` and the size modifier `.button-large`, together with the text-only affordance `.header-link`. Two application-specific modifiers extend `.button` (they are not separate components): `.restart-button` is a labeled ghost button (`button button-ghost restart-button`, text “重新开始正常练习”, `min-height: 46px`, muted ink) and `.submit-answer` is the full-width primary submit button of the quiz/review answer form (`button button-primary submit-answer`, text “提交答案”, `width: 100%`). The only icon-only control in this group is `.glossary-popover-close` — see [Icon Button](#icon-button--implemented); `.agenda-arrow` is not a button at all but a decorative, `aria-hidden` span inside the home agenda rows.
 
 - **Anatomy:** Container, text label, optional leading or trailing icon, optional secondary line, optional loading indicator.
 - **Dimensions:** Default min-height `46px`; compact `40px`; prominent `72px`. Default padding `12px 20px`; compact `8px 12px`; prominent `17px 22px`. Radius `2px`; content gap `14px`.
@@ -501,21 +501,22 @@ Shipped as .task-band with .task-progress / .task-position / .task-actions, and 
 
 ## Icon Button — Implemented
 
-Shipped as .agenda-arrow, .restart-button, .submit-answer and .glossary-popover-close.
+Shipped as `.glossary-popover-close` — the only icon-only button in the repository. It closes the glossary definition popover that `glossary.js` builds at runtime: `<button type="button" class="glossary-popover-close" aria-label="关闭专业词汇释义">×</button>`. The other names often grouped with it are **not** icon buttons: `.agenda-arrow` is a decorative `aria-hidden` span (a directional glyph inside a link/button row), `.restart-button` is a labeled ghost button, and `.submit-answer` is the full-width labeled primary submit button (see [Button](#button--implemented)).
 
-- **Anatomy:** Button container, one icon, accessible name, optional tooltip.
-- **Dimensions:** Default `40×40px`; comfortable `46×46px`; icon `16px`; close glyph may be `20–22px`. Radius `2px`.
-- **Visual style:** Transparent by default; use a subtle border only when the boundary is otherwise unclear.
+- **Anatomy:** Button container, one glyph (`×`), accessible name (`aria-label`), optional tooltip.
+- **Dimensions (shipped):** `34×34px` with `padding: 0`, absolutely positioned in the popover's top-right corner (`top: 10px; right: 10px`); glyph `1.35rem` (`20–22px`).
+- **Extension target:** a future standalone icon button (for example a toolbar or nav control) should use a `40×40px` default hit target, `46×46px` when comfortable, a `16px` icon, and `2px` radius.
+- **Visual style:** Transparent background and `border: 0`; the shipped control sits inside the popover's own `1px`/`2px` ruled surface, so it draws no boundary of its own.
 - **Typography:** No visible text; the accessible name is mandatory.
-- **Spacing:** Center the icon exactly. Do not reduce the hit target to the glyph size.
-- **Default state:** Muted or secondary icon color.
-- **Hover:** Accent or primary icon color with `accent.subtle` only when stronger feedback is needed.
-- **Active:** Use accent-hover and optional `translateY(1px)`.
-- **Focus:** Standard focus ring.
-- **Disabled:** Opacity `.42`, noninteractive.
-- **Loading:** Replace the glyph with a `16px` spinner while preserving the accessible name.
+- **Spacing:** Center the glyph exactly. The hit target is the full `34×34px` box, never the glyph size.
+- **Default state:** Muted glyph color (`--muted`).
+- **Hover:** `--accent` glyph color.
+- **Active:** Use accent-hover and optional `translateY(1px)` (extension guidance; no shipped control needs it yet).
+- **Focus:** Standard focus ring — shipped as `outline: 3px solid var(--focus); outline-offset: 1px`.
+- **Disabled:** Opacity `.42`, noninteractive (extension guidance; not used today).
+- **Loading:** Replace the glyph with a `16px` spinner while preserving the accessible name (extension guidance; not used today).
 - **Motion:** Color/background `140ms`; tooltip follows its own recipe.
-- **Usage rules:** Use for universally understood actions such as close or directional navigation. Prefer a labeled button when meaning could be ambiguous.
+- **Usage rules:** Use for universally understood actions such as close or directional navigation. Prefer a labeled button when meaning could be ambiguous — which is why the restart and submit actions ship as labeled `.button` controls rather than icon buttons.
 
 ## Input — Implemented
 

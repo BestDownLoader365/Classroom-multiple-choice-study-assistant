@@ -27,7 +27,7 @@ COMMIT
 PRAGMA foreign_key_check          （提交后做完整父子检查）
 ```
 
-任何失败都会整体回滚；重复执行总能得到同一个结果。
+只有 `BEGIN IMMEDIATE` **内部**的失败才会整体回滚；而提交后的完整 `PRAGMA foreign_key_check` 属于事务之外的独立检查，它发现的问题不会被“刚才的事务”自动撤销。重复执行总能得到同一个结果。
 
 ### Schema 变化
 
@@ -96,12 +96,12 @@ retention 是**独立于迁移**的一步（`Database.enforce_attempt_retention(
 
 `MCQ_AUTO_MIGRATE` 可显式覆盖为 `refuse` / `backup-and-migrate` / `migrate`；其中 `migrate`（“调用方已自行备份”）不允许在 `MCQ_ENV=production` 下使用——生产启动路径必须自己生成并校验备份。
 
-**安全保证**：备份失败（磁盘满、权限、校验不通过）会**直接中止启动**，数据库保持未迁移；迁移事务失败则整体回滚，此时磁盘上留有一份已校验的旧库副本，可解释、可恢复。并发启动时通过数据库旁的 `mcq.db.migrate.lock`（`fcntl.flock`）串行化“备份 + 迁移”决策，N 个 worker 只会产生一份备份。
+**安全保证**：备份失败（磁盘满、权限、校验不通过）会**直接中止启动**，数据库保持未迁移，迁移根本不会开始；`BEGIN IMMEDIATE` **事务内部**的失败会回滚，此时磁盘上留有一份已校验的旧库副本，可解释、可恢复。提交之后的完整 `PRAGMA foreign_key_check` 是在事务之外执行的独立检查，它报告的问题**不会**再回滚已提交的迁移。并发启动时通过数据库旁的 `mcq.db.migrate.lock`（`fcntl.flock`）串行化“备份 + 迁移”决策，N 个 worker 只会产生一份备份。
 
 生产环境的推荐顺序仍然是“显式迁移”，因为这样你会在动手前看到完整的检查报告：
 
 ```bash
-# 1) 停服务（避免启动中的自动迁移在你没有备份时执行）
+# 1) 停服务（避免启动时的自动迁移在你还没看到检查报告、也没做手工备份之前就先执行）
 systemctl stop mcq-template.service
 
 # 2) 备份（CLI 也会自动备份，但先手工备份一次更稳）
@@ -128,7 +128,7 @@ curl -i http://127.0.0.1:8001/ready
 
 ### 2.1 备份
 
-先停服务，再复制数据库，然后**保持服务停止**直到迁移与校验完成（不要复制完就立刻启动：启动会自动触发第 1 节的阶段 1，等于在备份之后又做了一次未经检查的迁移）：
+先停服务，再复制数据库，然后**保持服务停止**直到迁移与校验完成（不要复制完就立刻启动：启动会自动触发第 1 节的阶段 1，等于在手工备份之后又做了一次计划外的迁移；虽然启动路径自己也会生成并校验一份备份，但顺序和结果都应由你来掌控）：
 
 ```bash
 systemctl stop mcq-template.service
@@ -163,6 +163,10 @@ python scripts/migrate_courses.py --db instance/mcq.db --layout --legacy-course-
 
 `--layout` 的准确行为：
 
+* **执行顺序**：先做带时间戳的备份（除非 `--no-backup`）→ 发现课程定义 → 执行/确认数据库 schema 迁移并用
+  `MIGRATE_AFTER_EXTERNAL_BACKUP` 提交 → 最后才执行 `_migrate_layout()`。因此 layout 阶段因为目标目录非空或根题库
+  缺失而返回 1 时，**数据库 migration 可能已经成功提交、备份也已经创建**——不要把整个命令描述成“layout 失败则
+  什么都没有改变”；
 * 它把根 `questions.json` / `glossary.json` **复制**到 `courses/<legacy-course-id>/`（不移动、不删除根文件），并把 manifest 写入
   `courses/<legacy-course-id>/course.json`（`course_id` 为该 legacy id，`order` 为 `-1000000`，内容指向目录内的 `questions.json` /
   `glossary.json`）——复制而非移动让回滚变成一句 `rm -rf courses/<legacy-course-id>`；
@@ -171,7 +175,8 @@ python scripts/migrate_courses.py --db instance/mcq.db --layout --legacy-course-
   namespace，三者不可能不一致；
 * `--legacy-course-id` 必须是合法的 course slug（小写 ASCII、可用 `_`/`-` 分隔、最长 64 字符）。非法值（大写、空格、`../` 等）
   在**任何写入之前**以退出码 `2` 拒绝：它既不会被写进数据库，也不会被用作目录名（避免路径穿越）；
-* 目标目录已存在且非空时它拒绝执行（退出码 1），不会覆盖任何内容；根题库不存在时也返回 1；
+* 目标目录已存在且非空时它拒绝执行（退出码 1），不会覆盖任何内容；根题库不存在时也返回 1。这两种拒绝都发生在
+  数据库迁移**提交之后**（见上面的执行顺序），所以此时数据库已经是迁移后的状态、备份也已落盘；
 * 复制完成后**必须删除根文件**：根 `questions.json` 与 `courses/<legacy-id>/course.json` 同时存在会被判定为重复 `course_id`，
   导致应用无法启动（`migrate_courses.py` 会明确报出这一点并返回 1）。确认新布局的课程能正常加载（`check_courses.py`）
   之后再删除，并且**不要在删除之前启动应用**。
@@ -225,10 +230,14 @@ curl -i http://127.0.0.1:8001/ready
 **内容回滚**（只回退某门课的题库/术语表）走正常发布流程，不要手工改 generation：
 
 ```bash
-python scripts/check_question_bank.py --course physical_design old_questions.json --db instance/mcq.db
-python scripts/publish_course.py --course physical_design --questions old_questions.json --db instance/mcq.db
+python scripts/check_question_bank.py --course physical_design path/to/old_questions.json --db instance/mcq.db
+python scripts/publish_course.py --course physical_design --questions path/to/old_questions.json --db instance/mcq.db
 # 统一重启 worker
 ```
+
+这两条命令的显式路径都相对项目根目录解析。更简单的做法是直接发布保留在课程目录里的上一版副本
+（`courses/physical_design/versions/<previous-sha256>/questions.json`，见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节），
+无需另存候选文件。
 
 ---
 

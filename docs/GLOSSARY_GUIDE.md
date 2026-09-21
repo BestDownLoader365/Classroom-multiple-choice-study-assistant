@@ -179,7 +179,7 @@ ID、文件名、页码、中文翻译和答案 ID 不属于覆盖语料。校�
 
 ## 9. 校验命令
 
-以下命令均在项目根目录执行，`<course_id>` 用课程 manifest 里的身份（例如 `physical_design`）；只声明了一门启用课程时可以省略 `--course`。
+以下命令均在项目根目录执行，`<course_id>` 用课程 manifest 里的身份（例如 `physical_design`）；只声明了一门启用课程时，**校验脚本** `check_glossary.py` 可以省略 `--course`（此时会选那门课）。注意 `publish_course.py` 的 `--course` **始终必填**，不要把校验脚本的默认值当成发布命令的默认值。
 
 ### 9.1 检查 JSON 语法
 
@@ -244,6 +244,16 @@ python scripts/check_glossary.py \
 因为 loader 只认有 manifest 的课程目录）：先用 `python scripts/publish_course.py --course <course_id> --add ...` 创建
 课程（它会先校验候选并归档到 `versions/<sha256>/`），再运行上面的按课程校验；尚未创建课程时就用上面这段显式离线模式先校验候选文件。
 
+**语料取决于你怎么调用**：手工校验与发布门禁读取的题目文件并不总是同一份，别把手工预检的结论直接当成发布门禁的结论：
+
+| 情形 | 命令 | 术语表预检使用的题库语料 |
+| --- | --- | --- |
+| 手工预检 | `python scripts/check_glossary.py --course <course_id>` | 优先**题库 candidate** + **术语表 candidate**（存在时），否则回退已发布文件；`--published` 改为两者都用已发布文件 |
+| 只发布术语表 | `python scripts/publish_course.py --course <course_id> --glossary courses/<course_id>/glossary_candidate.json` | 当前 manifest 指向的**已发布题库** |
+| 同时发布题库与术语表 | `python scripts/publish_course.py --course <course_id> --questions courses/<course_id>/questions_candidate.json --glossary courses/<course_id>/glossary_candidate.json` | 本次 `--questions` 参数对应的那份题库路径 |
+
+显式路径由脚本相对当前工作目录解析，因此上面的发布命令都从项目根目录执行并写全 `courses/<course_id>/…`；只写裸文件名会指向项目根目录。
+
 校验只读取内容，不会修改 `question_registry`、generation 或任何学习数据。
 
 输出含义：
@@ -302,7 +312,7 @@ pytest -q
 5. 编写简洁、课程语境明确的中文释义 `definition_zh`（英文定义 `definition` 已退役，不要再写）。
 6. 运行 `python -m json.tool`、`python scripts/check_glossary.py --course <course_id>` 覆盖校验；课程目录或 manifest 有改动时再跑 `python scripts/check_courses.py`。
 7. 人工处理 retired field、orphan 与候选报告，不要把候选结果直接批量写入术语库。
-8. 校验通过后再发布（见第 12 节），默认会重跑 `check_glossary.py`：`python scripts/publish_course.py --course <course_id> --glossary glossary_candidate.json`（不传 `--glossary` 时，若该课程 manifest 已声明术语表，默认发布的正是这个候选文件；manifest 写 `glossary: null` 时默认候选**不会**自动发布，必须显式传 `--glossary`）。
+8. 校验通过后再发布（见第 12 节），默认会重跑 `check_glossary.py`：`python scripts/publish_course.py --course <course_id> --glossary courses/<course_id>/glossary_candidate.json`（不传 `--glossary` 时，若该课程 manifest 已声明术语表，默认发布的正是这个候选文件；manifest 写 `glossary: null` 时默认候选**不会**自动发布，必须显式传 `--glossary`）。注意路径相对项目根目录解析，且这条命令的术语表预检用的是**当前已发布题库**作为 corpus（见 9.3 节）。
 
 术语表发布与题库发布是**两次独立的文件系统切换**，不是跨文件事务：同时传 `--questions` 与 `--glossary` 时它们按顺序分别执行，题库可能已经发布成功而术语表步骤失败。推荐先完成两次只读预检，必要时按内容类型分成两条命令发布，以获得清晰的失败边界。发布后必须**统一重启全部 worker**才能让新术语生效（术语表不参与 generation，`/ready` 很可能仍是 200，因此 readiness 不能证明术语表已重新加载；见第 1.1 节）。发布结束会打印版本保留结果：每个内容类型只保留**当前版本 + 上一版**（见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节），因此上一版随时可以回退。
 

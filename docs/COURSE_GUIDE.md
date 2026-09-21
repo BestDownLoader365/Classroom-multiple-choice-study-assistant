@@ -71,8 +71,8 @@ courses/
     └── versions/…
 ```
 
-`questions_candidate.json` / `glossary_candidate.json` 是**默认输入**：`check_*.py` 与 `publish_course.py` 在不传
-文件路径时读它们（见 7 节）；`versions/…`（以及 plain-file 布局下 manifest 直接指向的 `questions.json` /
+`questions_candidate.json` / `glossary_candidate.json` 是**默认输入**：`check_question_bank.py`、`check_glossary.py` 与 `publish_course.py` 在不传
+文件路径时读它们（见 7 节）；`check_courses.py` 是例外，它校验 manifest 与**当前已发布**内容，不使用候选文件；`versions/…`（以及 plain-file 布局下 manifest 直接指向的 `questions.json` /
 `glossary.json`）是**已发布内容**，由 worker 读取，不要手工原地编辑。`--add` 新增课程和后续发布一样把内容归档到
 `versions/<sha256>/`，所以新课程的目录根部**不会**留下无人引用的已发布副本；`versions/` 与 `.publish.lock` 由发布
 命令维护，删除课程时随课程目录一起删除。每次发布结束都会自动清理 `versions/`：每个内容类型只保留**当前版本 + 上一版**
@@ -80,7 +80,7 @@ courses/
 （见 7.11 节）。
 
 ⚠️ manifest 一旦指向 `versions/…`，根部的 `questions.json` / `glossary.json` 就**不再被任何进程读取**（loader 只解析
-manifest 声明的路径，`check_*.py` 的 `--published` 也只看 manifest 指向的文件）。它们只可能是旧课程的历史/回滚副本；
+manifest 声明的路径，`check_question_bank.py` / `check_glossary.py` 的 `--published` 也只看 manifest 指向的文件）。它们只可能是旧课程的历史/回滚副本；
 `check_courses.py` 会把这类文件作为提示列出（见 7.1），编辑它不会生效。
 
 manifest（`schema_version: 1`）——推荐让 `questions`/`glossary` 指向不可变发布副本：
@@ -288,12 +288,14 @@ courses/<course_id>/
 └── questions.json / glossary.json   # 仅 plain-file 布局的旧课程才有
 ```
 
-默认文件解析规则（`check_*.py` 与 `publish_course.py` 一致）：
+默认文件解析规则（`check_question_bank.py`、`check_glossary.py` 与 `publish_course.py` 一致）：
 
 1. 显式传入的路径永远优先；
 2. 否则使用课程目录里的 `questions_candidate.json` / `glossary_candidate.json`（存在时）；
-3. 候选文件不存在时，`check_*.py` 回退到该课程**当前已发布**的文件（用 `--published` 可强制只看已发布文件）；
-4. `publish_course.py` 在没有候选文件可发布时不写任何东西（退出码 2），并打印它期望的默认路径。
+3. 候选文件不存在时，`check_question_bank.py` 回退到该课程**当前已发布**的文件；`check_glossary.py` 同样候选优先，并可用 `--published` 强制只看已发布文件；
+4. `publish_course.py` 只有在**两个内容参数都没给**时才套用默认候选；没有候选文件可发布时不写任何东西（退出码 2），并打印它期望的默认路径。
+
+`check_courses.py` **不在**这条规则内：它加载并校验 manifest 声明的**当前已发布**内容，不使用 candidate 作为课程加载输入，并且对 `enabled: false` 的课程只报告 `disabled`（不加载其题库或术语表）。
 
 因此课程目录里存在 `questions_candidate.json` 之后，`python scripts/check_question_bank.py --course <course_id>` 检
 验的就是这份候选，而不是线上文件。
@@ -306,6 +308,8 @@ python scripts/check_courses.py --json     # 机器可读
 ```
 
 全局歧义（重复 `course_id`、manifest 非法）退出码 2；单门课程加载失败退出码 1，但其他课程仍会报告。
+
+它**加载并校验每一门启用课程**的题库与（已声明的）术语表，而这些内容来自 manifest 声明的**当前已发布**路径，不是候选文件；`enabled: false` 的课程只报告 `disabled`，其题库与术语表不会被加载。它也不负责发布 manifest：新增 / 启停课程请用 `publish_course.py --add` / `--enable` / `--disable`。
 
 报告还会以**提示**（不影响退出码）列出课程目录里没有被 manifest 引用的 `questions.json` / `glossary.json`
 （`--json` 输出中的 `unreferenced_copies` 字段）：这类文件来自 plain-file 布局的旧课程，任何进程都不会读取它，
@@ -328,7 +332,8 @@ cp my_questions.json  courses/physical_design/questions_candidate.json
 cp my_glossary.json   courses/physical_design/glossary_candidate.json   # 可选；不需要术语表就跳过
 
 # 2) 创建课程：读取候选 → schema/术语表校验 → 归档到 versions/<sha256>/ → 写入 course.json
-#    （任何一项校验失败都不会创建目录、也不会写入任何文件）
+#    （任何一项校验失败都不会写入 course.json、也不会写入 versions/ 发布副本；
+#      脚本不会撤销你在第 1 步创建的目录与候选文件，也不会额外创建发布目录）
 python scripts/publish_course.py --course physical_design --add \
   --title "Physical Design" --title-zh "物理设计" --order 20
 
@@ -368,7 +373,7 @@ python scripts/check_courses.py
 课程目录**根部不会再写入** `questions.json` / `glossary.json`（那是 plain-file 布局，仅保留给旧课程与手工/legacy
 场景），所以新课程从第一天起就不存在「看起来一样、实际无人读取」的副本。
 
-`--add` 的执行顺序与提交点：读取候选 → 校验（题库 schema / 术语表覆盖）→ 创建 `courses/<course_id>/` → 取得 `.publish.lock` → 写入 `versions/<sha256>/` 归档副本 → **写入 `course.json`（唯一提交点）** → 版本清理。因此校验失败时不会有目录、manifest 或 `versions/` 副本；而 manifest 一旦写入，课程就已经被声明，后续（版本清理等）失败会在输出里说明。命令提示 `created, pending worker activation`；重启 worker 后 `/ready/<course_id>` 应返回 `ready`，`check_courses.py` 应列出该课程且状态为 `ok`。已有课程只能用 `--questions`/`--glossary` 发布新内容，`--add` 会拒绝覆盖。
+`--add` 的执行顺序与提交点：读取候选 → 校验（题库 schema / 术语表覆盖，含默认的术语表离线预检）→ 确保 `courses/<course_id>/` 存在（第 1 步通常已经创建，脚本只是 `mkdir` 兜底）→ 取得 `.publish.lock` → 写入 `versions/<sha256>/` 归档副本 → **写入 `course.json`（唯一提交点）** → 版本清理。因此**校验失败**时脚本不会创建课程目录（`mkdir` 在校验之后）、不会写入 `course.json`，也不会写入任何 `versions/<sha256>/` 发布副本；它同样**不会撤销**你在第 1 步已经创建的目录与候选文件——那是维护者的工作副本，`--add` 只负责校验它们并创建课程声明。而 manifest 一旦写入，课程就已经被声明，后续（版本清理等）失败会在输出里说明。命令提示 `created, pending worker activation`；重启 worker 后 `/ready/<course_id>` 应返回 `ready`，`check_courses.py` 应列出该课程且状态为 `ok`。已有课程只能用 `--questions`/`--glossary` 发布新内容，`--add` 会拒绝覆盖。
 
 `courses` 表的那一行由 worker 启动时写入，`--add` 本身只改文件系统，所以新课程在第一次成功启动前，任何
 `--course <course_id>` 校验都还没有历史可比对；这不是错误，见第 3 步的说明。
@@ -390,13 +395,17 @@ python scripts/check_courses.py
 ```bash
 # 题库：只编辑候选文件，不要原地覆盖正在使用的已发布文件
 python scripts/check_question_bank.py --course physical_design --db instance/mcq.db
-python scripts/publish_course.py --course physical_design --questions questions_candidate.json
+python scripts/publish_course.py --course physical_design \
+  --questions courses/physical_design/questions_candidate.json
 # （也可以省略 --questions：默认就发布 courses/physical_design/questions_candidate.json）
 
 # 术语表：同样先改候选文件
 python scripts/check_glossary.py --course physical_design
-python scripts/publish_course.py --course physical_design --glossary glossary_candidate.json
+python scripts/publish_course.py --course physical_design \
+  --glossary courses/physical_design/glossary_candidate.json
 ```
+
+> 显式传递的路径由脚本**相对当前工作目录**解析，因此本文所有示例都从项目根目录执行、并把课程目录写全（`courses/<course_id>/…`）。写成裸文件名（如 `questions_candidate.json`）在项目根目录下会指向项目根目录，而不是课程目录。
 
 两个候选都改好时，可以一次命令发布两者（不传内容参数 = 使用该课程适用的默认候选）：
 
@@ -410,7 +419,8 @@ python scripts/publish_course.py --course physical_design
   切换成功而术语表步骤失败（此时命令以非 0 退出，但题库已经发布）；
 * 因此更稳妥的做法是**先分别完成两次只读预检**（`check_question_bank.py` 与 `check_glossary.py`），确认都通过；
   需要清晰失败边界时按内容类型拆成两条命令发布；
-* 单个内容类型的 manifest 切换本身是原子的：候选字节被冻结一次、写入不可变副本、最后用一次 `os.replace` 切换 manifest；
+* 单个内容类型的 manifest 切换本身是原子的：候选字节被读取并冻结一次，校验、归档与最终写入 `versions/<sha256>/` 都使用这份冻结 payload，最后用一次 `os.replace` 切换 manifest；
+* **术语表预检的语料取决于这次命令发布了什么**：只传 `--glossary` 时，内置预检用**当前 manifest 指向的已发布题库**作为 corpus；同时传 `--questions` 时，用本次 `--questions` 参数指定的那份题库。因此“手工 `check_glossary.py` 的检查对象”与“发布门禁的检查对象”不一定相同（手工执行时默认优先使用题库 candidate + 术语表 candidate），详见 7.8 节；
 * 术语表不参与 generation：单独发布术语表不会推进 generation、不会让 worker stale，但**已运行的 worker 仍在使用旧的内存术语表，必须重启才能看到新内容**，而且 `/ready` 很可能一直是 200，不能用它证明术语表已重新加载。
 
 要点：
@@ -485,7 +495,7 @@ python scripts/delete_course.py --purge --dry-run
   → 阶段 3（提交之后）：物理删除隔离目录
 ```
 
-* **阶段 1 失败**（权限、跨文件系统、被占用）→ 什么都没改，退出码 1，数据库完全没有被改动。
+* **阶段 1 失败**（权限、跨文件系统、被占用）→ 目标数据库/课程没有任何变更，退出码 1，数据库完全没有被改动。注意正式执行前已经生成并校验的**备份文件会保留在磁盘上**（见下方退出码说明）。
 * **阶段 2 失败** → 事务回滚，并把隔离目录恢复回 `courses/<course_id>/`：退出码 1，打印
   「数据库清理失败，已回滚并恢复课程目录，未删除任何内容」。
   如果**补偿也失败**，退出码 **3**，打印「需要人工介入」与两个绝对路径、可直接复制的 `mv` 命令，
@@ -497,6 +507,8 @@ python scripts/delete_course.py --purge --dry-run
   命令会拒绝执行并提示人工确认，不会猜测。
 * 退出码：`0` 已删除（或 `--dry-run`）、`1` 被拒绝/已完整补偿、`2` 参数或 IO 问题、
   `3` 数据库变更已提交但需要人工清理隔离目录。
+
+> **退出码 `1` 不是“磁盘上什么都没写”。** `1` 表示**没有提交目标数据库/课程变更**（被拒绝、或已经完整补偿）：课程目录与数据库 namespace 都保持原样。但正式执行（非 `--dry-run`）时脚本会先生成一份通过 `quick_check` 的带时间戳备份，这份**备份文件属于真实写入**，即使后续被拒绝、失败或完成补偿，它仍可能保留在磁盘上。`--dry-run` 才是完全不写任何内容。
 
 `--purge`（可配 `--dry-run`、`--course`）只清理 `courses/.trash/` 中上次运行留下的条目，
 **不写数据库**；每条都会重新做包含性校验，因此不可能删除 `courses/.trash/` 之外的路径。
@@ -550,6 +562,8 @@ python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_cou
   manifest 与目录名）。
 * `--dry-run` 会先打印阶段 0 的完整校验结果（行数、目录映射），不写任何内容。
 
+> 「未改名任何内容」指的是**课程目录与数据库 namespace**都保持原样，而不是“磁盘上完全没有新文件”：正式执行（非 `--dry-run`）会先生成一份通过 `quick_check` 的带时间戳备份，即使随后被拒绝、失败或完成补偿，这份备份仍可能保留在磁盘上。退出码 `1` 只表示没有提交目标数据库/课程变更，`--dry-run` 才是完全不写任何内容。
+
 收尾与恢复：
 
 ```bash
@@ -575,25 +589,28 @@ python scripts/rename_course.py --db instance/mcq.db --courses-dir courses --rec
 python scripts/check_question_bank.py --course physical_design --db instance/mcq.db
 
 # 2) 原子发布（默认重跑上面的预检；--skip-preflight 才可跳过，不推荐）
-python scripts/publish_course.py --course physical_design --questions questions_candidate.json
+python scripts/publish_course.py --course physical_design \
+  --questions courses/physical_design/questions_candidate.json
 # 省略 --questions 时同样发布该课程的默认候选文件
 
 # 3) 统一重启 worker，并确认
 curl -i http://127.0.0.1:8001/ready/physical_design
 ```
 
-指定其他候选文件、或只想复核已发布内容：
+指定其他候选文件、或只想复核已发布内容（显式路径相对项目根目录解析，所以必须写全路径）：
 
 ```bash
-python scripts/check_question_bank.py --course physical_design other_questions.json --db instance/mcq.db
+python scripts/check_question_bank.py --course physical_design path/to/other_questions.json --db instance/mcq.db
 python scripts/check_question_bank.py --course physical_design --published --db instance/mcq.db
-python scripts/publish_course.py --course physical_design --questions other_questions.json
+python scripts/publish_course.py --course physical_design --questions path/to/other_questions.json
 ```
 
-`publish_course.py --questions` 的顺序是：**一次性**读取候选文件字节 → 用同一份字节校验 → 只读预检 → 写入不可变
-的 `versions/<sha256>/questions.json` → 在课程发布锁内**重新验证** baseline → 单次 `os.replace` 原子切换
+`publish_course.py --questions` 的顺序是：**一次性**读取候选文件字节并冻结这份 payload → 用该 payload 做基础 schema 校验 → 只读预检 → 把**同一份冻结 payload** 写入不可变的
+`versions/<sha256>/questions.json` → 在课程发布锁内**重新验证** baseline → 单次 `os.replace` 原子切换
 manifest → fsync 目录 → 版本清理（见 7.11）。它输出 `published, pending worker activation`，**不会**自行 bump
 generation，也**不**声称文件系统发布与数据库激活是同一个事务。
+
+> **默认的题库预检不是字节级冻结的。** 默认外部预检会调用 `check_question_bank.py` 并把候选**路径**传给它，由它重新按路径读文件；术语表的内置离线预检同样按路径重新读取 glossary 与 corpus。因此最终写入 `versions/<sha256>/` 的始终是 `publish_course.py` 最初冻结的 payload，但“外部预检看到的内容”与“最终归档的内容”在候选文件被并发修改时**可能不是同一份字节**——当前代码无法给出“预检与归档必然是同一份字节”的强保证（详见第 9 节限制）。发布期间不要并发修改候选文件。
 
 `--course` 对本命令是必填；多课程部署请始终显式指定。
 
@@ -619,10 +636,21 @@ python scripts/check_glossary.py --questions path/questions.json --glossary path
 单课程模式下，语料与术语表同样优先使用该课程的 `questions_candidate.json` / `glossary_candidate.json`，报告里会
 打印实际读取的两个文件与来源（`candidate` / `published`）。校验只读取内容，不修改 registry、generation 或任何学
 习数据。报告里出现 `Retired term fields` 表示词条还留着已退役的 `definition`（英文定义）：Loader 会忽略它，
-命令仍然成功，但请先删掉这些键再发布。校验通过后再发布：
+命令仍然成功，但请先删掉这些键再发布。
+
+**语料与被检对象取决于你怎么调用**——三种常见情形的行为并不相同，别把手工检查的结论直接当成发布门禁的结论：
+
+| 情形 | 命令 | 术语表预检使用的语料 |
+| --- | --- | --- |
+| 手工预检 | `python scripts/check_glossary.py --course <course_id>` | 优先使用**题库 candidate** + **术语表 candidate**（存在时），否则回退已发布文件；`--published` 改为两者都用已发布文件 |
+| 只发布术语表 | `python scripts/publish_course.py --course <course_id> --glossary courses/<course_id>/glossary_candidate.json` | **当前 manifest 指向的已发布题库**（本次没有发布题库，所以不会用题库 candidate） |
+| 同时发布题库与术语表 | `python scripts/publish_course.py --course <course_id> --questions courses/<course_id>/questions_candidate.json --glossary courses/<course_id>/glossary_candidate.json` | 本次 `--questions` 参数指定的那份**题库路径** |
+
+`--course` 对 `check_glossary.py` 在只声明了一门启用课程时可以省略（此时会选那门课），但 `publish_course.py` 的 `--course` **始终必填**。校验通过后再发布：
 
 ```bash
-python scripts/publish_course.py --course physical_design --glossary glossary_candidate.json
+python scripts/publish_course.py --course physical_design \
+  --glossary courses/physical_design/glossary_candidate.json
 # 或直接：python scripts/publish_course.py --course physical_design（使用默认候选）
 ```
 
@@ -644,9 +672,11 @@ journalctl -u mcq-template.service -n 100 --no-pager | grep -E 'is stale|is unav
 
 | 变更对象 | 校验脚本（只读） | 发布命令 |
 | --- | --- | --- |
-| 课程目录 / manifest / 整门课能否加载 | `check_courses.py` | `publish_course.py --add` / `--enable` / `--disable` / `delete_course.py` |
-| `questions.json` | `check_question_bank.py --course <course_id> --db instance/mcq.db` | `publish_course.py --course <course_id> --questions questions_candidate.json` |
-| `glossary.json` | `check_glossary.py --course <course_id>` | `publish_course.py --course <course_id> --glossary glossary_candidate.json` |
+| 课程目录 / manifest / 整门课的加载 | `check_courses.py`（校验 manifest 并加载校验每门**启用**课程；停用课程只报告 `disabled`） | `publish_course.py --add` / `--enable` / `--disable` / `delete_course.py` |
+| `questions.json` | `check_question_bank.py --course <course_id> --db instance/mcq.db` | `publish_course.py --course <course_id> --questions courses/<course_id>/questions_candidate.json` |
+| `glossary.json` | `check_glossary.py --course <course_id>` | `publish_course.py --course <course_id> --glossary courses/<course_id>/glossary_candidate.json` |
+
+表中所有完整路径都从项目根目录解析。
 
 固定流程（缺一不可）：
 
@@ -710,14 +740,22 @@ python scripts/publish_course.py --course physical_design \
 | --- | --- | --- |
 | 题干 / 翻译 / 解析 / 选项文案 / 选项顺序 / `section` / `pages` / JSON 格式 | 是 | 不变 |
 | 新增一个错误选项（判题身份兼容） | 是 | 不变 |
-| 判题身份不兼容（题型、正确答案集合、删除/重命名选项 ID） | 只清理该课程该题的相关 learner state | +1 |
-| 删除题目 | attempts 保留，错题/SRS 等按现有规则处理 | +1 |
+| 判题身份不兼容（题型、正确答案集合、删除/重命名选项 ID） | **删除该题历史 attempts**（`grading-changed`），并清理所有依赖该题判题身份的 learner state（错题 / SRS、薄弱知识点引用、未完成练习、进行中考试槽位） | +1 |
+| 删除题目（`deleted`） | **保留 attempts**，清理错题 / SRS 状态、薄弱知识点引用、未完成练习与进行中考试槽位 | +1 |
 | 新增 / 恢复题目 | 按现有规则 | +1 |
 | `chapter_ids` / `source_id` 变化 | 是 | +1 |
 | 课件/章节增删、顺序或归属（catalogue） | 是 | +1 |
 | 课程/课件/章节标题、`lecture`、`filename` | 是 | 不变 |
 | `glossary.json` | 是 | 不变（不推进 generation、不围栏 worker；但已运行的 worker 仍用旧术语，需要重启才生效） |
 | 一次成功发布（任意内容） | `versions/` 每个内容类型保留当前 + 上一版，更早的副本被清理（见 7.11） | 不变 |
+
+`grading-changed` 与 `deleted` 的清理范围（两者都会把该题视为 `unusable`，但处理的起点不同）：
+
+* `grading-changed`：先**删除该题的历史 attempts**，然后清理其错题 / SRS 记录、薄弱知识点中的题目引用（并重新计算进度）、未完成的 Normal / Review progress；
+* `deleted`：**保留 attempts**，同样清理错题 / SRS 记录、薄弱知识点引用与未完成练习；
+* 两者都会**删除并重排进行中考试的对应槽位**、**缩减进行中考试的 `question_count`**，并推进该课程的 generation。若某场未完成考试因此不再剩下任何槽位，它会被静默结算为零题 / 零分状态；
+* `content-only`（题干、翻译、解析、选项、`section` / `pages`、JSON 格式）保留全部学习状态，**不推进 generation**；
+* `placement-changed`（`chapter_ids` / `source_id`）与 catalogue 等结构变化保留作答历史，但**会推进 generation**（用于围栏持有旧归属映射的 worker）。
 
 attempts 保留窗口是"每个 `(learner_id, course_id, question_id)` 最近 10 次"，仍跨 Normal / Review / Exam
 共享该窗口。
@@ -734,7 +772,8 @@ generation → 旧 worker 才开始 learner 事务"这一竞态以**零 learner 
 ## 9. 明确的限制
 
 * 历史考试**不会**神奇地获得完整的历史题目内容快照：报告始终基于当前 live 内容，且 grading fingerprint
-  已变化的槽位会被排除在统计之外。
+  已变化的槽位会被排除在统计之外。报告**不是**严格 immutable：正文、章节与解析都取自当前 live 题库，被排除的槽位可能让页面显示的分数按剩余有效槽位重新计算，而数据库中已存储的 session 提交结果不会被重新写回。
+* `exam_sessions.question_count` 记录的是创建时的抽取数量；进行中的考试在 reconciliation 后可能被缩减（甚至归零并静默结算）。
 * 被停用或不可用的课程**不会**用其他课程的同名题去补内容。
 * legacy migration 保留 namespace 与历史，但无法推断不可知的旧数据课程归属；持久化的 `legacy_course_id`
   在普通运行时只读，只能通过 `scripts/rename_course.py` 显式迁移（见 7.6）。
@@ -742,6 +781,7 @@ generation → 旧 worker 才开始 learner 事务"这一竞态以**零 learner 
   [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)）。
 * 内容发布（文件系统）与数据库激活（worker 启动时的 reconciliation）**不是同一个事务**：`publish_course.py`
   只报告 `published, pending worker activation`，从不会自行推进 generation。
+* 候选 payload 只被冻结一次，最终写入 `versions/<sha256>/` 与基础 schema 校验都使用它；但默认的**外部预检**（`check_question_bank.py`）与术语表的内置离线预检都是按**路径**重新读取文件的，因此当前代码**无法**保证“预检看到的字节”与“最终归档的字节”必然相同——发布期间不要并发修改候选文件。这是实现层面的已知限制，不能靠文档消除。
 * 没有“跨课程的联合事务”：题库与术语表、多个课程之间都是各自独立的提交；遇到部分失败请按上面的
   失败语义逐项收尾。
 

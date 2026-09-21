@@ -4,7 +4,7 @@
 
 **Classroom MCQ Study Assistant**
 
-**A local-first, multi-course multiple-choice learning assistant** — fair random practice, mistake review, spaced repetition, bilingual glossaries, learning analytics and mock exams. Runs on one Flask process and one local SQLite file.
+**A local-first, multi-course multiple-choice learning assistant** — fair random practice, mistake review, spaced repetition, bilingual glossaries, learning analytics and mock exams. One Flask application/deployment (`app/`) and one local SQLite file: development runs it as a single Werkzeug process, the documented production setup runs two Gunicorn workers with four threads each, all sharing the same database.
 
 一个本地运行的多课程选择题学习助手：公平随机练习、个人错题纠正、同知识点迁移验证、间隔重复复习（SRS）、中英双语术语辅助、学习数据统计与模拟考试。
 
@@ -32,7 +32,7 @@
 - **内容是可插拔的 JSON**：每门课一个目录（`courses/<course_id>/`），新增课程、更换题库、改术语表都不需要修改 Python、Jinja、CSS 或数据库结构；
 - **学习状态留在服务器端 SQLite**：换设备登录同一账号，打开或刷新页面就能接着上次的题目、答题反馈和巩固进度继续。
 
-在「练习 → 答错 → 纠正 → 复习」这条主线上，它补上了几个通常只在付费产品里出现的细节：一轮练习有**公平随机覆盖**保证、错题必须真的被纠正（原题答对一次 + 同知识点再答对 2 道不同题）、纠正后进入 **1 / 3 / 7 / 15 / 30 天**的间隔复习，任何一次答错都会退回纠正流程。
+在「练习 → 答错 → 纠正 → 复习」这条主线上，它补上了几个通常只在付费产品里出现的细节：一轮练习有**公平随机覆盖**保证、错题必须真的被纠正（原题答对一次完成该错题的纠正；所属知识点需要累计答对 **2 道不同题**，通常是原题加另一道同章节题）、纠正后进入 **1 / 3 / 7 / 15 / 30 天**的间隔复习，任何一次答错都会退回纠正流程。
 
 ### Feature Highlights
 
@@ -132,7 +132,7 @@ python run.py
 
 模块职责、请求流程与数据库结构的完整说明见 [技术架构说明](docs/ARCHITECTURE.md)；运维命令的完整参数见 [课程模型与运营手册](docs/COURSE_GUIDE.md)。
 
-页面 URL 一律带课程：`/course/<course_id>/` 是本课程首页，其后是 `/quiz`、`/review`、`/mistakes`、`/glossary`、`/dashboard`、`/stats`、`/exam`。`/` 只会跳转到偏好课程，`/courses` 是课程列表。旧的、不带课程的历史 URL 仍然注册：`GET` 会重定向到显式课程 URL，`POST` 不会被猜测，而是返回 409 要求刷新（零写入）。
+课程学习页面使用 `/course/<course_id>/...`：`/course/<course_id>/` 是本课程首页，其后是 `/quiz`、`/review`、`/mistakes`、`/glossary`、`/dashboard`、`/stats`、`/exam`。`/` 只会跳转到偏好课程，`/courses` 是课程列表。无课程身份的路由不属于课程作用域：`/login`、`/register`、`/logout`、`/courses`、`/health`、`/ready`（以及 `/` 的重定向）都不带课程。旧的、不带课程的历史学习 URL 仍然注册：`GET` 会重定向到显式课程 URL，`POST` 不会被猜测，而是返回 409 要求刷新（零写入）。
 
 ## 🧭 Core Features
 
@@ -196,7 +196,7 @@ uncorrected wrong questions
 
 - 每门课由 `courses/<course_id>/course.json`（manifest）声明，并加载自己的题库与可选术语库；`course_id` 必须是稳定的 URL-safe 小写 slug（允许 `_`、`-`，最长 64 字符）。
 - URL 是唯一权威：`/course/<course_id>/...` 决定请求作用于哪门课程，`session` 里的“上次课程”只影响 `/` 的跳转，两个标签页分别打开两门课不会互相改写上下文。
-- 题目、章节、课件与术语 ID 都是**课程内本地 ID**（注册表主键为 `(course_id, question_id)` / `(course_id, term_id)`），两门课可以都拥有 `q001` 而内容完全不同。
+- 题目、章节、课件与术语 ID 都是**课程内本地 ID**：`question_registry` 的主键是 `(course_id, question_id)`；术语 ID 只是课程内的本地逻辑身份（`(course_id, term_id)`），术语表存在于 JSON 与每个 worker 的内存中，不写入 SQLite，也不存在 `term_registry` 之类的数据库注册表。两门课可以都拥有 `q001` 而内容完全不同。
 - 学习状态以 `(learner, course)` 为单位；账号（`user_id`）仍是全站身份，考试 ID 仍全站唯一，SQLite 仍是共享数据库，不按课程拆分。
 - 单门课程内容损坏不会拖垮整个应用：该课程变为 `unavailable`、历史状态原样保留、其他课程继续服务；只有重复 `course_id`、manifest 无法解析这类**全局歧义**才会让应用装配失败。
 - 术语表由 manifest 的 `glossary` 字段声明：`"glossary": null` 表示这门课明确没有术语表；声明了但文件缺失/损坏会让该课程 `unavailable`，而不是假装没有术语表。
@@ -232,9 +232,9 @@ uncorrected wrong questions
 - 从题库随机抽取一套固定、不重复的题：题目数量可选 `10 / 20 / 30 / 50`（只列出题库实际够用的档位）。
 - 时限通过下拉选择：10–90 分钟（每 10 分钟一档）或**不限时（默认）**；服务端记录开考时间与时限，到时自动交卷，打开首页、考试中心或学习数据页时也会自动结算所有已到期考试。
 - 考试过程不提示对错，可上一题 / 下一题；刷新或关闭页面后可继续，进行中的考试在首页“待处理”区有入口。
-- 创建考试后题目集合即固定，与 Normal coverage bag、Review 队列互不影响，也不会改写它们。
+- 创建考试后题目集合即固定：正常作答期间**不会**重新抽题，刷新、重开与换设备继续看到的都是同一套槽位；它与 Normal coverage bag、Review 队列互不影响，也不会改写它们。唯一的例外是题库维护：未完成的考试在遇到题目被删除或 grading identity 变化时，会删除对应槽位、重新编号并缩减 `question_count`；如果不再剩下任何槽位，该考试会被静默结算为零题/零分状态。
 - 交卷（或到时自动交卷）后生成成绩报告：总分、正确率、用时、章节表现拆分，以及每道错题的你的答案、正确答案与解析。
-- 已作答的错题自动进入现有错题本与薄弱知识点流程，不重复创建错题记录；考试中心还保留最近 20 场考试的历史记录。
+- 已作答的错题自动进入现有错题本与薄弱知识点流程，不重复创建错题记录；考试中心页面查询并显示最近 **20 场**考试的历史记录——这是页面的查询上限，数据库**不会**因此删除更早的考试记录。
 
 ## 📚 Course Content
 
@@ -251,7 +251,7 @@ courses/<course_id>/
 
 `python run.py` 以 `MCQ_ENV=development` 启动，因此开发默认值是：Session Cookie 不需要 HTTPS（纯 `http://127.0.0.1:5000` 可以登录并保持会话），遇到需要迁移的旧数据库时会先自动生成并校验一份带时间戳的备份再迁移。生产入口 `wsgi.py` 则声明 `MCQ_ENV=production`：Secure Cookie，并要求任何启动迁移都先有备份。
 
-- `*_candidate.json` 是**默认输入**：`check_*.py` 与 `publish_course.py` 在不传文件路径时读取它们。
+- `*_candidate.json` 是**默认输入**：`check_question_bank.py`、`check_glossary.py` 与 `publish_course.py` 在不传文件路径时读取它们（`check_question_bank.py` 在没有候选文件时回退到已发布题库，`check_glossary.py` 支持 `--published`）。`check_courses.py` 是例外：它校验 manifest 与**当前已发布**内容，不使用 candidate 作为加载输入，对 `enabled: false` 的课程只报告 `disabled`。
 - `versions/…`（以及 plain-file 布局下 manifest 直接指向的 `questions.json` / `glossary.json`）是**已发布内容**，由 worker 读取，不要手工原地编辑。
 - 如果 manifest 已指向 `versions/…`，目录根部的 `questions.json` / `glossary.json` 就不再被任何进程读取，编辑它不会生效。
 
@@ -433,7 +433,7 @@ manifest 布局下，单个内容类型的切换是原子的：冻结候选字�
 
 ## 💾 Data and Persistence
 
-所有持久化状态都在一个本地 SQLite 文件 `instance/mcq.db` 中（应用启动时自动创建与迁移；`instance` 与数据库文件的权限会被自动收紧为 `0700` / `0600`）：
+所有**服务端账号与学习状态**都在一个本地 SQLite 文件 `instance/mcq.db` 中（应用启动时自动创建与迁移；`instance` 与数据库文件的权限会被自动收紧为 `0700` / `0600`）：
 
 - 本地账号的用户名、密码哈希与创建时间；
 - 每个账号每道题**最近 10 次**作答的模式、所选答案、结果与时间；
@@ -444,6 +444,8 @@ manifest 布局下，单个内容类型的切换是原子的：冻结候选字�
 - 永久课程身份与已接受元数据（`courses`）、schema / legacy 归属记录（`schema_meta`）；
 - 题库注册与状态：**每门课程的**每个题目 ID 的判题身份、内容指纹、归属指纹与退役状态（`question_registry`），以及该课程当前的 `bank_version`、结构性 generation 与目录指纹（`question_bank_state`）——这些表只保存指纹与状态，不保存题目正文；
 - 登录 / 注册失败的限流窗口（`auth_rate_limits`），用于阻止暴力尝试。
+
+这里只包含**服务端账号与学习状态**：双语显示偏好保存在浏览器 `localStorage["mcq-bilingual"]`，课程内容与 manifest 保存在文件系统中，两者都不进数据库。
 
 **换设备继续做题**
 
@@ -456,8 +458,8 @@ manifest 布局下，单个内容类型的切换是原子的：冻结候选字�
 
 - 在任一设备重新开始某种练习，其他设备也会使用该模式的新进度；重置全部错题会同时清除该账号在当前课程的错题纠正状态和薄弱知识点状态，并结束各设备上的错题巩固，但保留正常练习（含 coverage 状态）与答题历史。
 - 如果提示答题页面已过期（课程或题库版本已更新），在同一设备重新进入练习即可继续；旧页面提交不会被猜测到其他课程，而是零写入地拒绝。
-- 升级应用后需要重启程序。数据库布局由 `app/repositories/schema_migrations.py` 版本化维护：当前 `schema_version = 2`（多课程命名空间），升级时在**一个 `BEGIN IMMEDIATE` 事务**内重建表、逐行复制、按字段校验、替换并做 `foreign_key_check`，失败整体回滚、重复执行结果一致。已有账号、attempts 与 wrong questions 都会保留；已有错题按实时 `chapter_ids` 初始化为 0/2 的薄弱知识点。细节见 [技术架构说明](docs/ARCHITECTURE.md) 第 11 节与 [多课程迁移与回滚手册](docs/MULTI_COURSE_MIGRATION.md)。
-- 注意：应用启动时会自动执行这个迁移，但**不会**先做带时间戳的备份。生产环境请按迁移手册的“停服务 → 备份 → `migrate_courses.py --dry-run` → 正式迁移 → 校验 → 启动”顺序操作。
+- 升级应用后需要重启程序。数据库布局由 `app/repositories/schema_migrations.py` 版本化维护：当前 `schema_version = 2`（多课程命名空间），升级时在**一个 `BEGIN IMMEDIATE` 事务**内重建表、逐行复制、按字段校验、替换；`BEGIN IMMEDIATE` 内部的任何失败都会回滚，重复执行结果一致。注意 `PRAGMA foreign_key_check` 的完整父子检查发生在 `COMMIT` **之后**：因此“事务内失败可回滚”与“提交后外键检查发现问题”是两件事，后者不能再说成刚才的事务被回滚。已有账号、attempts 与 wrong questions 都会保留；已有错题按实时 `chapter_ids` 初始化为 0/2 的薄弱知识点。细节见 [技术架构说明](docs/ARCHITECTURE.md) 第 11 节与 [多课程迁移与回滚手册](docs/MULTI_COURSE_MIGRATION.md)。
+- 应用启动时**会**在真正需要迁移时先生成并校验一份带时间戳的备份（SQLite 在线备份 API + `PRAGMA quick_check` + 原子发布），备份失败即中止启动；开发、生产与测试环境默认都是这个行为，未声明 `MCQ_ENV` 时则**拒绝**自动迁移。生产环境仍建议按迁移手册的“停服务 → 备份 → `migrate_courses.py --dry-run` → 正式迁移 → 校验 → 启动”顺序操作，以便在动手前先看到完整的检查报告。
 - 旧 Normal progress 缺少 fairness 字段时，会在下一次新建 round 时自动初始化。
 - 缺少新 role metadata 的旧未完成 Review progress 无法安全转换，只会清除该 Review round，不删除错题、薄弱状态、attempt history、Normal progress 或账号。
 - 旧数据库列 `review_streak` / `mastered` 保留作无损兼容，当前语义为未纠正 / 已纠正，不再表示知识点掌握。
@@ -469,7 +471,7 @@ manifest 布局下，单个内容类型的切换是原子的：冻结候选字�
 课程内容校验脚本是只读的，可以随时运行；`pytest` 会执行 `tests/` 下的完整测试集（配置见 `pytest.ini`）：
 
 ```bash
-python scripts/check_courses.py        # 校验 manifest、路径与每门课能否加载
+python scripts/check_courses.py        # 校验 manifest 与路径，并加载校验每门「启用」课程（停用课程只报告 disabled）
 python scripts/check_glossary.py --all # 校验所有启用课程的术语表与覆盖情况
 pytest
 ```
@@ -748,7 +750,7 @@ Local HTTP URL: http://127.0.0.1:8080
 | 工具 | 用途 |
 | --- | --- |
 | `python scripts/migrate_courses.py --db instance/mcq.db --dry-run` | 事务性、无损、幂等的命名空间迁移 / 检查（真实执行前会自动生成并校验带时间戳的备份） |
-| `python scripts/rename_course.py --db instance/mcq.db --from <old> --to <new> [--rename-directory]` | 重命名一门课程的 namespace（`course_id` 是数据库中每张学习者表的首列）；`--rename-directory` 为“暂存 → 事务 → 转正”协议 |
+| `python scripts/rename_course.py --db instance/mcq.db --from <old> --to <new> [--rename-directory]` | 重命名一门课程的 namespace（所有**课程作用域**的 learner 表都带 `course_id` namespace；`exam_questions` 不直接保存 `course_id`，课程归属通过父 `exam_sessions` 取得）；`--rename-directory` 为“暂存 → 事务 → 转正”协议 |
 | `python scripts/rename_course.py --db instance/mcq.db --courses-dir courses --recover [--dry-run]` | 收尾或回滚一次中断的 `--rename-directory`（依据数据库归属与目录位置决定） |
 | `python scripts/delete_course.py --course <course_id> --dry-run` | 预览并删除课程目录、数据库 namespace 与全部引用（默认自动备份数据库；目录先隔离到 `courses/.trash/`，数据库提交后才物理删除） |
 | `python scripts/delete_course.py --purge [--course <course_id>] [--dry-run]` | 只清理 `courses/.trash/` 中上次运行留下的待清理条目（不写数据库） |
@@ -763,7 +765,7 @@ Local HTTP URL: http://127.0.0.1:8080
 | `production` / `development` / `testing` | 先创建并校验 `mcq.db.bak-<UTC 时间戳>`（SQLite 在线备份 API + `PRAGMA quick_check` + 原子发布），成功后才在单个事务里迁移 |
 | 未设置（未知） | **拒绝启动**，打印显式迁移命令（安全默认） |
 
-* **备份失败即中止启动**，数据库保持未迁移；迁移事务失败会整体回滚，并留下那份已校验的备份副本（可解释、可恢复）。
+* **备份失败即中止启动**：迁移根本不会开始，数据库保持未迁移；`BEGIN IMMEDIATE` 事务内部的失败会回滚（并留下那份已校验的备份副本，可解释、可恢复）；而提交之后的完整 `PRAGMA foreign_key_check` 若发现问题，已经不能再回滚——它是提交后的独立校验步骤，语义与事务内失败不同。
 * 并发启动（多 worker）通过 `mcq.db.migrate.lock` 串行化决策，只会产生一份备份。
 * 想固定行为可用 `MCQ_AUTO_MIGRATE=refuse|backup-and-migrate|migrate`；`migrate` 在 `production` 下被禁止（生产启动必须自己生成并校验备份）。
 

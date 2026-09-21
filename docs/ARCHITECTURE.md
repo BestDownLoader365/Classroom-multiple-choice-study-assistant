@@ -295,11 +295,11 @@ Contains this machine's systemd unit and Nginx site configuration. It is **not**
 
 #### `scripts/start_production.sh` and `scripts/stop_production.sh`
 
-Convenience operations scripts for WSL. The start script validates Nginx, starts Gunicorn and Nginx, verifies both services, and polls the `/ready` readiness URL (which fails while a worker still serves a superseded question bank). The stop script stops Nginx before Gunicorn and verifies that both are inactive. They control already-deployed services and do not copy templates into `/etc`.
+Convenience operations scripts for WSL. The start script validates Nginx, starts Gunicorn and Nginx, verifies both services, and polls the `/ready` readiness URL, which only ever reports the worker that answers the request: it fails when that worker is stale or a course is unavailable, but a `/ready == 200` proves nothing about a non-structural bank edit or a glossary edit, and one successful poll cannot prove that every worker of a multi-worker deployment has loaded the new content. The stop script stops Nginx before Gunicorn and verifies that both are inactive. They control already-deployed services and do not copy templates into `/etc`.
 
 #### `courses/<course_id>/questions_candidate.json` (working copy) and the manifest's `questions` pointer
 
-The **candidate** is the maintainer's working copy and the default input of every `check_*.py` and `publish_course.py` command; no worker ever loads it. What a worker loads is the file the course manifest's `questions` field points at: an immutable `versions/<sha256>/questions.json` (what `--add` and every publish write) or a plain root `questions.json` in the plain-file layout, and — when no manifest exists at all — the root `questions.json` through the legacy adapter.
+The **candidate** is the maintainer's working copy and the default input of `check_question_bank.py`, `check_glossary.py` and `publish_course.py`; no worker ever loads it, and `check_courses.py` deliberately ignores it (it validates the manifest and the *currently published* content instead). What a worker loads is the file the course manifest's `questions` field points at: an immutable `versions/<sha256>/questions.json` (what `--add` and every publish write) or a plain root `questions.json` in the plain-file layout, and — when no manifest exists at all — the root `questions.json` through the legacy adapter.
 Every application process reads and validates each enabled course's bank once during
 startup. Editing a candidate has no effect until it is published and the workers are restarted: `python run.py` in
 development or `mcq-template.service` in production. Publish it atomically
@@ -382,9 +382,7 @@ while learner rows exist unless `--force` is given, a strict `--courses-dir` and
 `courses/.trash` containment check on every path, a refusal for the persisted
 `legacy_course_id` namespace and the legacy root-file layout, and a per-table total
 row-count re-check inside the transaction that rolls back rather than commit a partially
-scoped deletion. Exit codes: `0` deleted (or dry run), `1` refused (nothing written, or
-fully compensated), `2` usage/IO, `3` committed but a quarantine directory still needs
-manual cleanup.
+scoped deletion. Exit codes: `0` deleted (or dry run), `1` refused (no database/course change was committed, or the transaction was fully compensated — an already verified timestamped backup may still remain on disk), `2` usage/IO, `3` committed but a quarantine directory still needs manual cleanup.
 
 #### `scripts/check_question_bank.py`
 
@@ -437,7 +435,8 @@ Consequences worth knowing:
 
 The single publish entry point for every course-content type: add a course, publish
 `questions.json` and/or `glossary.json`, and enable/disable a course. A publish reads the
-candidate once, validates exactly those frozen bytes, archives them under
+candidate once into a frozen payload, runs the basic schema validation on exactly those
+bytes, archives them under
 `versions/<sha256>/`, and switches the manifest over with a single `os.replace` (the
 legacy root-file layout falls back to an atomic single-file replace). `--add` creates a
 course in exactly that shape: the initial bytes are validated first, archived under
@@ -451,7 +450,7 @@ explicit path always wins, a glossary candidate is ignored for a course whose ma
 declares `glossary: null`, and a command with no content at all writes nothing. It re-runs
 the matching gate by default — `check_question_bank.py` against the database for questions,
 `check_glossary.py` for the glossary — and refuses to switch over content that fails it;
-`--skip-preflight` is the explicit, discouraged escape hatch. Direct `cp` over a live file
+`--skip-preflight` is the explicit, discouraged escape hatch. Only the *basic* validation and the archive are guaranteed to use one frozen payload: the default gate is invoked with the candidate **path**, so `check_question_bank.py` re-reads the file itself, and the glossary preflight re-reads the glossary and its corpus by path as well. A candidate edited concurrently with a publish can therefore be validated as one revision and archived as another; do not edit candidates while publishing, and treat "the preflight and the archive always see identical bytes" as an implementation gap rather than a documented guarantee. Direct `cp` over a live file
 (or an editor's in-place save) can truncate the JSON while a worker starts, which surfaces
 as a misleading `Invalid JSON in question bank at line 1, column N`; this script removes
 that failure mode. Publishing still requires a coordinated restart of all workers, because
@@ -485,13 +484,13 @@ It also owns the *filesystem transaction* primitives both destructive commands s
 
 #### `scripts/migrate_courses.py`
 
-The transactional multi-course migration and inspection CLI: `--dry-run` only reads (table list, `schema_version`, persisted `legacy_course_id`, whether a migration is needed, per-table row counts, orphan `exam_questions` rows); a real run copies the database to a timestamped backup next to it unless `--no-backup`, then migrates. `--layout` additionally materialises the legacy root files as `courses/<--legacy-course-id>/`, using that same id for the directory name, the manifest `course_id` and the persisted `schema_meta.legacy_course_id`; the flag is validated as a course slug before anything is written (an invalid or traversing value exits `2` with no writes). A global catalogue ambiguity — most likely a root `questions.json` left next to `courses/<id>/course.json` — is reported and exits `1` rather than aborting with a traceback (see [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)). Exit codes: `0` success, `1` migration refused (nothing written), `2` usage/IO.
+The transactional multi-course migration and inspection CLI: `--dry-run` only reads (table list, `schema_version`, persisted `legacy_course_id`, whether a migration is needed, per-table row counts, orphan `exam_questions` rows); a real run copies the database to a timestamped backup next to it unless `--no-backup`, then migrates. `--layout` additionally materialises the legacy root files as `courses/<--legacy-course-id>/`, using that same id for the directory name, the manifest `course_id` and the persisted `schema_meta.legacy_course_id`; the flag is validated as a course slug before anything is written (an invalid or traversing value exits `2` with no writes). Order matters for the `--layout` phase: the backup is taken first, then the course definitions are discovered, then the schema migration runs and commits, and only then does `_migrate_layout()` run — so a layout refusal (target directory non-empty, or the root bank missing) exits `1` *after* the database migration may already have been committed and a verified backup created; it does not mean "nothing changed". A global catalogue ambiguity — most likely a root `questions.json` left next to `courses/<id>/course.json` — is reported and exits `1` rather than aborting with a traceback (see [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)). Exit codes: `0` success, `1` refused (no target database/course change committed, though the timestamped backup remains), `2` usage/IO.
 
 #### `scripts/rename_course.py`
 
 The administrative namespace rename: it backs the database up (unless `--no-backup`) with the shared verified snapshot, verifies every precondition read-only *before* touching anything, rewrites `course_id` across every course-scoped table in one `BEGIN IMMEDIATE` transaction with before/after row-count validation, refuses to run when the target namespace already owns data, leaves `exam_questions` untouched (it follows its parent session), and updates the persisted `legacy_course_id` and — new — a `schema_meta.default_course_id` that pointed at the renamed course.
 
-`--rename-directory` runs a three-phase protocol whose commit point is the database transaction: stage `courses/<from>` into `courses/.rename-staging-…` while atomically rewriting its manifest, commit the database, then promote the staging directory. Failures before the commit are compensated (manifest bytes and directory name restored) and exit `1`; a failed compensation or a failure after the commit exits `3` with the paths and the `--recover` command, and the state file records the phase. `--recover` finishes or undoes an interrupted run from the state file plus the observable state, and refuses combinations the protocol cannot produce. Exit codes: `0` success, `1` refused (nothing written, or fully compensated), `2` usage/IO, `3` committed with the filesystem half still pending.
+`--rename-directory` runs a three-phase protocol whose commit point is the database transaction: stage `courses/<from>` into `courses/.rename-staging-…` while atomically rewriting its manifest, commit the database, then promote the staging directory. Failures before the commit are compensated (manifest bytes and directory name restored) and exit `1`; a failed compensation or a failure after the commit exits `3` with the paths and the `--recover` command, and the state file records the phase. `--recover` finishes or undoes an interrupted run from the state file plus the observable state, and refuses combinations the protocol cannot produce. Exit codes: `0` success, `1` refused (no database/course rename committed, or fully compensated — an already verified timestamped backup may still remain on disk), `2` usage/IO, `3` committed with the filesystem half still pending.
 
 ## 5. Application Assembly
 
@@ -904,7 +903,7 @@ Every learning row below is registered twice: canonically as `/course/<course_id
 | GET | `/exam/<exam_id>` | Render one exam question without feedback; auto-submits when expired |
 | POST | `/exam/<exam_id>/answer` | Save one exam answer without grading feedback |
 | POST | `/exam/<exam_id>/submit` | Finalize the exam exactly once and redirect to its report |
-| GET | `/exam/<exam_id>/report` | Show the immutable score report for a finished exam |
+| GET | `/exam/<exam_id>/report` | Show the score report for a finished exam (built from live bank content; drifted/removed slots are excluded) |
 
 `/health` and `/ready` are registered directly on the Flask application before the web blueprint. They therefore do not run the blueprint's account requirement and do not expose learner, database, question, or secret data. `/health` answers while the process is merely alive (a stale worker must still be able to serve the login/logout pages); `/ready` is the signal monitoring and the start script should use, because a worker whose bank generation no longer matches the database only answers 503 for learning pages.
 
@@ -1027,7 +1026,7 @@ Presents one exam question per page with the shared question-card primitives but
 
 ### `app/templates/exam_report.html`
 
-Shows the immutable score (`correct / total`), accuracy, elapsed time, and submission status, a per-chapter breakdown in curriculum order, and every wrong or unanswered question with the shared answered-options markup, correct answer, and explanations. Glossary highlighting keeps working in all rendered question content. Its answer summary follows the same single-line paragraph rule as the quiz feedback block.
+Shows the exam score (`correct / total`), accuracy, elapsed time, and submission status, a per-chapter breakdown in curriculum order, and every wrong or unanswered question with the shared answered-options markup, correct answer, and explanations. The report is **not** strictly immutable: question text, chapters and explanations come from the current live bank, slots whose question was deleted or whose grading fingerprint drifted are excluded from the breakdown, and the displayed score is then recomputed over the remaining valid slots so the totals agree — while the stored `exam_sessions` submit result is never rewritten. Glossary highlighting keeps working in all rendered question content. Its answer summary follows the same single-line paragraph rule as the quiz feedback block.
 
 ### `app/templates/glossary.html`
 
@@ -1092,7 +1091,7 @@ dedicated connection
   PRAGMA foreign_key_check (full, after commit)
 ```
 
-Any failure rolls the whole thing back and the CLI reports the reason; re-running always reaches the same state. A pre-existing parent/child violation in the old data aborts the migration with a report instead of silently dropping rows. The transaction itself never runs retention cleanup, weak-knowledge backfill, question-bank diffing, registry reconciliation or fingerprint recomputation — those are separate stages (`Database.enforce_attempt_retention`, `register_courses`, and each course's `QuestionBankSyncService.synchronize()` at startup).
+A failure *inside* the transaction rolls the whole thing back and the CLI reports the reason; re-running always reaches the same state. The final `PRAGMA foreign_key_check` runs *after* `COMMIT`, so a violation it reports is a post-commit finding, not a rolled-back transaction: it is reported instead of being silently accepted, and the migration is not undone automatically. A pre-existing parent/child violation in the old data aborts the migration with a report instead of silently dropping rows. The transaction itself never runs retention cleanup, weak-knowledge backfill, question-bank diffing, registry reconciliation or fingerprint recomputation — those are separate stages (`Database.enforce_attempt_retention`, `register_courses`, and each course's `QuestionBankSyncService.synchronize()` at startup).
 
 ### `schema_meta`
 
@@ -1184,7 +1183,7 @@ Every query and write is bound to the learner *and* the course. Question content
 | `course_id` | The namespace this exam belongs to; every read also filters on it |
 | `learner_id` | User UUID owning the exam; every query is scoped by it |
 | `status` | `in_progress`, `submitted`, or `expired` |
-| `question_count` | Fixed number of questions drawn at creation |
+| `question_count` | Number of questions drawn at creation; reconciliation of an unfinished exam against a changed bank can shrink it (a session left with no usable slot is finalized quietly at zero) |
 | `time_limit_seconds` | Optional limit; `NULL` means untimed |
 | `option_seed` | Seed keeping each slot's option order stable |
 | `created_at` / `started_at` | UTC ISO timestamps (identical at creation) |
@@ -1207,7 +1206,7 @@ Every query and write is bound to the learner *and* the course. Question content
 
 This table deliberately stores **no `course_id`**: a slot is always reached through its parent session, so the namespace cannot desynchronise. Every slot statement proves parent membership with `EXISTS (… exam_sessions.course_id = ?)`, and the schema carries `FOREIGN KEY (exam_id) REFERENCES exam_sessions(id) ON DELETE RESTRICT`.
 
-The question set is fixed at creation and never re-drawn, so refreshes, reopens, and cross-device resumes all see identical slots. Submission flips `status` with a conditional `UPDATE ... WHERE status = 'in_progress'`, which makes repeated submits no-ops before any attempt or mistake side effects run.
+The question set is never re-drawn during normal use, so refreshes, reopens, and cross-device resumes all see identical slots. The one maintenance exception is a changed bank: an unfinished exam whose slots' questions were deleted or whose grading identity changed drops those slots, resequences the remaining positions and shrinks `question_count` (and is finalized quietly at zero if nothing usable is left). Submission flips `status` with a conditional `UPDATE ... WHERE status = 'in_progress'`, which makes repeated submits no-ops before any attempt or mistake side effects run.
 
 ### `question_registry`
 
@@ -1415,7 +1414,7 @@ Two rules keep request-level tests honest. First, a `POST` must carry the signed
 | `tests/test_course_loader.py` | Manifest discovery, validation, bundle loading, and the worker registry |
 | `tests/test_course_isolation.py` | Behavioural namespace separation: two courses reusing the same local question/chapter/source IDs never observe, clear or advance each other's state |
 | `tests/test_course_migration.py` | Namespace migration: field-level equivalence, idempotency, and fault injection at all five stages |
-| `tests/test_course_scripts.py` | CLI tooling: read-only preflight, `--add`/`--disable`/`--enable`, atomic publish with the bytes frozen once, `delete_course.py` and `rename_course.py` |
+| `tests/test_course_scripts.py` | CLI tooling: read-only preflight, `--add`/`--disable`/`--enable`, atomic publish from one frozen payload, `delete_course.py` and `rename_course.py` |
 | `tests/test_doc_contracts.py` | Documentation drift guards: the exit-code table in `publish_course.py` matches what the command actually returns (forwarded preflight codes included), and the layout diagram in `course_loader.py` matches the tree the real publishing tooling writes |
 | `tests/test_config_env.py` | Deployment configuration: strict boolean parsing, `MCQ_ENV` detection, the cookie precedence chain, production downgrade refusal, and that a testing app ignores the machine's environment |
 | `tests/test_startup_migration.py` | Startup schema safety: the read-only probe (current/new/old/missing-table), refusals, verified backups, no backup without migration, failed-backup abort, post-crash recovery, idempotency, and concurrent starts producing exactly one backup |
@@ -1552,8 +1551,8 @@ Developers should preserve these rules when extending the application:
 
 1. Write the candidate bank to its own file — the default location is `courses/<course_id>/questions_candidate.json`, which the commands below then need no path argument for. Never edit the live file in place.
 2. Run `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db` (add `--strict` in CI to fail on updates that clear learner state, and `--simulate` to run the real reconciliation against a temporary copy of the database; `--published` re-checks the deployed file while a working copy exists). Read the report with the semantics of ["How to read the two bank-level report lines"](#how-to-read-the-two-bank-level-report-lines) above: `catalogue-changed: yes` means that course's workers need the restart, while `presentation-only: no` does not mean the labels stayed identical.
-3. Publish atomically: `python scripts/publish_course.py --course <course_id> --questions questions_candidate.json` (or simply `--course <course_id>` when the working copy is the default one). The candidate bytes are read once, validated as-is, written to an immutable `versions/<sha256>/questions.json`, re-validated against the publication baseline inside the course publication lock, and then the manifest is switched over with a single `os.replace()`. Filesystem publication and database activation are **not** one transaction, so the command reports `published, pending worker activation` and never bumps the generation itself.
-4. Restart all workers (`systemctl restart mcq-template.service`) and confirm `/ready` and `/ready/<course_id>` answer `200`. A course that is still stale only fences its own pages. See [`COURSE_GUIDE.md`](COURSE_GUIDE.md) for the full operational flow.
+3. Publish atomically: `python scripts/publish_course.py --course <course_id> --questions courses/<course_id>/questions_candidate.json` (paths resolve from the project root; omit `--questions` entirely when the working copy is the default one — `--course` itself is always required). The candidate bytes are frozen once into a payload, that payload is validated for schema and written to an immutable `versions/<sha256>/questions.json`, re-validated against the publication baseline inside the course publication lock, and then the manifest is switched over with a single `os.replace()`. The default gate is invoked with the candidate *path*, so it re-reads the file: basic validation and the archive share one frozen payload, but a concurrently edited candidate cannot be proven identical between gate and archive — never edit a candidate while publishing. Filesystem publication and database activation are **not** one transaction, so the command reports `published, pending worker activation` and never bumps the generation itself.
+4. Restart all workers (`systemctl restart mcq-template.service`) and confirm `/ready` and `/ready/<course_id>` answer `200`. That check only proves the worker which answers the request is servable and generation-consistent: content-only, presentation-only and glossary updates never make an old worker stale, so it may keep answering `200` while still serving old in-memory content, and a single request cannot prove every worker of a multi-worker deployment has reloaded. A course that is still stale only fences its own pages. See [`COURSE_GUIDE.md`](COURSE_GUIDE.md) for the full operational flow.
 
 ### Restoring a database backup
 
@@ -1590,7 +1589,7 @@ The path names, the `fangsihan` service account and the `/home/fangsihan/CodeSpa
 
 Sakura FRP must target TCP `127.0.0.1:8080`. It must never target 8001 directly. Because Sakura FRP carries the HTTP bytes transparently rather than acting as an HTTP reverse proxy, the application trusts exactly one HTTP proxy: Nginx.
 
-`wsgi.py` is the production composition entry point. It requires `MCQ_SECRET_KEY`, forces debug and testing off, and applies Werkzeug `ProxyFix(x_for=1, x_proto=1, x_host=1)`. Nginx supplies `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`; larger ProxyFix counts would trust headers from untrusted clients. `run.py` remains the development-only entry point.
+`wsgi.py` is the production composition entry point. It requires `MCQ_SECRET_KEY`, forces debug and testing off, declares `MCQ_ENV=production`, passes `SESSION_COOKIE_SECURE=True` in code (an environment variable may only turn it *on* in production, never off), and applies Werkzeug `ProxyFix(x_for=1, x_proto=1)` — exactly one trusted proxy hop. Nginx supplies `X-Real-IP`, `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`; trusting more hops (or `x_host`) would let a client forge the scheme or host the application believes. `run.py` remains the development-only entry point.
 
 ### Gunicorn
 
@@ -1689,7 +1688,7 @@ curl http://127.0.0.1:8080/ready         # Nginx -> Gunicorn -> Flask
 {"status": "stale", "worker_generation": 3, "database_generation": 4}
 ```
 
-whenever the worker still holds a superseded question bank; restart all workers in that case.
+when the worker answering the request still holds a structurally superseded question bank; restart all workers in that case. The nuance is that only a *structural* bank change advances the generation, so `content-only`, `presentation-only` and glossary publishes never make an old worker stale: it can keep answering `200` while still serving the previous in-memory content. `/ready/<course_id>` proves only the servability and generation agreement of the worker that answered the request — it cannot prove that non-structural bank content or a glossary has been reloaded, and one request never proves that every worker of a multi-worker deployment has been updated.
 
 The final host-side acceptance check is:
 
