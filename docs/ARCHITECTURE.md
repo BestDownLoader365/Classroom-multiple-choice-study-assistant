@@ -145,6 +145,7 @@ MCQ_Template/
 │       └── glossary.json          # same; unread once the manifest points at versions/
 ├── app/
 │   ├── __init__.py
+│   ├── config.py                  # MCQ_ENV, strict booleans, cookie + migration policy
 │   ├── course_runtime.py          # CourseRegistry / CourseState / AppServices
 │   ├── models/
 │   │   ├── __init__.py
@@ -153,10 +154,11 @@ MCQ_Template/
 │   ├── repositories/
 │   │   ├── __init__.py
 │   │   ├── database.py
+│   │   ├── database_backup.py     # verified, atomically published timestamped snapshots
 │   │   ├── course_loader.py       # manifest discovery, validation, bundles
 │   │   ├── course_repository.py   # permanent course identity + schema_meta
 │   │   ├── course_scope.py        # required course_id validation
-│   │   ├── schema_migrations.py   # transactional namespace migration
+│   │   ├── schema_migrations.py   # transactional namespace migration + startup policy
 │   │   ├── rate_limit_repository.py
 │   │   ├── question_bank_state_repository.py
 │   │   ├── glossary_loader.py
@@ -218,7 +220,7 @@ MCQ_Template/
 │   ├── check_courses.py
 │   ├── check_glossary.py
 │   ├── check_question_bank.py
-│   ├── course_tooling.py
+│   ├── course_tooling.py          # shared CLI layer: loader, publish, locks, safe FS ops
 │   ├── delete_course.py
 │   ├── migrate_courses.py
 │   ├── publish_course.py
@@ -230,12 +232,17 @@ MCQ_Template/
     ├── conftest.py
     ├── test_bundled_glossary.py
     ├── test_bundled_question_bank.py
+    ├── test_config_env.py
+    ├── test_course_delete_protocol.py
     ├── test_course_isolation.py
+    ├── test_course_layout_migration.py
     ├── test_course_loader.py
     ├── test_course_migration.py
+    ├── test_course_rename_protocol.py
     ├── test_course_scripts.py
     ├── test_course_web.py
     ├── test_dashboard_web.py
+    ├── test_doc_contracts.py
     ├── test_exam_service.py
     ├── test_exam_web.py
     ├── test_form_context.py
@@ -256,6 +263,7 @@ MCQ_Template/
     ├── test_srs.py
     ├── test_srs_web.py
     ├── test_stale_worker.py
+    ├── test_startup_migration.py
     ├── test_statistics_service.py
     ├── test_stats_web.py
     ├── test_view_helpers.py
@@ -473,6 +481,8 @@ Contains Pytest configuration used by the test suite (`testpaths = tests`, quiet
 
 The thin shared tooling layer behind every course CLI script. It resolves a course through the application's own `CourseLoader`, freezes candidate bytes once, validates them with the application's own loaders, writes immutable `versions/<sha256>/` copies, switches the manifest with a single `os.replace()`, takes the course publication lock (`.publish.lock`), runs the per-content-type retention pass, and provides `preferred_candidate()` (explicit path, then the course's working copy, then the published file). No business rule is duplicated here: a rule change belongs in `app/` and is picked up automatically.
 
+It also owns the *filesystem transaction* primitives both destructive commands share, so neither re-implements them: `contained_path()` (one containment check for the CLI), `atomic_rename()` (translates `EXDEV`/`EACCES`/`ENOTEMPTY` into an actionable `FilesystemTransactionError`), `write_file_atomically()`, the quarantine helpers (`ISOLATED_DIRECTORY`, `isolated_directory`, `unique_isolated_path`, `isolated_entries`, `adopt_or_report`, `discard_isolated`) and the rename state helpers (`RENAME_STATE_PREFIX`, `RENAME_STAGING_PREFIX`, `rename_state_path`, `staging_directory`, `read_rename_state`, `write_rename_state`, `list_rename_states`, `remove_rename_state`). It also re-exports `app.repositories.database_backup.timestamped_backup` so every CLI takes the same verified snapshot.
+
 #### `scripts/migrate_courses.py`
 
 The transactional multi-course migration and inspection CLI: `--dry-run` only reads (table list, `schema_version`, persisted `legacy_course_id`, whether a migration is needed, per-table row counts, orphan `exam_questions` rows); a real run copies the database to a timestamped backup next to it unless `--no-backup`, then migrates. `--layout` additionally materialises the legacy root files as `courses/<--legacy-course-id>/`, using that same id for the directory name, the manifest `course_id` and the persisted `schema_meta.legacy_course_id`; the flag is validated as a course slug before anything is written (an invalid or traversing value exits `2` with no writes). A global catalogue ambiguity — most likely a root `questions.json` left next to `courses/<id>/course.json` — is reported and exits `1` rather than aborting with a traceback (see [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)). Exit codes: `0` success, `1` migration refused (nothing written), `2` usage/IO.
@@ -580,9 +590,19 @@ Genuinely cross-course operations (resolving which course owns a bare `exam_id`,
 
 Schema changes are **not** applied by guarded `ALTER TABLE` statements. The single place that rebuilds a table layout is `schema_migrations.ensure_schema()`; see [§11](#11-sqlite-schema) for the table bodies, the primary keys and the transaction shape.
 
+### `app/repositories/database_backup.py`
+
+`timestamped_backup()` produces the one backup artifact every database-modifying command shares: a consistent snapshot taken with SQLite's own online backup API (not `shutil.copy2`, which can capture a torn page), written to a hidden temporary name, verified with `PRAGMA quick_check`, and published with `os.replace` so a crash never leaves a partial file that looks usable. An existing backup is never overwritten — a second snapshot inside the same second gets a `-1` suffix. `BackupError` is raised for every failure, and every caller treats it as fatal for its own operation, which is what makes "no backup, no migration" a property of the code rather than a promise.
+
+### `app/config.py`
+
+Deployment configuration resolution, kept out of the factory so it can be unit-tested: `MCQ_ENV` → `McqEnvironment`, `parse_strict_bool()` (strict because `bool("false")` is `True`), `resolve_session_cookie_secure()` (entry-point value, then `MCQ_SESSION_COOKIE_SECURE`, then the environment default; an *unknown* environment keeps the safe value) and `resolve_startup_migration_policy()` (`refuse` / `backup-and-migrate` / `migrate-after-external-backup`). Anything it cannot interpret raises `ConfigurationError`, which the entry points report instead of starting with a guess.
+
 ### `app/repositories/course_loader.py`
 
 `CourseLoader` owns course discovery and content loading. `discover_definitions()` walks `COURSES_DIR` for `course.json` manifests, validates each one (`schema_version: 1`, `course_id` slug, required `questions`, explicit `glossary` key, resolved-and-contained paths), and finally appends the **legacy root adapter** definition when the root `questions.json` exists. A directory without a manifest is ignored with a log line, not treated as a course. A duplicate `course_id` or an unreadable manifest raises `CourseDefinitionError` (application assembly fails); a single broken course raises `CourseLoadError` (that course becomes `unavailable`).
+
+The adapter's `course_id` is the `legacy_course_id` constructor argument, not a hard-coded `"legacy"` (the default): assembly reads the persisted namespace from `schema_meta` first and passes it in, so the root files are always attributed to the namespace the learner rows actually use, and `"root questions.json + courses/<id>/course.json"` is reported as a real duplicate instead of silently producing a second, history-less course.
 
 `load_bundle()` loads one definition into a `CourseBundle`: the in-memory `QuestionRepository`, the optional `GlossaryRepository`, the bank fingerprint and the *publication identity* — a SHA-256 over the names and bytes of every content file the manifest currently points at. `publication_identity()` is recomputed inside the reconciliation transaction, which is how the "worker preloaded the old files, then a newer publication landed" race is detected.
 
@@ -1395,7 +1415,13 @@ Two rules keep request-level tests honest. First, a `POST` must carry the signed
 | `tests/test_course_loader.py` | Manifest discovery, validation, bundle loading, and the worker registry |
 | `tests/test_course_isolation.py` | Behavioural namespace separation: two courses reusing the same local question/chapter/source IDs never observe, clear or advance each other's state |
 | `tests/test_course_migration.py` | Namespace migration: field-level equivalence, idempotency, and fault injection at all five stages |
-| `tests/test_course_scripts.py` | CLI tooling: read-only preflight, `--add`/`--disable`/`--enable`, atomic publish with the bytes frozen once, and `delete_course.py` |
+| `tests/test_course_scripts.py` | CLI tooling: read-only preflight, `--add`/`--disable`/`--enable`, atomic publish with the bytes frozen once, `delete_course.py` and `rename_course.py` |
+| `tests/test_doc_contracts.py` | Documentation drift guards: the exit-code table in `publish_course.py` matches what the command actually returns (forwarded preflight codes included), and the layout diagram in `course_loader.py` matches the tree the real publishing tooling writes |
+| `tests/test_config_env.py` | Deployment configuration: strict boolean parsing, `MCQ_ENV` detection, the cookie precedence chain, production downgrade refusal, and that a testing app ignores the machine's environment |
+| `tests/test_startup_migration.py` | Startup schema safety: the read-only probe (current/new/old/missing-table), refusals, verified backups, no backup without migration, failed-backup abort, post-crash recovery, idempotency, and concurrent starts producing exactly one backup |
+| `tests/test_course_delete_protocol.py` | Deletion protocol: quarantine, compensation, pending-cleanup exit code, resuming an interrupted run, ambiguity refusal, `--purge` scope and escape protection |
+| `tests/test_course_rename_protocol.py` | Rename protocol: staged phases, compensation, `--recover` for both the pre- and post-commit interruptions, impossible states, and idempotency |
+| `tests/test_course_layout_migration.py` | `migrate_courses.py --layout`: the requested legacy id drives the directory name, the manifest and `schema_meta`, illegal ids are refused before any write, and the duplicate-root-file case is reported |
 | `tests/test_course_web.py` | Multi-course web behaviour: switching, signed learning forms, stale-form rejection, per-course fencing, readiness, workers |
 | `tests/test_form_context.py` | Regression coverage that every rendered learning form signs the operation its own `action` performs; this client sends only the tokens the templates rendered |
 | `tests/test_glossary_loader.py` | Glossary schema, normalization, aliases, collisions, and arbitrary categories |
@@ -1451,7 +1477,7 @@ python run.py
 At startup:
 
 1. Flask configuration is created (secret key, display timezone, course directory, database path) and the course loader is prepared.
-2. `instance/mcq.db` and the current tables are created, migrated or extended if needed, then the deployment-wide repositories are built.
+2. `instance/mcq.db` and the current tables are created, migrated or extended if needed (a startup that has to migrate a pre-existing database first writes and verifies a timestamped backup, and aborts if that fails), then the deployment-wide repositories are built.
 3. The course registry loads and fully validates every enabled course's manifest, published question bank and optional glossary, and reconciles each bank per question against the persistent registry. A single broken course becomes `unavailable` and keeps its learner data untouched, while the other courses keep serving.
 4. The signed-form serializer, the `/health` and `/ready` endpoints, the security headers and the web blueprint are attached.
 5. The Werkzeug development server listens on `http://127.0.0.1:5000` with debug enabled and the reloader disabled.
@@ -1463,9 +1489,9 @@ The Windows `.venv` contains Windows executables and is not reused by WSL. Produ
 ### Production process startup
 
 1. systemd reads `/etc/systemd/system/mcq-template.service`.
-2. systemd reads `MCQ_SECRET_KEY` from the root-owned `/etc/mcq-template/mcq-template.env` without exposing it in the repository.
+2. systemd reads `MCQ_SECRET_KEY` from the root-owned `/etc/mcq-template/mcq-template.env` without exposing it in the repository. The same file may declare `MCQ_ENV=production` (recommended, so the intent is visible) and `MCQ_SESSION_COOKIE_SECURE` — but only as `true`: a `false` there is refused at startup, because a production downgrade has to be a code-level decision.
 3. systemd changes to the project root and executes `.venv-prod/bin/gunicorn --config gunicorn.conf.py wsgi:app` as `fangsihan`.
-4. `wsgi.py` rejects a missing production secret, calls `create_app()` with debug/testing disabled, and applies one-layer `ProxyFix`.
+4. `wsgi.py` rejects a missing production secret, declares `MCQ_ENV=production`, calls `create_app()` with debug/testing disabled and a Secure session cookie, and applies one-layer `ProxyFix`. If `instance/mcq.db` still needs a schema migration, the worker takes and verifies a timestamped backup first and aborts if that backup fails.
 5. Each of the two Gunicorn workers discovers the course catalogue, validates and loads every enabled course's manifest, published question bank and optional glossary, initializes/checks the SQLite schema, and builds its own immutable per-course services and repositories.
 6. Gunicorn listens only on `127.0.0.1:8001`.
 7. Nginx listens only on the loopback address (`127.0.0.1:8080` and `[::1]:8080`) and proxies HTTP requests to Gunicorn.

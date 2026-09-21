@@ -249,6 +249,8 @@ courses/<course_id>/
 └── .publish.lock                # 发布锁，由 publish_course.py 维护
 ```
 
+`python run.py` 以 `MCQ_ENV=development` 启动，因此开发默认值是：Session Cookie 不需要 HTTPS（纯 `http://127.0.0.1:5000` 可以登录并保持会话），遇到需要迁移的旧数据库时会先自动生成并校验一份带时间戳的备份再迁移。生产入口 `wsgi.py` 则声明 `MCQ_ENV=production`：Secure Cookie，并要求任何启动迁移都先有备份。
+
 - `*_candidate.json` 是**默认输入**：`check_*.py` 与 `publish_course.py` 在不传文件路径时读取它们。
 - `versions/…`（以及 plain-file 布局下 manifest 直接指向的 `questions.json` / `glossary.json`）是**已发布内容**，由 worker 读取，不要手工原地编辑。
 - 如果 manifest 已指向 `versions/…`，目录根部的 `questions.json` / `glossary.json` 就不再被任何进程读取，编辑它不会生效。
@@ -542,6 +544,8 @@ fi
 ```
 
 页面时间与 Dashboard 趋势日期默认跟随服务器本地时区；如果 WSL 系统时区不是本地时区，可在同一个 env 文件中追加 `MCQ_DISPLAY_TIMEZONE=Asia/Shanghai` 显式指定。
+
+生产环境建议再追加一行 `MCQ_ENV=production`。`wsgi.py` 会自己 `setdefault` 这个值，写进 env 文件只是让 systemd 的意图更明确：它决定 Secure Session Cookie 以及“启动迁移前必须先生成并校验备份”的默认行为。**不要**在 env 文件中设置 `MCQ_SESSION_COOKIE_SECURE=false`：生产环境会拒绝启动（该开关只能在入口代码里显式关闭）。
 
 ### systemd 与 Nginx 配置
 
