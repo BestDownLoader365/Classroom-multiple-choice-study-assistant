@@ -23,6 +23,14 @@ The candidate is resolved in this order (``--help`` shows the same default):
 Deleting the working copy therefore restores the old "re-check what is deployed"
 behaviour, and ``--published`` makes that explicit while a candidate exists.
 
+``main()`` also takes the candidate as a **frozen in-memory payload**
+(``main(argv, payload=...)``), which is how ``publish_course.py`` runs this gate:
+that command freezes the candidate bytes once, hands them here and archives those
+same bytes, so this report can only ever describe the revision that gets
+published.  The positional path keeps its whole meaning — it is still resolved,
+still labelled in the report, still what ``--published`` conflicts with — but it
+is not read again while a payload is supplied.
+
 A brand-new course cannot be named by ``--course`` before it exists:
 ``courses/<course_id>/course.json`` is what declares a course, and
 ``publish_course.py --add`` is what writes it (``--add`` runs the same schema
@@ -69,6 +77,7 @@ data-loss-free.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -635,7 +644,36 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, payload: bytes | None = None) -> int:
+    """Public CLI entry point; :func:`_run_check` holds the body.
+
+    ``payload`` is the frozen, in-memory form of the candidate ``argv`` names:
+    ``publish_course.py`` freezes that file once, passes those bytes here and
+    archives the same bytes, so this gate validates exactly what gets published.
+    The application's loaders read files, so the payload is materialised into a
+    private temporary file for the duration of the call; neither the maintainer's
+    path nor anything under a course directory is read or written by it.  Without
+    a payload the public CLI, its report and every exit code are unchanged.
+    """
+    if payload is None:
+        return _run_check(argv)
+    with tempfile.TemporaryDirectory() as directory:
+        frozen = Path(directory) / "questions.json"
+        frozen.write_bytes(payload)
+        return _run_check(
+            argv,
+            frozen_candidate=frozen,
+            frozen_digest=hashlib.sha256(payload).hexdigest(),
+        )
+
+
+def _run_check(
+    argv: list[str] | None = None,
+    *,
+    frozen_candidate: Path | None = None,
+    frozen_digest: str | None = None,
+) -> int:
+    """Resolve, validate and diff the bank of one course (the body of :func:`main`)."""
     args = build_parser().parse_args(argv)
     if args.published and args.candidate is not None:
         print(
@@ -653,8 +691,18 @@ def main(argv: list[str] | None = None) -> int:
     candidate, source = candidate_file_for(args, definition)
     print(f"课程 (course_id): {course_id} [{definition.layout}]")
     print(f"题库文件 ({CANDIDATE_SOURCES[source]}): {candidate}")
+    read_path = candidate
+    if frozen_candidate is not None:
+        # The line above says *where* the content came from; the digest below says
+        # *which* bytes are validated, and they are the bytes the caller
+        # publishes.  The named path is deliberately not read again.
+        read_path = frozen_candidate
+        print(
+            "本次校验的字节：调用方冻结的 payload "
+            f"sha256={frozen_digest}（上面那个路径仅作标示，未重新读取）"
+        )
 
-    loader = QuestionLoader(candidate)
+    loader = QuestionLoader(read_path)
     try:
         questions = loader.load()
     except QuestionBankError as exc:
@@ -673,7 +721,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"当前 generation：{generation}")
     if args.simulate and args.db.is_file():
         try:
-            simulated_generation = simulate(args.db, candidate, definition)
+            simulated_generation = simulate(args.db, read_path, definition)
         except (CourseLoadError, ScriptError) as exc:
             print(f"模拟失败：\n{exc}", file=sys.stderr)
             return EXIT_UNRESOLVABLE

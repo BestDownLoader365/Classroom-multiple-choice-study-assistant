@@ -458,7 +458,7 @@ manifest 布局下，单个内容类型的切换是原子的：冻结候选字�
 
 - 在任一设备重新开始某种练习，其他设备也会使用该模式的新进度；重置全部错题会同时清除该账号在当前课程的错题纠正状态和薄弱知识点状态，并结束各设备上的错题巩固，但保留正常练习（含 coverage 状态）与答题历史。
 - 如果提示答题页面已过期（课程或题库版本已更新），在同一设备重新进入练习即可继续；旧页面提交不会被猜测到其他课程，而是零写入地拒绝。
-- 升级应用后需要重启程序。数据库布局由 `app/repositories/schema_migrations.py` 版本化维护：当前 `schema_version = 2`（多课程命名空间），升级时在**一个 `BEGIN IMMEDIATE` 事务**内重建表、逐行复制、按字段校验、替换；`BEGIN IMMEDIATE` 内部的任何失败都会回滚，重复执行结果一致。注意 `PRAGMA foreign_key_check` 的完整父子检查发生在 `COMMIT` **之后**：因此“事务内失败可回滚”与“提交后外键检查发现问题”是两件事，后者不能再说成刚才的事务被回滚。已有账号、attempts 与 wrong questions 都会保留；已有错题按实时 `chapter_ids` 初始化为 0/2 的薄弱知识点。细节见 [技术架构说明](docs/ARCHITECTURE.md) 第 11 节与 [多课程迁移与回滚手册](docs/MULTI_COURSE_MIGRATION.md)。
+- 升级应用后需要重启程序。数据库布局由 `app/repositories/schema_migrations.py` 版本化维护：当前 `schema_version = 2`（多课程命名空间），升级时在**一个 `BEGIN IMMEDIATE` 事务**内重建表、逐行复制、按字段校验、替换，并在提交前做完整的 `PRAGMA foreign_key_check` 父子检查。事务内部的任何失败（包括该检查）都会回滚，数据库保持未迁移，因此报错里的 “No data was changed” 是准确的；重复执行结果一致。已有账号、attempts 与 wrong questions 都会保留；已有错题按实时 `chapter_ids` 初始化为 0/2 的薄弱知识点。细节见 [技术架构说明](docs/ARCHITECTURE.md) 第 11 节与 [多课程迁移与回滚手册](docs/MULTI_COURSE_MIGRATION.md)。
 - 应用启动时**会**在真正需要迁移时先生成并校验一份带时间戳的备份（SQLite 在线备份 API + `PRAGMA quick_check` + 原子发布），备份失败即中止启动；开发、生产与测试环境默认都是这个行为，未声明 `MCQ_ENV` 时则**拒绝**自动迁移。生产环境仍建议按迁移手册的“停服务 → 备份 → `migrate_courses.py --dry-run` → 正式迁移 → 校验 → 启动”顺序操作，以便在动手前先看到完整的检查报告。
 - 旧 Normal progress 缺少 fairness 字段时，会在下一次新建 round 时自动初始化。
 - 缺少新 role metadata 的旧未完成 Review progress 无法安全转换，只会清除该 Review round，不删除错题、薄弱状态、attempt history、Normal progress 或账号。
@@ -765,7 +765,7 @@ Local HTTP URL: http://127.0.0.1:8080
 | `production` / `development` / `testing` | 先创建并校验 `mcq.db.bak-<UTC 时间戳>`（SQLite 在线备份 API + `PRAGMA quick_check` + 原子发布），成功后才在单个事务里迁移 |
 | 未设置（未知） | **拒绝启动**，打印显式迁移命令（安全默认） |
 
-* **备份失败即中止启动**：迁移根本不会开始，数据库保持未迁移；`BEGIN IMMEDIATE` 事务内部的失败会回滚（并留下那份已校验的备份副本，可解释、可恢复）；而提交之后的完整 `PRAGMA foreign_key_check` 若发现问题，已经不能再回滚——它是提交后的独立校验步骤，语义与事务内失败不同。
+* **备份失败即中止启动**：迁移根本不会开始，数据库保持未迁移；`BEGIN IMMEDIATE` 事务内部的任何失败（包括事务内、`COMMIT` 之前的完整 `PRAGMA foreign_key_check`）都会回滚（并留下那份已校验的备份副本，可解释、可恢复），数据库保持未迁移，报错里的 “No data was changed” 因此是真的。索引创建在提交之后进行，它是幂等的 `CREATE INDEX IF NOT EXISTS`、不校验数据：失败只让布局暂时缺少索引，一致性不受影响，下次启动会重建。
 * 并发启动（多 worker）通过 `mcq.db.migrate.lock` 串行化决策，只会产生一份备份。
 * 想固定行为可用 `MCQ_AUTO_MIGRATE=refuse|backup-and-migrate|migrate`；`migrate` 在 `production` 下被禁止（生产启动必须自己生成并校验备份）。
 

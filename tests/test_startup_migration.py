@@ -24,8 +24,7 @@ from app.config import (
     McqEnvironment,
     resolve_startup_migration_policy,
 )
-from app.repositories import Database
-from app.repositories import database_backup
+from app.repositories import Database, database_backup, schema_migrations
 from app.repositories.database_backup import BackupError, timestamped_backup
 from app.repositories.schema_migrations import (
     LEGACY_COURSE_KEY,
@@ -34,6 +33,7 @@ from app.repositories.schema_migrations import (
     STAGE_BEFORE_COMMIT,
     SCHEMA_VERSION_KEY,
     STAGE_AFTER_CREATE,
+    SchemaMigrationError,
     StartupMigrationPolicy,
     StartupMigrationRefused,
     ensure_schema,
@@ -348,6 +348,48 @@ def test_crash_right_after_the_backup_is_recoverable(tmp_path):
 
     info = ensure_schema(database, policy=StartupMigrationPolicy.BACKUP_AND_MIGRATE)
     assert info.migrated is True
+
+
+def test_full_foreign_key_check_runs_inside_the_transaction(tmp_path, monkeypatch):
+    """A violation the field-level validation cannot see still rolls back.
+
+    Every rebuilt row references the permanent legacy ``courses`` row, so
+    dropping that parent inside the transaction models the parent/child
+    violation the *full* check exists for.  It is also exactly the kind of
+    finding that used to be reported *after* ``COMMIT`` — with a message claiming
+    "No data was changed" while the rebuilt layout was already durable.
+    """
+    database = _legacy_copy(tmp_path)
+    before = _inventory(database)
+    describe = schema_migrations._ensure_course_row
+
+    def drop_the_parent(connection, course_id, **kwargs):  # noqa: ANN001
+        describe(connection, course_id, **kwargs)
+        connection.execute("DELETE FROM courses")
+
+    monkeypatch.setattr(schema_migrations, "_ensure_course_row", drop_the_parent)
+
+    with pytest.raises(SchemaMigrationError) as failure:
+        ensure_schema(database, policy=StartupMigrationPolicy.BACKUP_AND_MIGRATE)
+
+    message = str(failure.value)
+    assert "Foreign key check failed" in message
+    assert "No data was changed" in message
+    # That claim is now a fact, not a guess: the check ran before COMMIT, so the
+    # rollback left the database exactly as it was, still un-migrated.
+    assert _inventory(database) == before
+    assert _schema_version(database) is None
+    assert probe_schema(database).needs_migration is True
+
+    # Repairing the parent row deliberately, then re-running, is lossless.
+    monkeypatch.setattr(schema_migrations, "_ensure_course_row", describe)
+    info = ensure_schema(database, policy=StartupMigrationPolicy.BACKUP_AND_MIGRATE)
+    assert info.migrated is True
+    assert _schema_version(database) == str(SCHEMA_VERSION)
+    migrated_tables, migrated_counts = _inventory(database)
+    assert len(migrated_tables) > len(before[0])
+    for table, count in before[1].items():
+        assert migrated_counts[table] == count
 
 
 def test_migration_is_idempotent_across_repeated_starts(tmp_path):

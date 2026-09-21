@@ -419,7 +419,7 @@ python scripts/publish_course.py --course physical_design
   切换成功而术语表步骤失败（此时命令以非 0 退出，但题库已经发布）；
 * 因此更稳妥的做法是**先分别完成两次只读预检**（`check_question_bank.py` 与 `check_glossary.py`），确认都通过；
   需要清晰失败边界时按内容类型拆成两条命令发布；
-* 单个内容类型的 manifest 切换本身是原子的：候选字节被读取并冻结一次，校验、归档与最终写入 `versions/<sha256>/` 都使用这份冻结 payload，最后用一次 `os.replace` 切换 manifest；
+* 单个内容类型的 manifest 切换本身是原子的：候选字节被读取并冻结一次，基础 schema 校验、默认预检、归档与最终写入 `versions/<sha256>/` 都使用这份冻结 payload（预检通过各脚本的“内存 payload 入口”拿到字节，不再按路径重新读文件），最后用一次 `os.replace` 切换 manifest；
 * **术语表预检的语料取决于这次命令发布了什么**：只传 `--glossary` 时，内置预检用**当前 manifest 指向的已发布题库**作为 corpus；同时传 `--questions` 时，用本次 `--questions` 参数指定的那份题库。因此“手工 `check_glossary.py` 的检查对象”与“发布门禁的检查对象”不一定相同（手工执行时默认优先使用题库 candidate + 术语表 candidate），详见 7.8 节；
 * 术语表不参与 generation：单独发布术语表不会推进 generation、不会让 worker stale，但**已运行的 worker 仍在使用旧的内存术语表，必须重启才能看到新内容**，而且 `/ready` 很可能一直是 200，不能用它证明术语表已重新加载。
 
@@ -610,7 +610,7 @@ python scripts/publish_course.py --course physical_design --questions path/to/ot
 manifest → fsync 目录 → 版本清理（见 7.11）。它输出 `published, pending worker activation`，**不会**自行 bump
 generation，也**不**声称文件系统发布与数据库激活是同一个事务。
 
-> **默认的题库预检不是字节级冻结的。** 默认外部预检会调用 `check_question_bank.py` 并把候选**路径**传给它，由它重新按路径读文件；术语表的内置离线预检同样按路径重新读取 glossary 与 corpus。因此最终写入 `versions/<sha256>/` 的始终是 `publish_course.py` 最初冻结的 payload，但“外部预检看到的内容”与“最终归档的内容”在候选文件被并发修改时**可能不是同一份字节**——当前代码无法给出“预检与归档必然是同一份字节”的强保证（详见第 9 节限制）。发布期间不要并发修改候选文件。
+> **预检与归档共享同一份冻结 payload。** `publish_course.py` 先把候选文件一次性读成 payload，基础 schema 校验、默认外部预检与最终写入 `versions/<sha256>/` 都作用于这份字节：预检通过 `check_question_bank.py` 的“内存 payload 入口”接收它，**不会**再按候选路径重新读文件；候选路径仍然会传给预检，但只用于在报告里标明内容来源，命令与预检都会打印这份 payload 的 `sha256`。术语表侧同样如此：`check_glossary.py` 的离线预检同时接收冻结的 glossary 与冻结的 corpus——本次同时传 `--questions` 时 corpus 就是本次发布的题库 payload，只传 `--glossary` 时则把当前 manifest 指向的已发布题库**读取一次并冻结**后传入。因此发布期间并发修改候选文件，也不会出现“预检看到的内容 ≠ 归档的内容”。
 
 `--course` 对本命令是必填；多课程部署请始终显式指定。
 
@@ -781,7 +781,7 @@ generation → 旧 worker 才开始 learner 事务"这一竞态以**零 learner 
   [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)）。
 * 内容发布（文件系统）与数据库激活（worker 启动时的 reconciliation）**不是同一个事务**：`publish_course.py`
   只报告 `published, pending worker activation`，从不会自行推进 generation。
-* 候选 payload 只被冻结一次，最终写入 `versions/<sha256>/` 与基础 schema 校验都使用它；但默认的**外部预检**（`check_question_bank.py`）与术语表的内置离线预检都是按**路径**重新读取文件的，因此当前代码**无法**保证“预检看到的字节”与“最终归档的字节”必然相同——发布期间不要并发修改候选文件。这是实现层面的已知限制，不能靠文档消除。
+* 候选 payload 只被冻结一次，基础 schema 校验、默认的**外部预检**（`check_question_bank.py`、术语表的离线 `check_glossary.py`，含其 corpus）与最终写入 `versions/<sha256>/` 都使用它：预检通过各自的内存 payload 入口接收字节，**不再**按路径重新读取文件，候选路径只用于在报告中标出来源，因此“预检看到的字节”与“最终归档的字节”必然相同。
 * 没有“跨课程的联合事务”：题库与术语表、多个课程之间都是各自独立的提交；遇到部分失败请按上面的
   失败语义逐项收尾。
 

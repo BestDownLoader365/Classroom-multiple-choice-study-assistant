@@ -210,9 +210,12 @@ def resolve_definition(
 def freeze_candidate(path: Path) -> tuple[bytes, str]:
     """Read a candidate file exactly once and fingerprint those bytes.
 
-    Validation and publication both work on the returned bytes, so a file that
-    changes between the two steps can never publish content that was not the
-    content that was validated.
+    Every later step works on the returned payload, never on the path again:
+    basic schema validation loads it from a private copy, ``publish_course.py``
+    hands the same bytes to the matching gate through that script's in-memory
+    entry point, and the archive writes them to ``versions/<sha256>/``.  A file
+    that changes mid-command therefore cannot make the preflight and the archive
+    disagree — both are the same frozen revision.
     """
     if not path.is_file():
         raise ToolingError(f"Candidate file not found: {path}")

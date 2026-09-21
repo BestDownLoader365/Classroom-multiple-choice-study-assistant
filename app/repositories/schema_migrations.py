@@ -26,14 +26,22 @@ Transaction shape::
         copy every old row
         field-level validation
         replace the old tables
-        create the indexes
         write schema version + persisted legacy course id
+        PRAGMA foreign_key_check (full parent/child check, before COMMIT)
       COMMIT
-      PRAGMA foreign_key_check (full, after commit)
+      create the indexes (idempotent, retried by the next startup)
 
-Any failure rolls the whole thing back; re-running always reaches the same
-state.  A pre-existing parent/child violation in the old data aborts the
-migration with a report instead of silently dropping rows.
+The full ``PRAGMA foreign_key_check`` deliberately runs *inside* the transaction.
+It is an explicit check, so the connection's ``PRAGMA foreign_keys = OFF`` does
+not affect it, and running it before ``COMMIT`` is what makes the failure report
+true: the caller rolls back, so "No data was changed" is a fact and not a claim.
+A fresh database takes no transaction at all — it has nothing to copy and nothing
+to check, so :func:`_create_current_schema` writes the same empty layout through
+the same DDL and every statement autocommits.
+
+Any failure inside the transaction rolls the whole thing back; re-running always
+reaches the same state.  A pre-existing parent/child violation in the old data
+aborts the migration with a report instead of silently dropping rows.
 """
 
 import os
@@ -272,6 +280,13 @@ def ensure_schema(
         # a transaction, so it is switched off here, before BEGIN IMMEDIATE.
         connection.execute("PRAGMA foreign_keys = OFF")
         if not _table_names(connection):
+            # A fresh database deliberately returns here: there is nothing to
+            # migrate and nothing to check, because the tables were just created
+            # empty by the very DDL the migration path uses, so the full
+            # parent/child check would be vacuous.  Every statement autocommits
+            # (``isolation_level=None``); a crash halfway through would leave some
+            # tables behind, and the next startup heals that through
+            # ``_ensure_support_tables``.
             _create_current_schema(connection)
             _write_meta(connection, SCHEMA_VERSION_KEY, str(SCHEMA_VERSION))
             _write_meta(connection, LEGACY_COURSE_KEY, legacy_course_id)
@@ -318,6 +333,9 @@ def _migrate_existing(
     Reaching here after a sibling migrated first means the version check inside
     the transaction simply finds nothing to do; the ``_ensure_support_tables``
     branch still brings a same-version database up to the full current layout.
+
+    The full parent/child check and the ``COMMIT`` live in the same transaction,
+    so a violation that check reports leaves the database exactly as it was.
     """
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -331,12 +349,21 @@ def _migrate_existing(
             migrated = True
         else:
             _ensure_support_tables(connection, legacy_course_id)
+        # The full parent/child check belongs inside the transaction: it is an
+        # explicit check (``PRAGMA foreign_keys = OFF`` does not affect it) and
+        # running it before COMMIT is what makes its "No data was changed" report
+        # true, because the caller then rolls the layout back.
+        _assert_foreign_keys(connection)
         _fire(failpoint, STAGE_BEFORE_COMMIT)
         connection.execute("COMMIT")
     except BaseException:
         connection.execute("ROLLBACK")
         raise
-    _assert_foreign_keys(connection)
+    # Index creation stays after the commit: ``CREATE INDEX IF NOT EXISTS`` is
+    # idempotent and validates nothing, so keeping it out of the write
+    # transaction shortens the exclusive lock the copy already holds.  If it ever
+    # fails, the layout is still consistent and the next startup retries it,
+    # because every path through this function ends up calling it.
     _create_indexes(connection)
     stored_legacy = read_meta(connection, LEGACY_COURSE_KEY) or legacy_course_id
     return SchemaInfo(
@@ -707,7 +734,14 @@ def _read_schema_version(connection: sqlite3.Connection) -> int | None:
 
 
 def _assert_foreign_keys(connection: sqlite3.Connection) -> None:
-    """Run the full parent/child check on the finished layout."""
+    """Run the full parent/child check on the rebuilt layout, before COMMIT.
+
+    ``PRAGMA foreign_key_check`` is an explicit check, so the connection-level
+    ``PRAGMA foreign_keys = OFF`` does not affect it.  The caller invokes it
+    inside the migration transaction, and that is what makes the message below
+    true: a violation rolls the layout back, and the offending rows are still
+    there to be repaired deliberately.
+    """
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:
         summary = ", ".join(

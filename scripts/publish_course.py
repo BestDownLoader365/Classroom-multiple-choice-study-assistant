@@ -51,7 +51,16 @@ next to the manifest, so the course directory never holds a copy that no
 manifest path points at.  The command **re-runs the matching check script by
 default** — ``check_question_bank.py`` against ``--db`` for ``--questions``,
 ``check_glossary.py`` offline for ``--glossary`` — and refuses to switch over
-content that fails it.  ``--skip-preflight`` is the explicit, discouraged escape
+content that fails it.  Those gates are handed the frozen payload through their
+in-memory entry point, never the candidate path, so the bytes a gate validates
+are necessarily the bytes that get archived — a candidate edited while the
+command runs can no longer be preflighted as one revision and published as
+another.  The path is still passed (the report must name where the content came
+from) and both the gate and this command print the frozen digest, so a reader can
+always tell the maintainer's candidate path from the bytes actually validated.
+A glossary publish freezes its corpus the same way: the frozen question bank of
+this run when ``--questions`` is part of it, otherwise the deployed bank, read
+exactly once here.  ``--skip-preflight`` is the explicit, discouraged escape
 hatch.  A brand-new course created with ``--add`` has no history to diff, so its
 question bank is gated by schema validation only.  Nothing here restarts a
 worker or bumps a generation.
@@ -252,16 +261,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_glossary_check(questions_path: Path, glossary_path: Path) -> int:
+def _run_glossary_check(
+    questions_path: Path,
+    glossary_path: Path,
+    *,
+    questions_payload: bytes | None = None,
+    glossary_payload: bytes | None = None,
+) -> int:
     """Run ``check_glossary.py`` offline over a candidate (questions, glossary) pair.
 
     A non-zero exit means the glossary is invalid, so the caller refuses to
     publish: the documented flow is check first, publish only when it passes.
+    Both payloads are the bytes this command froze, so the gate validates exactly
+    what it archives; passing ``None`` falls back to the paths, which only the
+    paths themselves then describe.
     """
     from scripts.check_glossary import main as check_main
 
     return check_main(
-        ["--questions", str(questions_path), "--glossary", str(glossary_path)]
+        ["--questions", str(questions_path), "--glossary", str(glossary_path)],
+        questions_payload=questions_payload,
+        glossary_payload=glossary_payload,
     )
 
 
@@ -380,8 +400,18 @@ def _add_course(args: argparse.Namespace) -> int:
         print(f"候选内容校验失败，未创建课程：\n{exc}", file=sys.stderr)
         return 1
     if args.glossary is not None and not args.skip_preflight:
+        # Both files go to the gate as the frozen payloads archived below, so
+        # `--add` can never create a course from bytes the gate did not see.
+        print(
+            f"预检输入：冻结 payload（题库 sha256={digest}、"
+            f"术语表 sha256={hashlib.sha256(glossary_payload).hexdigest()}）；"
+            "候选路径仅作标示，不会被重新读取"
+        )
         exit_code = _run_glossary_check(
-            args.questions.resolve(), args.glossary.resolve()
+            args.questions.resolve(),
+            args.glossary.resolve(),
+            questions_payload=payload,
+            glossary_payload=glossary_payload,
         )
         if exit_code != 0:
             print(
@@ -527,6 +557,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     published_any = False
+    frozen_questions: bytes | None = None
     if args.questions is not None:
         try:
             payload, digest = freeze_candidate(args.questions.resolve())
@@ -534,9 +565,19 @@ def main(argv: list[str] | None = None) -> int:
         except (ToolingError, OSError) as exc:
             print(f"候选题库校验失败，未替换任何文件：\n{exc}", file=sys.stderr)
             return 1
+        frozen_questions = payload
         if not args.skip_preflight:
             from scripts.check_question_bank import main as check_main
 
+            # The gate gets the frozen payload, not the candidate path: handed the
+            # path it would read the file itself, so a candidate edited while this
+            # command runs could be validated as one revision and archived as
+            # another.  The path is still passed so its report names where the
+            # content came from, and both sides print the digest below.
+            print(
+                f"预检输入：冻结 payload sha256={digest}"
+                f"（{args.questions.resolve()} 仅作标示，不会被重新读取）"
+            )
             exit_code = check_main(
                 [
                     str(args.questions),
@@ -550,7 +591,8 @@ def main(argv: list[str] | None = None) -> int:
                     str(args.glossary_file),
                     "--db",
                     str(args.db),
-                ]
+                ],
+                payload=payload,
             )
             if exit_code != 0:
                 # Forwarded verbatim: see the "Exit codes" section of the module
@@ -583,13 +625,33 @@ def main(argv: list[str] | None = None) -> int:
         if not args.skip_preflight:
             # The corpus is the bank this run just published (or the currently
             # deployed one when only a glossary was named), never an unrelated
-            # file that happens to sit in the course directory.
-            corpus = (
-                args.questions.resolve()
-                if args.questions is not None
-                else definition.questions_path
+            # file that happens to sit in the course directory.  Both sides reach
+            # the gate as frozen payloads: the bank of this run is the payload
+            # archived below, and the deployed bank is read exactly once, here.
+            if args.questions is not None:
+                corpus = args.questions.resolve()
+                corpus_payload = frozen_questions
+            else:
+                corpus = definition.questions_path
+                try:
+                    corpus_payload, corpus_digest = freeze_candidate(corpus)
+                except (ToolingError, OSError) as exc:
+                    print(f"语料题库无法冻结，未发布任何内容：\n{exc}", file=sys.stderr)
+                    return 1
+                print(
+                    f"术语表预检语料：已发布的题库 {corpus} "
+                    f"sha256={corpus_digest}（本次只读取并冻结一次）"
+                )
+            print(
+                f"预检输入：冻结 payload（术语表 sha256={digest}）；"
+                f"{args.glossary.resolve()} 仅作标示，不会被重新读取"
             )
-            exit_code = _run_glossary_check(corpus, args.glossary.resolve())
+            exit_code = _run_glossary_check(
+                corpus,
+                args.glossary.resolve(),
+                questions_payload=corpus_payload,
+                glossary_payload=payload,
+            )
             if exit_code != 0:
                 print(
                     f"\n术语表校验返回 {exit_code}：未发布任何内容。",

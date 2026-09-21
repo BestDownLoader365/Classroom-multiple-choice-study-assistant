@@ -30,6 +30,15 @@ course must be created first (``publish_course.py --add`` writes its
 a course that does not exist yet is still checkable with the explicit
 ``--questions``/``--glossary`` offline mode above.
 
+``main()`` also takes both files as **frozen in-memory payloads**
+(``main(argv, questions_payload=..., glossary_payload=...)``), which is how
+``publish_course.py`` runs this gate: that command freezes the candidate glossary
+— and, when the same run publishes a question bank, freezes the bank it will
+archive — then hands those bytes here, so the coverage this report describes is
+the coverage of the publication.  The paths in ``argv`` keep their whole meaning
+(they are resolved and labelled in the report), but they are not read again while
+a payload is supplied.
+
 Nothing is published by this script.  Run it *before* publishing; the publish
 command (``publish_course.py``) re-runs the matching check by default and refuses
 to switch over content that does not pass it.
@@ -39,9 +48,11 @@ advisory), ``1`` the glossary (or its corpus) fails to load or fails validation.
 """
 
 import argparse
+import hashlib
 import json
 import re
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
@@ -202,7 +213,49 @@ def check_one(questions_path: Path, glossary_path: Path) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    questions_payload: bytes | None = None,
+    glossary_payload: bytes | None = None,
+) -> int:
+    """Public CLI entry point; :func:`_run_check` holds the body.
+
+    ``questions_payload``/``glossary_payload`` are the frozen, in-memory form of
+    the files ``argv`` names: ``publish_course.py`` freezes the candidate glossary
+    (and the question bank it is publishing in the same run) once, passes those
+    bytes here and archives them, so this gate can only ever describe the
+    publication.  The application's loaders read files, so a payload is
+    materialised into a private temporary file for the duration of the call;
+    neither the maintainer's paths nor anything under a course directory is read
+    or written by it.  Without a payload the public CLI, its report and every exit
+    code are unchanged.
+    """
+    if questions_payload is None and glossary_payload is None:
+        return _run_check(argv)
+    with tempfile.TemporaryDirectory() as directory:
+        frozen_questions: Path | None = None
+        frozen_glossary: Path | None = None
+        if questions_payload is not None:
+            frozen_questions = Path(directory) / "questions.json"
+            frozen_questions.write_bytes(questions_payload)
+        if glossary_payload is not None:
+            frozen_glossary = Path(directory) / "glossary.json"
+            frozen_glossary.write_bytes(glossary_payload)
+        return _run_check(
+            argv,
+            frozen_questions=frozen_questions,
+            frozen_glossary=frozen_glossary,
+        )
+
+
+def _run_check(
+    argv: list[str] | None = None,
+    *,
+    frozen_questions: Path | None = None,
+    frozen_glossary: Path | None = None,
+) -> int:
+    """Check one or more courses (the body of :func:`main`)."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--course",
@@ -259,9 +312,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.questions is not None or args.glossary is not None:
         # Explicit offline mode: no catalogue, no database, no registry writes.
-        questions = (args.questions or args.question_file).resolve()
-        glossary = (args.glossary or PROJECT_ROOT / "glossary.json").resolve()
-        print(f"offline: {questions} + {glossary}")
+        questions_label = (args.questions or args.question_file).resolve()
+        glossary_label = (args.glossary or PROJECT_ROOT / "glossary.json").resolve()
+        print(f"offline: {questions_label} + {glossary_label}")
+        # A caller that froze the content hands the bytes in: the labels above
+        # then only say where the bytes came from, and the digests below say what
+        # is really being validated (the very bytes that caller publishes).
+        questions = frozen_questions or questions_label
+        glossary = frozen_glossary or glossary_label
+        for name, label, frozen in (
+            ("语料", questions_label, frozen_questions),
+            ("术语表", glossary_label, frozen_glossary),
+        ):
+            if frozen is None:
+                continue
+            print(
+                f"{name}：调用方冻结的 payload "
+                f"sha256={hashlib.sha256(frozen.read_bytes()).hexdigest()}"
+                f"（{label} 仅作标示，未重新读取）"
+            )
         return check_one(questions, glossary)
 
     loader = build_loader(args.courses_dir, args.question_file, args.question_file.parent / "glossary.json")

@@ -98,7 +98,16 @@ def test_publish_course_forwards_each_preflight_code_unchanged(
     capsys.readouterr()
 
     forwarded: list[int] = []
-    monkeypatch.setattr(check_question_bank, "main", lambda argv: forwarded.pop(0))
+    seen_payloads: list[bytes] = []
+
+    def fake_preflight(argv, *, payload=None):  # noqa: ANN001 - test double
+        # publish_course.py must hand the gate its frozen payload, not just a
+        # path, so record what it passed and answer with the queued verdict.
+        assert isinstance(payload, bytes)
+        seen_payloads.append(payload)
+        return forwarded.pop(0)
+
+    monkeypatch.setattr(check_question_bank, "main", fake_preflight)
 
     for code in (
         check_question_bank.EXIT_BLOCKING,
@@ -134,6 +143,14 @@ def test_publish_course_forwards_each_preflight_code_unchanged(
         )
         == publish_course.EXIT_OK
     )
+    # Every call carried the frozen candidate bytes, and the archive is exactly
+    # the payload the gate accepted.
+    assert seen_payloads == [candidate.read_bytes()] * 4
+    published = json.loads(
+        (courses_dir / "course_a" / "course.json").read_text(encoding="utf-8")
+    )
+    archived = courses_dir / "course_a" / published["questions"]
+    assert archived.read_bytes() == candidate.read_bytes()
     capsys.readouterr()
 
 

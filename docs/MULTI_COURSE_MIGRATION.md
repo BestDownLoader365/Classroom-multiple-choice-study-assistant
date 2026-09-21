@@ -21,13 +21,13 @@ BEGIN IMMEDIATE
   复制所有旧行
   字段级校验（行数一致、course_id 非空、父子关系完整）
   用新表替换旧表
-  建立索引
   写入 schema_version 与持久化的 legacy_course_id
+  PRAGMA foreign_key_check          （完整父子检查，仍在事务内、COMMIT 之前）
 COMMIT
-PRAGMA foreign_key_check          （提交后做完整父子检查）
+建立索引                               （幂等的 CREATE INDEX IF NOT EXISTS，下次启动会重试）
 ```
 
-只有 `BEGIN IMMEDIATE` **内部**的失败才会整体回滚；而提交后的完整 `PRAGMA foreign_key_check` 属于事务之外的独立检查，它发现的问题不会被“刚才的事务”自动撤销。重复执行总能得到同一个结果。
+`BEGIN IMMEDIATE` **内部**的任何失败——包括事务内的完整 `PRAGMA foreign_key_check`——都会整体回滚：它报告的问题不会留下任何已提交的改动，报错信息里的 “No data was changed” 因此是准确的（`PRAGMA foreign_keys = OFF` 不影响这个显式检查）。重复执行总能得到同一个结果。
 
 ### Schema 变化
 
@@ -96,7 +96,7 @@ retention 是**独立于迁移**的一步（`Database.enforce_attempt_retention(
 
 `MCQ_AUTO_MIGRATE` 可显式覆盖为 `refuse` / `backup-and-migrate` / `migrate`；其中 `migrate`（“调用方已自行备份”）不允许在 `MCQ_ENV=production` 下使用——生产启动路径必须自己生成并校验备份。
 
-**安全保证**：备份失败（磁盘满、权限、校验不通过）会**直接中止启动**，数据库保持未迁移，迁移根本不会开始；`BEGIN IMMEDIATE` **事务内部**的失败会回滚，此时磁盘上留有一份已校验的旧库副本，可解释、可恢复。提交之后的完整 `PRAGMA foreign_key_check` 是在事务之外执行的独立检查，它报告的问题**不会**再回滚已提交的迁移。并发启动时通过数据库旁的 `mcq.db.migrate.lock`（`fcntl.flock`）串行化“备份 + 迁移”决策，N 个 worker 只会产生一份备份。
+**安全保证**：备份失败（磁盘满、权限、校验不通过）会**直接中止启动**，数据库保持未迁移，迁移根本不会开始；`BEGIN IMMEDIATE` **事务内部**的任何失败（包括事务内、`COMMIT` 之前的完整 `PRAGMA foreign_key_check`）都会回滚，此时数据库仍是未迁移的旧布局，磁盘上还留有一份已校验的旧库副本，可解释、可恢复；索引创建留在提交之后，它是幂等的 `CREATE INDEX IF NOT EXISTS`、不校验任何数据，失败也只是让布局暂时缺少索引，布局本身仍然一致，下次启动会重建。并发启动时通过数据库旁的 `mcq.db.migrate.lock`（`fcntl.flock`）串行化“备份 + 迁移”决策，N 个 worker 只会产生一份备份。
 
 生产环境的推荐顺序仍然是“显式迁移”，因为这样你会在动手前看到完整的检查报告：
 

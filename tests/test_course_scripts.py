@@ -543,6 +543,255 @@ def test_publish_course_add_validates_the_glossary_before_writing(tmp_path, caps
     capsys.readouterr()
 
 
+# ------------------------- frozen payload: the gate and the archive agree
+
+
+def test_question_preflight_gets_the_frozen_payload_not_the_candidate_path(
+    world, tmp_path, monkeypatch, capsys
+):
+    """A candidate edited while the command runs cannot split gate from archive.
+
+    ``publish_course.py`` freezes the candidate once and hands *those bytes* to
+    ``check_question_bank.py``, so the revision the gate reports on and the
+    revision written to ``versions/<sha256>/`` are necessarily the same.
+    """
+    from scripts import check_question_bank
+
+    app, courses_dir, database, _digest = world
+    del app
+    candidate = courses_dir / A / "questions_candidate.json"
+    write_json(candidate, _with_extra_question("a"))
+    frozen = candidate.read_bytes()
+    frozen_digest = hashlib.sha256(frozen).hexdigest()
+    # The revision that lands in the file while the command runs is valid and
+    # different: it adds no question, it rewrites q001.
+    concurrent = course_bank(("a", "alpha"))
+    concurrent["questions"][0]["text"] = "Edited while publishing"
+
+    seen: list[bytes] = []
+    gate = check_question_bank.main
+
+    def swap_then_check(argv, **kwargs):  # noqa: ANN001 - test double
+        write_json(candidate, concurrent)
+        seen.append(kwargs["payload"])
+        return gate(argv, **kwargs)
+
+    monkeypatch.setattr(check_question_bank, "main", swap_then_check)
+
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                A,
+                "--questions",
+                str(candidate),
+                *cli_common(courses_dir, database),
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    # (b) the gate validated the frozen bytes and says which bytes those were.
+    assert seen == [frozen]
+    assert f"sha256={frozen_digest}" in out
+    # The report describes the frozen revision (q003 is new), not the q001
+    # rewrite the file was swapped to.
+    assert "(new): 1" in out
+    assert "(content-only): 0" in out
+    # (a) the archive is that same frozen revision.
+    manifest = json.loads((courses_dir / A / "course.json").read_text())
+    assert manifest["questions"] == f"versions/{frozen_digest}/questions.json"
+    archived = courses_dir / A / manifest["questions"]
+    assert archived.read_bytes() == seen[0] == frozen
+    # The swapped revision was never published anywhere.
+    assert b"Edited while publishing" not in archived.read_bytes()
+
+
+def test_glossary_preflight_gets_the_frozen_candidate_and_corpus(
+    world, tmp_path, monkeypatch, capsys
+):
+    """Only ``--glossary``: corpus and candidate reach the gate as frozen bytes."""
+    from scripts import check_glossary
+
+    app, courses_dir, database, _digest = world
+    del app
+    # The corpus is the deployed bank this command never publishes, so it is
+    # frozen here once instead of being read again by the gate.
+    corpus = courses_dir / A / "questions.json"
+    corpus_bytes = corpus.read_bytes()
+    corpus_digest = hashlib.sha256(corpus_bytes).hexdigest()
+    candidate = tmp_path / "glossary.json"
+    write_json(candidate, course_glossary("alpha"))
+    frozen = candidate.read_bytes()
+    frozen_digest = hashlib.sha256(frozen).hexdigest()
+    # Four terms on disk against the two that were frozen.
+    concurrent = course_glossary("alpha")
+    concurrent["terms"].extend(course_glossary("beta")["terms"])
+
+    seen: list[dict] = []
+    gate = check_glossary.main
+
+    def swap_then_check(argv, **kwargs):  # noqa: ANN001 - test double
+        write_json(candidate, concurrent)
+        seen.append(kwargs)
+        return gate(argv, **kwargs)
+
+    monkeypatch.setattr(check_glossary, "main", swap_then_check)
+
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                A,
+                "--glossary",
+                str(candidate),
+                *cli_common(courses_dir, database),
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    # (b) both sides of the gate are the frozen bytes.
+    assert seen == [{"questions_payload": corpus_bytes, "glossary_payload": frozen}]
+    assert f"sha256={corpus_digest}" in out
+    assert f"sha256={frozen_digest}" in out
+    # The two-term frozen glossary is what was validated, not the four terms the
+    # file was swapped to.
+    assert "Validated 2 canonical terms" in out
+    # (a) the archive is the frozen candidate.
+    manifest = json.loads((courses_dir / A / "course.json").read_text())
+    assert manifest["glossary"] == f"versions/{frozen_digest}/glossary.json"
+    archived = courses_dir / A / manifest["glossary"]
+    assert archived.read_bytes() == seen[0]["glossary_payload"] == frozen
+    assert b"beta term two" not in archived.read_bytes()
+
+
+def test_glossary_preflight_uses_the_frozen_bank_it_publishes_with_the_glossary(
+    world, tmp_path, monkeypatch, capsys
+):
+    """``--questions`` + ``--glossary``: the corpus is this run's frozen bank."""
+    from scripts import check_glossary
+
+    app, courses_dir, database, _digest = world
+    del app
+    questions = courses_dir / A / "questions_candidate.json"
+    write_json(questions, _with_extra_question("a"))
+    frozen_questions = questions.read_bytes()
+    glossary = tmp_path / "glossary.json"
+    write_json(glossary, course_glossary("alpha"))
+    frozen_glossary = glossary.read_bytes()
+
+    seen: list[dict] = []
+    gate = check_glossary.main
+
+    def swap_then_check(argv, **kwargs):  # noqa: ANN001 - test double
+        # A gate that re-read the paths instead of consuming the payloads would
+        # refuse both files (invalid JSON corpus, unsupported glossary schema),
+        # so this stands in for a concurrent edit that breaks the publication.
+        questions.write_text("{broken", encoding="utf-8")
+        write_json(glossary, {"schema_version": 2, "title": "B", "terms": []})
+        seen.append(kwargs)
+        return gate(argv, **kwargs)
+
+    monkeypatch.setattr(check_glossary, "main", swap_then_check)
+
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                A,
+                "--questions",
+                str(questions),
+                "--glossary",
+                str(glossary),
+                *cli_common(courses_dir, database),
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert seen == [
+        {"questions_payload": frozen_questions, "glossary_payload": frozen_glossary}
+    ]
+    # The frozen pair is what was validated, not the broken files on disk.
+    assert "Validated 2 canonical terms" in out
+    questions_digest = hashlib.sha256(frozen_questions).hexdigest()
+    glossary_digest = hashlib.sha256(frozen_glossary).hexdigest()
+    assert f"sha256={questions_digest}" in out
+    assert f"sha256={glossary_digest}" in out
+    manifest = json.loads((courses_dir / A / "course.json").read_text())
+    assert (courses_dir / A / manifest["questions"]).read_bytes() == frozen_questions
+    assert (courses_dir / A / manifest["glossary"]).read_bytes() == frozen_glossary
+
+
+def test_add_preflight_gets_the_frozen_payloads_it_archives(
+    tmp_path, monkeypatch, capsys
+):
+    """``--add`` gates the very bytes it then archives for both content types."""
+    from scripts import check_glossary
+
+    courses_dir = tmp_path / "courses"
+    target = courses_dir / "physical_design"
+    target.mkdir(parents=True)
+    questions = target / "questions_candidate.json"
+    glossary = target / "glossary_candidate.json"
+    write_json(questions, course_bank())
+    write_json(glossary, course_glossary("alpha"))
+    frozen_questions = questions.read_bytes()
+    frozen_glossary = glossary.read_bytes()
+
+    seen: list[dict] = []
+    gate = check_glossary.main
+
+    def swap_then_check(argv, **kwargs):  # noqa: ANN001 - test double
+        # A gate that re-read the paths would refuse both files (invalid JSON
+        # bank, unsupported glossary schema) even though --add archives the frozen
+        # bytes, so exit 0 below proves it consumed the payloads.
+        questions.write_text("{broken", encoding="utf-8")
+        write_json(glossary, {"schema_version": 2, "title": "B", "terms": []})
+        seen.append(kwargs)
+        return gate(argv, **kwargs)
+
+    monkeypatch.setattr(check_glossary, "main", swap_then_check)
+
+    assert (
+        publish_course_main(
+            [
+                "--course",
+                "physical_design",
+                "--add",
+                "--title",
+                "Physical Design",
+                *cli_common(courses_dir, tmp_path / "mcq.db"),
+            ]
+        )
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    # (b) the gate validated the frozen payloads, and it says so.
+    assert seen == [
+        {"questions_payload": frozen_questions, "glossary_payload": frozen_glossary}
+    ]
+    assert "Validated 2 canonical terms" in out
+    for payload in (frozen_questions, frozen_glossary):
+        assert f"sha256={hashlib.sha256(payload).hexdigest()}" in out
+    # (a) the new course archives exactly the bytes the gate accepted.
+    manifest = json.loads((target / "course.json").read_text())
+    archived_questions = target / manifest["questions"]
+    archived_glossary = target / manifest["glossary"]
+    assert archived_questions.read_bytes() == frozen_questions
+    assert archived_glossary.read_bytes() == frozen_glossary
+    assert b"beta term two" not in archived_glossary.read_bytes()
+    # The candidates stay the working copies; nothing sits next to the manifest
+    # that no manifest path points at.
+    assert not (target / "questions.json").exists()
+    assert not (target / "glossary.json").exists()
+
+
 def test_publish_course_can_add_disable_and_reenable(tmp_path, capsys):
     courses_dir = tmp_path / "courses"
     courses_dir.mkdir(parents=True)
