@@ -39,11 +39,16 @@ migration with a report instead of silently dropping rows.
 import os
 import sqlite3
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 
 from app.models import LEGACY_COURSE_ID
+
+from . import database_backup
+from .database_backup import BackupError, timestamped_backup
 
 #: Schema version of the multi-course layout.
 SCHEMA_VERSION = 2
@@ -64,6 +69,9 @@ STAGE_AFTER_COPY = "after_copy"
 STAGE_BEFORE_REPLACE = "before_replace"
 STAGE_BEFORE_VERSION = "before_version"
 STAGE_BEFORE_COMMIT = "before_commit"
+#: Fired right after a startup backup was written and verified, before the
+#: migration transaction starts.
+STAGE_AFTER_BACKUP = "after_backup"
 
 
 class SchemaMigrationError(RuntimeError):
@@ -74,6 +82,65 @@ class SchemaMigrationError(RuntimeError):
     """
 
 
+class StartupMigrationRefused(SchemaMigrationError):
+    """Raised when the startup path is not allowed to migrate an existing database.
+
+    A refusal is the *point* of the policy: the process may not modify a database
+    whose schema it did not create, unless the deployment said it may (and then
+    only after a verified backup).
+    """
+
+
+class StartupMigrationPolicy(str, Enum):
+    """What a caller allows ``ensure_schema()`` to do to an existing database.
+
+    ``BACKUP_AND_MIGRATE`` is the default because it is strictly safer than the
+    historical behaviour: the database is snapshotted and the snapshot verified
+    before anything is rebuilt, and a failed backup aborts the whole operation.
+    ``REFUSE`` exists for operators who want the explicit CLI step to be the only
+    way an old schema ever changes, and it is what an *undeclared* environment
+    resolves to.
+
+    ``MIGRATE_AFTER_EXTERNAL_BACKUP`` is for callers that already produced and
+    reported a backup in the same process — the migration CLI, which prints the
+    backup path itself.  No application startup path may use it.
+    """
+
+    REFUSE = "refuse"
+    BACKUP_AND_MIGRATE = "backup-and-migrate"
+    MIGRATE_AFTER_EXTERNAL_BACKUP = "migrate-after-external-backup"
+
+
+@dataclass(frozen=True)
+class SchemaProbe:
+    """What a read-only inspection of one database file found.
+
+    ``needs_migration`` is deliberately broader than "the stored version is old":
+    a database whose version is current but that is missing one of
+    :data:`TABLE_BODIES` also needs DDL, and DDL is exactly the operation the
+    backup policy exists for.
+    """
+
+    database_path: Path
+    database_existed: bool
+    schema_version: int | None
+    missing_tables: tuple[str, ...]
+
+    @property
+    def fresh(self) -> bool:
+        """Whether this is a database this build will create from scratch."""
+        return not self.database_existed
+
+    @property
+    def needs_migration(self) -> bool:
+        """Whether the write path would have to change the table layout."""
+        if not self.database_existed:
+            return False
+        if self.schema_version is None or self.schema_version < SCHEMA_VERSION:
+            return True
+        return bool(self.missing_tables)
+
+
 @dataclass(frozen=True)
 class SchemaInfo:
     """The database layout this process found (and possibly produced)."""
@@ -82,20 +149,120 @@ class SchemaInfo:
     legacy_course_id: str
     database_existed: bool
     migrated: bool
+    #: The verified snapshot taken before the migration, when one was needed.
+    backup_path: Path | None = None
 
+
+def probe_schema(database_path: Path) -> SchemaProbe:
+    """Inspect a database file read-only and report whether it needs DDL.
+
+    Split out of :func:`ensure_schema` so a caller can decide *before* opening a
+    writable connection — and so the decision that triggers a backup can never
+    disagree with the decision that performs the migration.  Read-only by
+    construction (``mode=ro``) and cheap: it only reads ``sqlite_master`` and two
+    ``schema_meta`` rows.
+    """
+    database_path = Path(database_path)
+    if not database_path.is_file() or database_path.stat().st_size == 0:
+        return SchemaProbe(database_path, False, None, ())
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        tables = _table_names(connection)
+        if not tables:
+            # An existing file with no tables is created from scratch.
+            return SchemaProbe(database_path, False, None, ())
+        version = _read_schema_version(connection)
+        missing = tuple(name for name in TABLE_BODIES if name not in tables)
+        return SchemaProbe(database_path, True, version, missing)
+    finally:
+        connection.close()
+
+
+@contextmanager
+def migration_lock(database_path: Path):
+    """Serialise the backup-and-migrate decision across sibling processes.
+
+    Every worker of a multi-process deployment runs ``ensure_schema`` on startup,
+    so without a lock two of them could both decide to back up and both migrate.
+    ``BEGIN IMMEDIATE`` inside the migration already prevents *database* damage;
+    this lock additionally makes the *backup* decision once, so a rolling restart
+    of N workers produces one backup instead of N.
+
+    The lock file lives next to the database and is deliberately left in place:
+    unlinking an flock'ed file would let a third process lock a fresh inode while
+    the first still holds the old one.  On a platform without ``fcntl`` the lock
+    degrades to a no-op — the worst outcome is then an extra backup file, never a
+    half-migrated database, because the migration itself stays transactional.
+    """
+    lock_path = Path(f"{database_path}.migrate.lock")
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX
+        yield lock_path
+        return
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield lock_path
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _refusal_message(probe: SchemaProbe, database_path: Path) -> str:
+    """Explain a refused startup migration with the commands that fix it."""
+    current = probe.schema_version if probe.schema_version is not None else "unknown"
+    details = f"（当前 schema_version={current}，目标 {SCHEMA_VERSION}）"
+    if probe.missing_tables:
+        details += f"，缺少表：{', '.join(probe.missing_tables)}"
+    return (
+        f"检测到需要迁移的数据库{details}：{database_path}\n"
+        "当前运行环境不允许在启动时自动迁移（未声明 MCQ_ENV，或已显式设置为 refuse），"
+        "以免在没有备份的情况下改动部署数据。\n"
+        "请先停服务并显式迁移：\n"
+        f"    python scripts/migrate_courses.py --db {database_path}\n"
+        "（它会先生成带时间戳的备份副本并校验，然后才执行迁移；"
+        "细节见 docs/MULTI_COURSE_MIGRATION.md 第 1 节）\n"
+        "如果这是开发机并且希望启动时自动备份并迁移，"
+        "设置 MCQ_ENV=development（或 MCQ_AUTO_MIGRATE=backup-and-migrate）后重试。"
+    )
 
 def ensure_schema(
     database_path: Path,
     *,
     legacy_course_id: str = LEGACY_COURSE_ID,
     failpoint: Callable[[str], None] | None = None,
+    policy: StartupMigrationPolicy = StartupMigrationPolicy.BACKUP_AND_MIGRATE,
+    backup: Callable[[Path], Path] = timestamped_backup,
 ) -> SchemaInfo:
     """Create a fresh database or migrate an existing one, then return its layout.
 
+    The order of operations is the safety contract:
+
+    1. a read-only :func:`probe_schema` decides whether the table layout has to
+       change at all — a fresh database or an up-to-date one sees no backup and
+       no lock, so a normal startup writes nothing extra;
+    2. when it does, the policy decides what is allowed: refuse outright
+       (:class:`StartupMigrationRefused`), back up first, or migrate because the
+       caller already produced a backup;
+    3. the backup is taken and verified **before** the migration transaction
+       starts, and a failure there propagates — the database is never modified
+       without one;
+    4. the migration itself stays a single ``BEGIN IMMEDIATE`` transaction, so a
+       failure anywhere inside it rolls back to the un-migrated (and now backed
+       up) state.
+
     ``failpoint`` is only used by the migration rehearsal tests to abort at a
-    named stage; production never passes it.
+    named stage; production never passes it.  ``backup`` is injectable for the
+    same reason.
     """
-    database_existed = database_path.exists() and database_path.stat().st_size > 0
+    database_path = Path(database_path)
+    probe = probe_schema(database_path)
+    database_existed = probe.database_existed
+
     connection = sqlite3.connect(database_path, timeout=30, isolation_level=None)
     connection.row_factory = sqlite3.Row
     try:
@@ -110,29 +277,71 @@ def ensure_schema(
             _write_meta(connection, LEGACY_COURSE_KEY, legacy_course_id)
             _fire(failpoint, STAGE_BEFORE_COMMIT)
             return SchemaInfo(SCHEMA_VERSION, legacy_course_id, False, False)
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            # Re-read under the lock: another worker may have migrated already.
-            version = _read_schema_version(connection)
-            migrated = False
-            if version is None or version < SCHEMA_VERSION:
-                _migrate_namespace(connection, legacy_course_id, failpoint)
-                _write_meta(connection, SCHEMA_VERSION_KEY, str(SCHEMA_VERSION))
-                _write_meta(connection, LEGACY_COURSE_KEY, legacy_course_id)
-                migrated = True
-            else:
-                _ensure_support_tables(connection, legacy_course_id)
-            _fire(failpoint, STAGE_BEFORE_COMMIT)
-            connection.execute("COMMIT")
-        except BaseException:
-            connection.execute("ROLLBACK")
-            raise
-        _assert_foreign_keys(connection)
-        _create_indexes(connection)
-        stored_legacy = read_meta(connection, LEGACY_COURSE_KEY) or legacy_course_id
-        return SchemaInfo(SCHEMA_VERSION, stored_legacy, database_existed, migrated)
+
+        backup_path: Path | None = None
+        if probe.needs_migration:
+            if policy is StartupMigrationPolicy.REFUSE:
+                raise StartupMigrationRefused(_refusal_message(probe, database_path))
+            with migration_lock(database_path):
+                # Re-probe under the lock: a sibling worker may have migrated
+                # while we waited, and this process must not take a second backup
+                # of an already-current database.
+                probe = probe_schema(database_path)
+                if probe.needs_migration and (
+                    policy is StartupMigrationPolicy.BACKUP_AND_MIGRATE
+                ):
+                    backup_path = backup(database_path)
+                    _fire(failpoint, STAGE_AFTER_BACKUP)
+                return _migrate_existing(
+                    connection,
+                    legacy_course_id,
+                    failpoint,
+                    database_existed,
+                    backup_path,
+                )
+        return _migrate_existing(
+            connection, legacy_course_id, failpoint, database_existed, None
+        )
     finally:
         connection.close()
+
+
+def _migrate_existing(
+    connection: sqlite3.Connection,
+    legacy_course_id: str,
+    failpoint: Callable[[str], None] | None,
+    database_existed: bool,
+    backup_path: Path | None,
+) -> SchemaInfo:
+    """Run the idempotent migration transaction on an already-existing database.
+
+    Reaching here after a sibling migrated first means the version check inside
+    the transaction simply finds nothing to do; the ``_ensure_support_tables``
+    branch still brings a same-version database up to the full current layout.
+    """
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        # Re-read under the lock: another worker may have migrated already.
+        version = _read_schema_version(connection)
+        migrated = False
+        if version is None or version < SCHEMA_VERSION:
+            _migrate_namespace(connection, legacy_course_id, failpoint)
+            _write_meta(connection, SCHEMA_VERSION_KEY, str(SCHEMA_VERSION))
+            _write_meta(connection, LEGACY_COURSE_KEY, legacy_course_id)
+            migrated = True
+        else:
+            _ensure_support_tables(connection, legacy_course_id)
+        _fire(failpoint, STAGE_BEFORE_COMMIT)
+        connection.execute("COMMIT")
+    except BaseException:
+        connection.execute("ROLLBACK")
+        raise
+    _assert_foreign_keys(connection)
+    _create_indexes(connection)
+    stored_legacy = read_meta(connection, LEGACY_COURSE_KEY) or legacy_course_id
+    return SchemaInfo(
+        SCHEMA_VERSION, stored_legacy, database_existed, migrated, backup_path
+    )
 
 
 # --------------------------------------------------------------------------- DDL

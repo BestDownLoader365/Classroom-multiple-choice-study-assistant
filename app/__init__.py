@@ -31,6 +31,7 @@ from app.config import (
     McqEnvironment,
     resolve_environment,
     resolve_session_cookie_secure,
+    resolve_startup_migration_policy,
 )
 from app.course_runtime import (
     AppServices,
@@ -155,7 +156,10 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         legacy_course_id=legacy_course_id,
     )
 
-    database.initialize(legacy_course_id=legacy_course_id)
+    database.initialize(
+        legacy_course_id=legacy_course_id,
+        policy=resolve_startup_migration_policy(os.environ, environment=environment),
+    )
     user_repository = UserRepository(database)
     rate_limit_repository = RateLimitRepository(database)
     course_repository = CourseRepository(database)

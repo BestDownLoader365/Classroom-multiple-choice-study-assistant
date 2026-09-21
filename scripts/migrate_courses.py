@@ -10,7 +10,13 @@ learner reconciliation — those are separate steps performed by the workers.
     python scripts/migrate_courses.py --db instance/mcq.db --no-backup
 
 ``--dry-run`` only reads.  A real run first copies the database to a timestamped
-backup next to it (unless ``--no-backup``) and then migrates.  ``--layout``
+backup next to it (unless ``--no-backup``) and then migrates.  The backup is
+produced with SQLite's online backup API, verified with ``PRAGMA quick_check``
+and published atomically; a failed backup aborts the command with exit code ``2``
+rather than touching the database.  Because this script produces its own backup,
+it drives the migration with
+``StartupMigrationPolicy.MIGRATE_AFTER_EXTERNAL_BACKUP`` so the shared
+``ensure_schema()`` does not take a second one.  ``--layout``
 additionally materialises the legacy root files as
 ``courses/<--legacy-course-id>/`` (directory name **and** manifest ``course_id``
 both use the requested id, so the layout never disagrees with the namespace the
@@ -43,6 +49,8 @@ from app.repositories.schema_migrations import (  # noqa: E402
     read_meta,
 )
 from app.models import validate_course_id  # noqa: E402
+from app.repositories import BackupError, timestamped_backup  # noqa: E402
+from app.repositories.schema_migrations import StartupMigrationPolicy  # noqa: E402
 from scripts.course_tooling import contained_path  # noqa: E402
 
 
@@ -251,11 +259,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not args.no_backup:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup = database_path.with_suffix(database_path.suffix + f".bak-{stamp}")
-        shutil.copy2(database_path, backup)
-        shutil.copystat(database_path, backup)
-        print(f"已备份：{backup}")
+        try:
+            backup = timestamped_backup(database_path)
+        except BackupError as exc:
+            print(f"备份失败，未迁移任何数据：{exc}", file=sys.stderr)
+            return 2
+        print(f"已备份（quick_check 通过）：{backup}")
 
     try:
         definitions = CourseLoader(
@@ -282,7 +291,13 @@ def main(argv: list[str] | None = None) -> int:
 
     database = Database(database_path)
     try:
-        info = database.initialize(legacy_course_id=legacy_course_id)
+        info = database.initialize(
+            legacy_course_id=legacy_course_id,
+            # This script already produced and printed a verified backup above
+            # (unless --no-backup), so the policy tells ensure_schema not to take
+            # a second one.  An application startup never uses this policy.
+            policy=StartupMigrationPolicy.MIGRATE_AFTER_EXTERNAL_BACKUP,
+        )
     except SchemaMigrationError as exc:
         print(f"迁移被拒绝，未写入任何数据：\n{exc}", file=sys.stderr)
         return 1

@@ -7,6 +7,7 @@ from app import create_app
 from app.config import ConfigurationError
 from app.course_runtime import CourseStatus
 from app.models import CourseDefinitionError
+from app.repositories import BackupError, SchemaMigrationError
 from app.services import InvalidTimezoneError
 
 # Declare the environment *before* the factory runs: it is what makes the
@@ -17,10 +18,16 @@ os.environ.setdefault("MCQ_ENV", "development")
 
 try:
     app = create_app()
-except (CourseDefinitionError, InvalidTimezoneError, ConfigurationError) as exc:
+except (
+    CourseDefinitionError,
+    InvalidTimezoneError,
+    ConfigurationError,
+    SchemaMigrationError,
+    BackupError,
+) as exc:
     # Global ambiguities (a duplicate course_id, an unreadable manifest, a bad
-    # timezone, an unusable deployment setting) are assembly failures: no worker
-    # may guess a resolution.
+    # timezone, an unusable deployment setting, a refused/failed schema migration)
+    # are assembly failures: no worker may guess a resolution.
     print(str(exc), file=sys.stderr)
     raise SystemExit(1) from exc
 

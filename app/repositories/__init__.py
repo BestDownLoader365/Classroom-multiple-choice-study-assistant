@@ -11,6 +11,12 @@ from .course_loader import (
 from .course_repository import CourseRecord, CourseRepository, CourseStateError
 from .course_scope import require_course_id
 from .database import CrossCourseQueries, Database
+from .database_backup import (
+    BACKUP_MARKER,
+    BackupError,
+    backup_name,
+    timestamped_backup,
+)
 from .exam_repository import ExamRepository
 from .glossary_loader import GlossaryError, GlossaryLoader, normalize_glossary_label
 from .glossary_repository import GlossaryRepository
@@ -25,7 +31,11 @@ from .schema_migrations import (
     SCHEMA_VERSION,
     SchemaInfo,
     SchemaMigrationError,
+    SchemaProbe,
+    StartupMigrationPolicy,
+    StartupMigrationRefused,
     ensure_schema,
+    probe_schema,
     read_legacy_course_id,
     read_meta,
 )
@@ -35,6 +45,8 @@ from .wrong_question_repository import WrongQuestionRepository
 
 __all__ = [
     "AttemptRepository",
+    "BACKUP_MARKER",
+    "BackupError",
     "CourseBundle",
     "CourseLoader",
     "CourseRecord",
@@ -60,14 +72,20 @@ __all__ = [
     "SCHEMA_VERSION",
     "SchemaInfo",
     "SchemaMigrationError",
+    "SchemaProbe",
+    "StartupMigrationPolicy",
+    "StartupMigrationRefused",
     "UserRepository",
     "UsernameAlreadyExistsError",
     "WeakKnowledgePointRepository",
     "WrongQuestionRepository",
+    "backup_name",
     "ensure_schema",
     "normalize_glossary_label",
+    "probe_schema",
     "read_legacy_course_id",
     "read_meta",
     "require_course_id",
+    "timestamped_backup",
 ]
 

@@ -40,6 +40,8 @@ import os
 from collections.abc import Mapping
 from enum import Enum
 
+from app.repositories.schema_migrations import StartupMigrationPolicy
+
 
 class ConfigurationError(ValueError):
     """Raised when a deployment setting cannot be interpreted safely."""
@@ -54,6 +56,9 @@ ENVIRONMENT_VARIABLE = "MCQ_ENV"
 
 #: Strict boolean override for the session cookie's ``Secure`` flag.
 COOKIE_SECURE_VARIABLE = "MCQ_SESSION_COOKIE_SECURE"
+
+#: What a startup may do to a database whose schema needs work.
+AUTO_MIGRATE_VARIABLE = "MCQ_AUTO_MIGRATE"
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -167,3 +172,51 @@ def resolve_session_cookie_secure(
             "SESSION_COOKIE_SECURE=False（并承担明文传输的风险）。"
         )
     return value
+
+
+def resolve_startup_migration_policy(
+    environ: Mapping[str, str] | None = None,
+    *,
+    environment: McqEnvironment | None = None,
+) -> StartupMigrationPolicy:
+    """Decide what a *startup* may do to an existing database.
+
+    Defaults by environment:
+
+    ``production`` / ``development`` / ``testing``
+        :attr:`StartupMigrationPolicy.BACKUP_AND_MIGRATE` — a verified,
+        timestamped snapshot is taken before anything is rebuilt, and a failed
+        backup aborts the start.  This is the guarantee that replaced the old
+        "the app migrates whatever it finds, with no backup" behaviour.
+    *unknown* (``MCQ_ENV`` unset)
+        :attr:`StartupMigrationPolicy.REFUSE` — a process that cannot say what
+        deployment it belongs to may not rebuild a database on its own; it prints
+        the command that does it explicitly.
+
+    ``MCQ_AUTO_MIGRATE`` overrides the default (``refuse`` /
+    ``backup-and-migrate`` / ``migrate``).  ``migrate`` means "the caller already
+    backed up", so it is refused for ``production``: a production start must
+    never be able to modify an old database without its own verified snapshot.
+    """
+    environment = environment or resolve_environment(environ)
+    raw = (environ or os.environ).get(AUTO_MIGRATE_VARIABLE)
+    if raw is None or not raw.strip():
+        if environment is McqEnvironment.UNKNOWN:
+            return StartupMigrationPolicy.REFUSE
+        return StartupMigrationPolicy.BACKUP_AND_MIGRATE
+    if raw.strip().lower() == StartupMigrationPolicy.BACKUP_AND_MIGRATE.value:
+        return StartupMigrationPolicy.BACKUP_AND_MIGRATE
+    if raw.strip().lower() == StartupMigrationPolicy.REFUSE.value:
+        return StartupMigrationPolicy.REFUSE
+    if raw.strip().lower() == "migrate":
+        if environment is McqEnvironment.PRODUCTION:
+            raise ConfigurationError(
+                f"{AUTO_MIGRATE_VARIABLE}=migrate 不允许在 "
+                f"{ENVIRONMENT_VARIABLE}=production 下使用："
+                "生产环境的启动路径必须自己生成并校验备份（backup-and-migrate）。"
+            )
+        return StartupMigrationPolicy.MIGRATE_AFTER_EXTERNAL_BACKUP
+    allowed = "refuse, backup-and-migrate, migrate"
+    raise ConfigurationError(
+        f'{AUTO_MIGRATE_VARIABLE} 的值无法识别："{raw}"。可选值：{allowed}。'
+    )

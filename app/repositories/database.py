@@ -14,6 +14,7 @@ Course-scoped repositories bind a ``course_id`` at construction and never see
 this module's cross-course seams.
 """
 
+import logging
 import os
 import sqlite3
 from collections.abc import Iterable, Iterator
@@ -24,6 +25,9 @@ from pathlib import Path
 from app.models import Course, LEGACY_COURSE_ID
 
 from . import schema_migrations
+from .schema_migrations import StartupMigrationPolicy
+
+LOGGER = logging.getLogger(__name__)
 
 #: Retained answer window per learner and question, shared across every mode.
 MAX_ATTEMPTS_PER_QUESTION = 10
@@ -45,12 +49,20 @@ class Database:
         courses: Iterable[Course] = (),
         legacy_course_id: str = LEGACY_COURSE_ID,
         failpoint=None,
+        policy: StartupMigrationPolicy = StartupMigrationPolicy.BACKUP_AND_MIGRATE,
     ) -> schema_migrations.SchemaInfo:
         """Create or migrate the database, then register accepted courses.
 
         Ordering matters: the namespace migration runs first and touches no
         learner semantics, then the retention sweep runs as its own step, then
         the accepted course metadata is recorded.
+
+        ``policy`` decides what an *existing* database whose schema needs work may
+        expect.  The default produces and verifies a timestamped backup before the
+        migration transaction starts, and a failed backup aborts startup; a
+        composition root may pass
+        :attr:`~app.repositories.schema_migrations.StartupMigrationPolicy.REFUSE`
+        instead.  A fresh database and an up-to-date one never take a backup.
 
         The legacy namespace row always exists because ``legacy_course_id`` is
         part of the schema this build writes: learner tables declare a
@@ -61,11 +73,33 @@ class Database:
         self.database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not parent_existed:
             os.chmod(self.database_path.parent, 0o700)
+        probe = schema_migrations.probe_schema(self.database_path)
+        if probe.database_existed and not probe.needs_migration:
+            LOGGER.debug(
+                "schema 已是当前版本（%s），不创建备份：%s",
+                probe.schema_version,
+                self.database_path,
+            )
+        elif probe.needs_migration:
+            LOGGER.info(
+                "检测到需要迁移的数据库（schema_version=%s，缺少表=%s），策略=%s：%s",
+                probe.schema_version,
+                ",".join(probe.missing_tables) or "none",
+                policy.value,
+                self.database_path,
+            )
         self.schema_info = schema_migrations.ensure_schema(
             self.database_path,
             legacy_course_id=legacy_course_id,
             failpoint=failpoint,
+            policy=policy,
         )
+        if self.schema_info.backup_path is not None:
+            LOGGER.info(
+                "旧 schema 已备份并校验：%s（本次迁移已提交，schema_version=%s）",
+                self.schema_info.backup_path,
+                self.schema_info.schema_version,
+            )
         self.enforce_attempt_retention()
         self.register_courses(courses)
         return self.schema_info

@@ -11,7 +11,7 @@
 ## 1. 迁移做了什么
 
 `Database.initialize()`（以及 `scripts/migrate_courses.py`）会调用 `ensure_schema()`，在**独立连接**上
-执行一次事务：
+执行一次事务（只有确实需要重建表结构时才会执行，且先经过只读探测与可选备份）：
 
 ```text
 PRAGMA foreign_keys = OFF        （事务之前；不能在事务内修改）
@@ -74,7 +74,7 @@ retention 是**独立于迁移**的一步（`Database.enforce_attempt_retention(
 
 | 阶段 | 触发点 | 做了什么 |
 | --- | --- | --- |
-| 1. namespace migration | `ensure_schema()`（启动时自动执行，或 CLI 显式执行） | 重建表结构、把旧行复制进 `legacy_course_id` 命名空间、写 `schema_version` |
+| 1. namespace migration | `ensure_schema()`（启动时按策略自动执行，或 CLI 显式执行） | 重建表结构、把旧行复制进 `legacy_course_id` 命名空间、写 `schema_version`；需要时先做一次已校验的时间戳备份 |
 | 2. attempt retention | `Database.enforce_attempt_retention()`（每次启动） | 把 `attempts` 收缩到每个 `(learner_id, course_id, question_id)` 最近 10 次 |
 | 3. course registration | `Database.register_courses()`（每次启动） | 写入/刷新 `courses` 表的已接受元数据，并确保持久化的 `legacy_course_id` 行存在 |
 | 4. question-bank reconciliation | 每门课启动时的 `QuestionBankSyncService.synchronize()` | 按 `(course_id, question_id)` 对比、清理、必要时推进该课程 generation |
@@ -83,13 +83,22 @@ retention 是**独立于迁移**的一步（`Database.enforce_attempt_retention(
 
 ### 启动自动迁移与 CLI 迁移的差别
 
-`Database.initialize()` 在**每次应用启动**时都会调用 `ensure_schema()`，所以一个未迁移的旧数据库在应用启动时会被自动迁移。差别在于：
+`Database.initialize()` 在**每次应用启动**时都会调用 `ensure_schema()`，但“是否需要迁移”由一次**只读探测**决定：schema 已是最新（版本相同且表齐全）时不会创建任何备份，也不会多写任何文件；只有真的需要重建表结构（版本过旧、缺少表、没有 `schema_meta`）时才会进入受保护路径。
 
-* 启动时的自动迁移**不会**先创建 CLI 那种带时间戳的备份副本；
-* 它也不打印迁移报告（迁移是否真的发生、schema 版本、持久化的 legacy namespace 只能事后从数据库读取或看日志）；
-* 如果迁移被拒绝（例如旧库存在父子约束冲突），启动会失败，日志里只有异常信息，没有 CLI 的完整清单。
+需要迁移时，行为由 `MCQ_ENV` / `MCQ_AUTO_MIGRATE` 决定：
 
-生产环境的推荐顺序因此是“显式迁移”，而不是依赖启动自动迁移：
+| `MCQ_ENV` | 默认策略 | 启动时行为 |
+| --- | --- | --- |
+| `production` | 自动备份并迁移 | 先创建 `mcq.db.bak-<UTC 时间戳>`（SQLite 在线备份 API + `PRAGMA quick_check` 校验 + 原子发布），成功后才在单个事务里迁移 |
+| `development` | 自动备份并迁移 | 同上（`python run.py` 会设置 `MCQ_ENV=development`） |
+| `testing` | 自动备份并迁移 | 同上；测试库都是临时文件 |
+| 未设置（未知） | **拒绝启动** | 不修改数据库，打印显式迁移命令后退出 |
+
+`MCQ_AUTO_MIGRATE` 可显式覆盖为 `refuse` / `backup-and-migrate` / `migrate`；其中 `migrate`（“调用方已自行备份”）不允许在 `MCQ_ENV=production` 下使用——生产启动路径必须自己生成并校验备份。
+
+**安全保证**：备份失败（磁盘满、权限、校验不通过）会**直接中止启动**，数据库保持未迁移；迁移事务失败则整体回滚，此时磁盘上留有一份已校验的旧库副本，可解释、可恢复。并发启动时通过数据库旁的 `mcq.db.migrate.lock`（`fcntl.flock`）串行化“备份 + 迁移”决策，N 个 worker 只会产生一份备份。
+
+生产环境的推荐顺序仍然是“显式迁移”，因为这样你会在动手前看到完整的检查报告：
 
 ```bash
 # 1) 停服务（避免启动中的自动迁移在你没有备份时执行）

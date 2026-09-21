@@ -705,6 +705,7 @@ Local HTTP URL: http://127.0.0.1:8080
 | `MCQ_SECRET_KEY` | 会话与表单签名密钥；生产入口（`wsgi.py`）要求必须设置。开发环境未设置时使用临时随机密钥并打印警告（重启会失效）。 |
 | `MCQ_ENV` | 声明本进程是什么部署：`production` / `development` / `testing`。它决定环境相关的安全默认值（Session Cookie 是否 `Secure`、启动时如何处理旧 schema）。未设置表示“未知”，按**安全默认**处理（Cookie `Secure`、拒绝启动时自动迁移）。`run.py` 与 `wsgi.py` 会各自 `setdefault` 为 `development` / `production`。 |
 | `MCQ_SESSION_COOKIE_SECURE` | 严格布尔（`1/0`、`true/false`、`yes/no`、`on/off`），覆盖 Session Cookie 的 `Secure` 标志。`MCQ_ENV=production` 下只允许设为真；非法值直接让启动失败。 |
+| `MCQ_AUTO_MIGRATE` | 启动时如何处理需要迁移的旧数据库：`refuse`（拒绝启动并提示显式迁移）/ `backup-and-migrate`（先备份并校验再迁移）/ `migrate`（调用方已备份；`production` 下不允许）。默认值由 `MCQ_ENV` 决定，见下方“数据库 schema 与启动迁移”。 |
 | `MCQ_DEFAULT_COURSE` | 导航偏好：决定没有显式课程 URL 的浏览器跳转到哪门课，**不会**重新归属历史数据。 |
 | `MCQ_DISPLAY_TIMEZONE` | 页面时间与 Dashboard 趋势日期使用的 IANA 时区（如 `Asia/Shanghai`）；默认跟随服务器本地时区，非法值会让启动失败。 |
 
@@ -742,11 +743,22 @@ Local HTTP URL: http://127.0.0.1:8080
 
 | 工具 | 用途 |
 | --- | --- |
-| `python scripts/migrate_courses.py --db instance/mcq.db --dry-run` | 事务性、无损、幂等的命名空间迁移 / 检查（真实执行前会自动备份数据库） |
+| `python scripts/migrate_courses.py --db instance/mcq.db --dry-run` | 事务性、无损、幂等的命名空间迁移 / 检查（真实执行前会自动生成并校验带时间戳的备份） |
 | `python scripts/rename_course.py --db instance/mcq.db --from <old> --to <new> [--rename-directory]` | 重命名一门课程的 namespace（`course_id` 是数据库中每张学习者表的首列） |
 | `python scripts/delete_course.py --course <course_id> --dry-run` | 预览并删除课程目录、数据库 namespace 与全部引用（默认自动备份数据库） |
 | `python scripts/publish_course.py --course <course_id> --prune [--keep-versions N]` | 清理 `versions/`，每个内容类型只保留当前 + 上一版 |
 
 迁移细节、验证与回滚见 [多课程迁移与回滚手册](docs/MULTI_COURSE_MIGRATION.md)。
+
+**数据库 schema 与启动迁移**：应用启动时 `Database.initialize()` 会先做一次**只读探测**——schema 已是最新（版本相同且表齐全）时**不创建备份、也不多写任何文件**；只有真的需要重建表结构时才会进入受保护路径：
+
+| `MCQ_ENV` | 启动时的默认行为 |
+| --- | --- |
+| `production` / `development` / `testing` | 先创建并校验 `mcq.db.bak-<UTC 时间戳>`（SQLite 在线备份 API + `PRAGMA quick_check` + 原子发布），成功后才在单个事务里迁移 |
+| 未设置（未知） | **拒绝启动**，打印显式迁移命令（安全默认） |
+
+* **备份失败即中止启动**，数据库保持未迁移；迁移事务失败会整体回滚，并留下那份已校验的备份副本（可解释、可恢复）。
+* 并发启动（多 worker）通过 `mcq.db.migrate.lock` 串行化决策，只会产生一份备份。
+* 想固定行为可用 `MCQ_AUTO_MIGRATE=refuse|backup-and-migrate|migrate`；`migrate` 在 `production` 下被禁止（生产启动必须自己生成并校验备份）。
 
 </details>
