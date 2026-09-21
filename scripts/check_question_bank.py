@@ -114,6 +114,18 @@ CANDIDATE_SOURCES = {
     "published": "当前已发布",
 }
 
+#: The exit-code contract of this gate.  ``publish_course.py`` forwards whatever
+#: this script returns, so the numbers are part of a shared interface: never
+#: renumber them, and define them here so no caller has to hard-code a literal.
+#: ``EXIT_BLOCKING`` is also the code for a usage-level refusal (argparse's own
+#: usage errors and the ``--published`` + explicit path conflict), which is why
+#: the constant is named for the outcome rather than for one cause.
+EXIT_OK = 0
+EXIT_INVALID = 1
+EXIT_BLOCKING = 2
+EXIT_STRICT = 3
+EXIT_UNRESOLVABLE = 4
+
 
 class ScriptError(RuntimeError):
     """Raised when the request cannot be answered safely (exit code 4)."""
@@ -630,13 +642,13 @@ def main(argv: list[str] | None = None) -> int:
             "--published 与显式 candidate 路径不能同时使用：请二选一。",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_BLOCKING
 
     try:
         definition = resolve_definition(args)
     except (ScriptError, CourseDefinitionError) as exc:
         print(f"无法解析课程：\n{exc}", file=sys.stderr)
-        return 4
+        return EXIT_UNRESOLVABLE
     course_id = definition.course_id
     candidate, source = candidate_file_for(args, definition)
     print(f"课程 (course_id): {course_id} [{definition.layout}]")
@@ -647,7 +659,7 @@ def main(argv: list[str] | None = None) -> int:
         questions = loader.load()
     except QuestionBankError as exc:
         print(f"题库校验失败：\n{exc}", file=sys.stderr)
-        return 1
+        return EXIT_INVALID
     print(f"题库校验通过：{len(questions)} 道题。")
 
     try:
@@ -655,7 +667,7 @@ def main(argv: list[str] | None = None) -> int:
         stored_state = _load_state(args.db, course_id)
     except ScriptError as exc:
         print(f"无法比对：\n{exc}", file=sys.stderr)
-        return 4
+        return EXIT_UNRESOLVABLE
 
     generation = stored_state[0] if stored_state else 0
     print(f"当前 generation：{generation}")
@@ -664,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
             simulated_generation = simulate(args.db, candidate, definition)
         except (CourseLoadError, ScriptError) as exc:
             print(f"模拟失败：\n{exc}", file=sys.stderr)
-            return 4
+            return EXIT_UNRESOLVABLE
         print(f"模拟后的 generation：{simulated_generation}")
         print(
             "本次发布会推进 generation："
@@ -677,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
             "不会清理任何学习数据。"
         )
         print("\n可以安全部署。")
-        return 0
+        return EXIT_OK
 
     diff = diff_questions(questions, registry)
     stored_catalogue = stored_state[2] if stored_state else None
@@ -734,7 +746,7 @@ def main(argv: list[str] | None = None) -> int:
             + "\n退役 ID 永久保留，请为新题分配新 ID。该课程会被标记为不可用。",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_BLOCKING
 
     tombstones = _legacy_tombstones(registry)
     if tombstones:
@@ -759,12 +771,12 @@ def main(argv: list[str] | None = None) -> int:
                 "\n--strict：检测到学习状态清理，返回非 0（exit 3）。",
                 file=sys.stderr,
             )
-            return 3
+            return EXIT_STRICT
         print(
             "\n注意：本次更新会清理上述学习状态；确认可以接受后再部署，"
             "并统一重启全部工作进程。"
         )
-        return 0
+        return EXIT_OK
 
     if would_bump:
         print(
@@ -778,7 +790,7 @@ def main(argv: list[str] | None = None) -> int:
             "不需要为此统一重启。"
         )
     print("\n可以安全部署。")
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":

@@ -56,7 +56,34 @@ hatch.  A brand-new course created with ``--add`` has no history to diff, so its
 question bank is gated by schema validation only.  Nothing here restarts a
 worker or bumps a generation.
 
-Exit codes: ``0`` success, ``1`` validation/publish refused, ``2`` usage.
+Exit codes
+----------
+
+This command does not invent its own contract for a failed preflight: it runs
+the matching ``check_*.py`` and **returns that script's exit code unchanged**, so
+a caller sees exactly what the gate decided.  The complete set is therefore::
+
+    ``0``   everything named on the command line was published (also a --enable /
+            --disable flip or a --prune-only pass that had nothing to change)
+    ``1``   refused, nothing switched over: candidate schema validation failed,
+            the glossary preflight returned 1, a write failed, --add found the
+            course already declared, the target course could not be resolved, or
+            the retention pass could not clean up
+    ``2``   usage error, **or** the question-bank preflight returned 2 (a retired
+            question ID reused for a different question, or --published combined
+            with an explicit path)
+    ``3``   the question-bank preflight returned 3 (``--strict``) which reports an
+            update that would clear stored learner state.  This command never
+            passes --strict itself, so the code only ever arrives from the
+            preflight it forwards; it stays in the contract because a forwarded
+            code is never rewritten
+    ``4``   the question-bank preflight returned 4: the request cannot be answered
+            safely (unknown course, ambiguous course, or a database that has not
+            been migrated)
+
+``check_glossary.py`` only ever returns ``0``/``1``, so a glossary preflight can
+only add ``1`` to the set above.  ``EXIT_CODE_SUMMARY`` below is the single
+source of truth for this table; the module docstring and ``--help`` both use it.
 
 Version retention
 -----------------
@@ -89,6 +116,31 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+#: Every code this command can exit with.  ``2`` is deliberately shared by a
+#: usage error and the question-bank preflight's blocking verdict, and a failing
+#: preflight's own code is forwarded verbatim, so the gate's whole range belongs
+#: to this contract.  ``tests/test_doc_contracts.py`` asserts these numbers match
+#: ``check_question_bank.EXIT_*`` and that the module docstring spells them out.
+EXIT_OK = 0
+EXIT_REFUSED = 1
+EXIT_USAGE_OR_BLOCKING_PREFLIGHT = 2
+EXIT_PREFLIGHT_STRICT = 3
+EXIT_PREFLIGHT_UNRESOLVABLE = 4
+
+EXIT_CODES: dict[int, str] = {
+    EXIT_OK: "已发布（或状态切换 / 无需清理的 --prune）",
+    EXIT_REFUSED: "被拒绝，未切换任何内容（校验失败 / 写入失败 / 无法解析课程）",
+    EXIT_USAGE_OR_BLOCKING_PREFLIGHT: "用法错误，或题库预检返回 2（复用退役 ID 等阻断项）",
+    EXIT_PREFLIGHT_STRICT: "题库预检返回 3（--strict 判定会清理学习状态）",
+    EXIT_PREFLIGHT_UNRESOLVABLE: "题库预检返回 4（无法安全比对：未知课程 / 未迁移数据库）",
+}
+
+#: Single source of truth for the table in the module docstring; ``--help``
+#: prints exactly this so the two can never drift apart again.
+EXIT_CODE_SUMMARY = "\n".join(
+    f"{code}: {description}" for code, description in sorted(EXIT_CODES.items())
+)
+
 from app.models import CourseDefinitionError  # noqa: E402
 from scripts.course_tooling import (  # noqa: E402
     DEFAULT_KEPT_VERSIONS,
@@ -112,7 +164,16 @@ from scripts.course_tooling import (  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        epilog=(
+            "exit codes:\n"
+            f"{EXIT_CODE_SUMMARY}\n\n"
+            "A failing preflight's own exit code is forwarded unchanged, so a 2/3/4 "
+            "comes from check_question_bank.py."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--course", required=True, help="target course_id")
     parser.add_argument(
         "--questions",
@@ -492,6 +553,9 @@ def main(argv: list[str] | None = None) -> int:
                 ]
             )
             if exit_code != 0:
+                # Forwarded verbatim: see the "Exit codes" section of the module
+                # docstring.  A 2/3/4 here is check_question_bank.py's verdict,
+                # not this command's own usage error.
                 print(
                     f"\n预检返回 {exit_code}：未发布任何内容。", file=sys.stderr
                 )

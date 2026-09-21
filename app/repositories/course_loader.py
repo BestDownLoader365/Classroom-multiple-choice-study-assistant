@@ -3,24 +3,46 @@
 Layout
 ------
 
-```text
-courses/
-├── digital_ic/
-│   ├── course.json
-│   ├── questions.json
-│   └── glossary.json
-└── physical_design/
-    ├── course.json
-    ├── questions.json
-    └── glossary.json
-```
+A course is declared by exactly one manifest, and only the paths that manifest
+declares are read.  The publishing tooling (``scripts/course_tooling.py``) keeps
+the content under a content-addressed ``versions/<sha256>/`` directory and edits
+the manifest with a single atomic ``os.replace``::
 
-The root ``questions.json``/``glossary.json`` files stay supported through a
-small *legacy adapter*: they are presented as one virtual
-:class:`~app.models.course.CourseDefinition` with
-:data:`~app.models.course.LEGACY_COURSE_ID`, and then flow through exactly the
-same registry, repositories and services as a manifest course.  There is no
-second business-logic path.
+    courses/
+    ├── eek5101/
+    │   ├── course.json                  # manifest: identity + the only pointer
+    │   ├── questions_candidate.json     # working copy (CLI default input)
+    │   ├── glossary_candidate.json      # working copy (only when declared)
+    │   ├── .publish.lock                # publication lock (publish_course.py)
+    │   └── versions/
+    │       ├── 1ae534f3…/questions.json   # ← manifest["questions"]
+    │       ├── c3c68b98…/glossary.json    # ← manifest["glossary"]
+    │       └── 02a226a4…/glossary.json    # retained previous copy (unreferenced)
+    └── eek5106/
+        └── versions/a8634a86…/questions.json
+
+``questions_candidate.json``, ``glossary_candidate.json`` and ``.publish.lock``
+are the *maintainer's* files: this loader never opens them by name, and editing a
+candidate has no effect until ``publish_course.py`` archives it under
+``versions/<sha256>/`` and switches the manifest over.  Likewise ``versions/`` is
+not a lookup rule — the loader only resolves the relative paths the manifest
+declares and containment-checks them, and that is simply where the publishing
+tooling puts those files.  A ``versions/<sha256>/`` directory the manifest does
+not point at is a rollback copy that nothing reads (``check_courses.py`` reports
+it, ``publish_course.py --prune`` may delete it).
+
+Two other shapes are still supported and go through exactly the same registry,
+repositories and services:
+
+* a **plain-file** course, whose manifest points at ``questions.json`` /
+  ``glossary.json`` inside the course directory instead of into ``versions/``;
+* the root ``questions.json`` / ``glossary.json`` files, kept alive by a small
+  *legacy adapter*: they are presented as one virtual
+  :class:`~app.models.course.CourseDefinition` with the configured legacy
+  ``course_id`` (``LEGACY_COURSE_ID`` by default, or the namespace the schema
+  migration persisted) and then flow through exactly the same code.  There is no
+  second business-logic path, and this adapter is the only place a fixed content
+  file name is read.
 
 Safety rules enforced here:
 
