@@ -85,6 +85,26 @@ def _meta(database, key):
         connection.close()
 
 
+def _scoped_rows(database, course_id) -> dict[str, int]:
+    """Per-table row counts of one namespace, for "nothing moved" assertions."""
+    import sqlite3
+
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        return {
+            table: int(
+                connection.execute(
+                    f'SELECT COUNT(*) AS total FROM "{table}" WHERE course_id = ?',
+                    (course_id,),
+                ).fetchone()["total"]
+            )
+            for table in rename_course.SCOPED_TABLES
+        }
+    finally:
+        connection.close()
+
+
 def _staging_entries(courses_dir):
     return sorted(
         entry
@@ -399,6 +419,60 @@ def test_failed_compensation_reports_manual_intervention(tmp_path, monkeypatch, 
     err = capsys.readouterr().err
     assert "需要人工介入" in err and "mv " in err and "状态文件" in err
     assert len(_staging_entries(courses_dir)) == 1
+
+
+# --------------------------------------------------- in-transaction refusals
+
+
+def test_foreign_key_violation_rolls_the_rename_back(tmp_path, monkeypatch, capsys):
+    """The full parent/child check runs before COMMIT, so it can still roll back.
+
+    The row-count and leftover checks cannot see a *parent* row (``courses`` is
+    not a course-scoped table), so dropping it inside the transaction models the
+    violation the explicit ``PRAGMA foreign_key_check`` exists for.  The test only
+    reaches the check when real child rows point at that parent.
+    """
+    app, courses_dir, database = _world(tmp_path)
+    del app
+    before = _scoped_rows(database, "course_a")
+    assert sum(before.values()) > 0, "the scenario needs rows that reference the parent"
+    real_counts = rename_course._counts
+
+    def drop_the_parent(connection, course_id):  # noqa: ANN001
+        counts = real_counts(connection, course_id)
+        # Only inside the rename transaction: phase 0 validates on its own,
+        # non-transactional connection and has to see the real state.
+        if course_id == "course_c" and connection.in_transaction:
+            connection.execute("DELETE FROM courses WHERE course_id = ?", (course_id,))
+        return counts
+
+    monkeypatch.setattr(rename_course, "_counts", drop_the_parent)
+
+    assert (
+        rename_main(
+            ["--from", "course_a", "--to", "course_c", *_common(courses_dir, database)]
+        )
+        == 1
+    )
+    err = capsys.readouterr().err
+    assert "Foreign key check failed during the rename" in err
+    assert "No rows were moved" in err
+    # That claim is now a fact: the check ran inside the transaction, so every row
+    # is still under the old namespace and the parent row is still there.
+    assert sorted(_namespace(database)) == ["course_a", "course_b", "legacy"]
+    assert _scoped_rows(database, "course_a") == before
+    assert not any(_scoped_rows(database, "course_c").values())
+    # Only then does a deliberate repair make the rename succeed.
+    monkeypatch.setattr(rename_course, "_counts", real_counts)
+    assert (
+        rename_main(
+            ["--from", "course_a", "--to", "course_c", *_common(courses_dir, database)]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert sorted(_namespace(database)) == ["course_b", "course_c", "legacy"]
+    assert _scoped_rows(database, "course_c") == before
 
 
 # -------------------------------------------------- phase 3 failure and --recover

@@ -538,7 +538,7 @@ python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_cou
   --courses-dir courses --rename-directory
 ```
 
-工具保证：先备份（SQLite 在线备份 + `quick_check` 校验）；在单个 `BEGIN IMMEDIATE` 事务内改写 `courses` / `quiz_progress` / `attempts` / `wrong_questions` / `weak_knowledge_points` / `exam_sessions` / `question_bank_state` / `question_registry`，并在前后重新计数校验（不一致就整体回滚）；目标 namespace 已有元数据或任何 learner 行时拒绝执行，避免把两个身份合并；`exam_questions` 不参与改写（它不含 `course_id`，始终跟随父 session）；如果改的正是持久化的 `legacy_course_id`，该键也会一起更新，所以重启后不会再出现一个空的 `legacy` 课程；`schema_meta.default_course_id` 指向被改名的课程时也会跟随更新，因此导航偏好不会指向已不存在的课程。
+工具保证：先备份（SQLite 在线备份 + `quick_check` 校验）；在单个 `BEGIN IMMEDIATE` 事务内改写 `courses` / `quiz_progress` / `attempts` / `wrong_questions` / `weak_knowledge_points` / `exam_sessions` / `question_bank_state` / `question_registry`，并在前后重新计数校验（不一致就整体回滚）；提交前还会在同一个事务内执行一次完整 `PRAGMA foreign_key_check` 父子检查（它是显式检查，不受连接的 `PRAGMA foreign_keys = OFF` 影响），发现违规同样整体回滚，因此“未写入任何内容 / 没有移动任何行”是事实而不是声明；目标 namespace 已有元数据或任何 learner 行时拒绝执行，避免把两个身份合并；`exam_questions` 不参与改写（它不含 `course_id`，始终跟随父 session）；如果改的正是持久化的 `legacy_course_id`，该键也会一起更新，所以重启后不会再出现一个空的 `legacy` 课程；`schema_meta.default_course_id` 指向被改名的课程时也会跟随更新，因此导航偏好不会指向已不存在的课程。
 
 **加 `--rename-directory` 时是三阶段协议，提交点是数据库事务：**
 
@@ -549,7 +549,8 @@ python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_cou
   → 阶段 1（可补偿）：courses/<from> 原子改名到 courses/.rename-staging-<from>-<时间戳>
                      并在暂存目录内原子改写 manifest 的 course_id 为目标值；
                      同时写入状态文件 courses/.rename-state-<from>.json
-  → 阶段 2（提交点）：单个 BEGIN IMMEDIATE 事务改写所有 course_id
+  → 阶段 2（提交点）：单个 BEGIN IMMEDIATE 事务改写所有 course_id，
+                     并在 COMMIT 前做完整外键检查（违规即整体回滚）
   → 阶段 3：暂存目录改名为 courses/<to>，删除状态文件
 ```
 

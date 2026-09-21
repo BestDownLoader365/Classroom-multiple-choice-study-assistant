@@ -34,7 +34,10 @@ Guarantees:
   leaves a recorded ``db_committed`` state and exits ``3`` with the exact
   ``--recover`` command;
 * the rename runs inside one ``BEGIN IMMEDIATE`` transaction on a dedicated
-  connection, re-counts every table before and after, and rolls back on mismatch;
+  connection, re-counts every table before and after, runs the full
+  ``PRAGMA foreign_key_check`` *before* ``COMMIT``, and rolls back on any
+  mismatch or violation — so its refusals really do leave the old namespace
+  untouched;
 * ``schema_meta.default_course_id`` follows the rename, so the navigation
   preference never points at a namespace that no longer exists;
 * ``exam_questions`` is deliberately untouched — it carries no ``course_id`` and
@@ -128,6 +131,30 @@ def _counts(connection: sqlite3.Connection, course_id: str) -> dict[str, int]:
             ).fetchone()["total"]
         )
     return counts
+
+
+def _assert_foreign_keys(
+    connection: sqlite3.Connection, source: str, target: str
+) -> None:
+    """Refuse to commit a rename that would leave a parent/child violation.
+
+    The rewrite has to run with ``PRAGMA foreign_keys = OFF`` (a child row is
+    updated while its parent still carries the old id), but
+    ``PRAGMA foreign_key_check`` is an explicit check and is unaffected by that
+    setting.  The caller invokes this inside the transaction, which is what makes
+    the message below true: a violation rolls the rename back, so the old
+    namespace is still intact instead of the finding arriving after ``COMMIT``.
+    """
+    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if not violations:
+        return
+    shown = ", ".join(
+        f"{row[0]}(rowid={row[1]}) -> {row[2]}" for row in violations[:10]
+    )
+    raise ValueError(
+        f'Foreign key check failed during the rename of "{source}" -> '
+        f'"{target}": {shown}. No rows were moved; the rename was rolled back.'
+    )
 
 
 def _open_rw(database_path: Path) -> sqlite3.Connection:
@@ -234,13 +261,15 @@ def rename_namespace(
             leftover = {k: v for k, v in _counts(connection, source).items() if v}
             if leftover:  # pragma: no cover - defensive
                 raise ValueError(f'Rows remained under "{source}": {leftover}')
+            # The full parent/child check belongs inside the transaction, before
+            # COMMIT: a violation then rolls the rename back, so the "No rows were
+            # moved" report is a fact instead of arriving after the new namespace
+            # is already durable.
+            _assert_foreign_keys(connection, source, target)
             connection.execute("COMMIT")
         except BaseException:
             connection.execute("ROLLBACK")
             raise
-        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
-        if violations:  # pragma: no cover - defensive
-            raise ValueError(f"Foreign key check failed after the rename: {violations}")
         return before
     finally:
         connection.close()
