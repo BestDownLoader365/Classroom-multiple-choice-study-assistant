@@ -5,6 +5,7 @@ __pycache__/
 instance/
 /*.json
 courses/
+deploy/
 .env
 .env.*
 *.db
