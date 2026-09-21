@@ -68,20 +68,65 @@ retention 是**独立于迁移**的一步（`Database.enforce_attempt_retention(
 迁移不得：retention 清理、weak backfill、题库 diff、registry reconciliation、内容清理、重算 fingerprint、
 重写成绩。命名空间迁移与题库 reconciliation 是两个独立步骤。
 
+### 四个不同的阶段
+
+应用启动时这些阶段**依次**发生，但它们是彼此独立的（`scripts/migrate_courses.py` 只做第一阶段）：
+
+| 阶段 | 触发点 | 做了什么 |
+| --- | --- | --- |
+| 1. namespace migration | `ensure_schema()`（启动时自动执行，或 CLI 显式执行） | 重建表结构、把旧行复制进 `legacy_course_id` 命名空间、写 `schema_version` |
+| 2. attempt retention | `Database.enforce_attempt_retention()`（每次启动） | 把 `attempts` 收缩到每个 `(learner_id, course_id, question_id)` 最近 10 次 |
+| 3. course registration | `Database.register_courses()`（每次启动） | 写入/刷新 `courses` 表的已接受元数据，并确保持久化的 `legacy_course_id` 行存在 |
+| 4. question-bank reconciliation | 每门课启动时的 `QuestionBankSyncService.synchronize()` | 按 `(course_id, question_id)` 对比、清理、必要时推进该课程 generation |
+
+因此“迁移完成”只表示阶段 1 完成：题库清理、弱知识点 backfill、generation 变化都要等 worker 启动（阶段 2–4）才发生。
+
+### 启动自动迁移与 CLI 迁移的差别
+
+`Database.initialize()` 在**每次应用启动**时都会调用 `ensure_schema()`，所以一个未迁移的旧数据库在应用启动时会被自动迁移。差别在于：
+
+* 启动时的自动迁移**不会**先创建 CLI 那种带时间戳的备份副本；
+* 它也不打印迁移报告（迁移是否真的发生、schema 版本、持久化的 legacy namespace 只能事后从数据库读取或看日志）；
+* 如果迁移被拒绝（例如旧库存在父子约束冲突），启动会失败，日志里只有异常信息，没有 CLI 的完整清单。
+
+生产环境的推荐顺序因此是“显式迁移”，而不是依赖启动自动迁移：
+
+```bash
+# 1) 停服务（避免启动中的自动迁移在你没有备份时执行）
+systemctl stop mcq-template.service
+
+# 2) 备份（CLI 也会自动备份，但先手工备份一次更稳）
+cp -a instance/mcq.db instance/mcq.db.manual-$(date -u +%Y%m%dT%H%M%SZ)
+
+# 3) 只读检查
+python scripts/migrate_courses.py --db instance/mcq.db --dry-run
+
+# 4) 正式迁移（自动生成带时间戳的备份，除非加 --no-backup）
+python scripts/migrate_courses.py --db instance/mcq.db
+
+# 5) 校验（见 2.4）
+python scripts/check_courses.py
+python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db
+
+# 6) 再启动新版本
+systemctl start mcq-template.service
+curl -i http://127.0.0.1:8001/ready
+```
+
 ---
 
 ## 2. 迁移步骤
 
 ### 2.1 备份
 
+先停服务，再复制数据库，然后**保持服务停止**直到迁移与校验完成（不要复制完就立刻启动：启动会自动触发第 1 节的阶段 1，等于在备份之后又做了一次未经检查的迁移）：
+
 ```bash
-# 手动备份（最稳妥：先停服务，再复制）
 systemctl stop mcq-template.service
 cp -a instance/mcq.db instance/mcq.db.manual-$(date -u +%Y%m%dT%H%M%SZ)
-systemctl start mcq-template.service
 ```
 
-`scripts/migrate_courses.py` 在没有 `--no-backup` 时会自动生成一份带时间戳的备份副本。
+`scripts/migrate_courses.py` 在没有 `--no-backup` 时还会自动生成一份带时间戳的备份副本（`instance/mcq.db.bak-<UTC 时间戳>`），但仍建议先手工备份一次。
 
 ### 2.2 只读检查
 
@@ -106,8 +151,17 @@ python scripts/migrate_courses.py --db instance/mcq.db
 python scripts/migrate_courses.py --db instance/mcq.db --layout
 ```
 
-它把根 `questions.json`/`glossary.json` **复制**到 `courses/legacy/`（不移动，便于回滚），并写入 manifest。
-复制完成后必须删除根文件：两者同时存在会被判定为重复 `course_id`，导致应用无法启动。
+`--layout` 的准确行为：
+
+* 它把根 `questions.json` / `glossary.json` **复制**到 `courses/<legacy>/`（不移动、不删除根文件），并把 manifest 写入
+  `courses/<legacy>/course.json`（`course_id` 为 `legacy`，`order` 为 `-1000000`，内容指向目录内的 `questions.json` /
+  `glossary.json`）——复制而非移动让回滚变成一句 `rm -rf courses/<legacy>`；
+* 目标目录已存在且非空时它拒绝执行（退出码 1），不会覆盖任何内容；根题库不存在时也返回 1；
+* **目录名和 `course_id` 固定使用 `LEGACY_COURSE_ID`（`legacy`）**，即使给数据库迁移部分传了自定义
+  `--legacy-course-id <id>`：`--layout` 仍然写 `courses/legacy/` 和 `course_id: "legacy"`。因此“自定义 legacy namespace +
+  `--layout`”是**不支持的组合**——要么使用默认的 `legacy`，要么先 `--layout` 再按第 5 节的方法把课程重命名到目标 ID；
+* 复制完成后**必须删除根文件**：根 `questions.json` 与 `courses/legacy/course.json` 同时存在会被判定为重复 `course_id`，
+  导致应用无法启动。确认新布局的课程能正常加载（`check_courses.py`）之后再删除，并且**不要在删除之前启动应用**。
 
 ### 2.4 验证
 
@@ -171,16 +225,59 @@ python scripts/publish_course.py --course physical_design --questions old_questi
   `question_bank_state(id = 1)` 读取，迁移后这些列不存在；`attempts` 等表新增的 `course_id` 是 `NOT NULL`
   且带外键。混用会导致 `no such column: id` / `NOT NULL constraint failed` 一类错误。
 * 迁移保留 namespace 与历史，但**无法推断**不可知的旧数据课程归属：旧数据全部归入第一次迁移时确定的
-  `LEGACY_COURSE_ID`，之后修改它不会重新归属。
+  `LEGACY_COURSE_ID`。普通运行时没有任何接口可以修改它（`CourseRepository` 只提供读取），唯一支持的方式是
+  下一节的显式 `rename_course.py`。
 * 迁移**不会**重算历史 fingerprint，也**不会**重写成绩。
 * 未迁移的数据库只能映射到 legacy 课程：`scripts/check_question_bank.py --course <非 legacy>` 会拒绝执行
   （退出码 4），因为把任意新课程候选与全库历史比较会给出误导性的结论。先迁移，再逐课程检查。
 * 历史考试不会获得完整的历史题目内容快照；报告仍基于当前 live 内容。
 * 聚合 `/ready` 的失败只表示"至少一门课程在本 worker 上不可服务"，**不**表示健康课程的路由也会失败。
+* `migrate_courses.py --layout` 固定使用 `legacy` 目录与 `legacy` 这个 `course_id`，与自定义
+  `--legacy-course-id` 组合不受支持（见 2.3）。
 
 ---
 
-## 5. 常见问题
+## 5. 重命名课程的 namespace（rename 与目录改名是两步）
+
+`course_id` 是这门课所有学习数据的 namespace，因此“改课程 ID”是一次数据迁移，用
+`scripts/rename_course.py` 完成（细节见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.6 节）：
+
+```bash
+python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_course_id> --dry-run
+python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_course_id> \
+  --courses-dir courses --rename-directory
+```
+
+要点：
+
+* 数据库部分在**一个 `BEGIN IMMEDIATE` 事务**里改写 `courses` / `quiz_progress` / `attempts` /
+  `wrong_questions` / `weak_knowledge_points` / `exam_sessions` / `question_bank_state` / `question_registry`，
+  并在提交前重新计数校验；目标 namespace 已有任何身份或 learner 行时拒绝执行；
+* 当被改名的 namespace 正是持久化的 `legacy_course_id` 时，该 `schema_meta` 键**会一起更新**，所以重启后不会再
+  冒出一个空的 `legacy` 课程（这也是**唯一**受支持的 `legacy_course_id` 变更方式）；
+* `exam_questions` 不参与改写：它不存 `course_id`，始终跟随父 session；
+* `--rename-directory` 是数据库提交**之后**的独立文件系统步骤：它把 `courses/<from>` 改名为 `courses/<to>`，并把新目录
+  manifest 的 `course_id` 改成目标值。
+
+**失败语义：目录改名失败不会回滚数据库。** 此时命令以退出码 1 结束，数据库里历史已经挂在新 namespace，而目录仍是旧名字，
+课程表现为 `undeployed`。恢复方式（二选一）：
+
+```bash
+# A) 手工补做目录改名（结果与工具一致）
+mv courses/<from> courses/<to>
+# 然后编辑 courses/<to>/course.json，把 course_id 改成 <to>
+
+# B) 用备份回退数据库，再重新执行一次完整的 rename
+cp -a instance/mcq.db.bak-<timestamp> instance/mcq.db
+python scripts/rename_course.py --db instance/mcq.db --from <from> --to <to> \
+  --courses-dir courses --rename-directory
+```
+
+无论走哪条路，收尾都要统一重启全部 worker，并用 `/ready/<to>` 确认。
+
+---
+
+## 6. 常见问题
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |

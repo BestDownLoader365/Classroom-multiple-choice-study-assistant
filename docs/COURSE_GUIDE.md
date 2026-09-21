@@ -36,8 +36,12 @@ Exam            = 全站唯一 exam_id，且父 session 上有显式 course_id
 
 两个**不同**的课程 ID 概念：
 
-* `LEGACY_COURSE_ID`（默认 `legacy`）：旧数据库第一次 migration 时确定并**持久化**在
-  `schema_meta.legacy_course_id`，永久表示"旧数据属于哪门课"。只能读取，不会被后续操作改写。
+* `LEGACY_COURSE_ID`（默认 `legacy`）：旧数据库第一次执行 schema migration 时确定并**持久化**在
+  `schema_meta.legacy_course_id`，永久表示"旧数据属于哪门课"。普通运行时的 `CourseRepository` API
+  **只提供读取**（`legacy_course_id()`），没有任何接口可以重新配置它——否则会静默把历史重新归属。
+  唯一支持的变更方式是显式运维操作 `scripts/rename_course.py`：它在改 namespace 时**会一起更新这个键**
+  （见 7.6），这样重启后不会再冒出一个空的 `legacy` 课程。启动时 `Database.register_courses()` 写入的是
+  **持久化后的值**而不是模块默认值，所以也不会把它重建回来。
 * `DEFAULT_COURSE_ID`（导航偏好）：只决定"没有显式课程 URL 的浏览器跳到哪里"，可以来自环境变量
   `MCQ_DEFAULT_COURSE` 或 `schema_meta.default_course_id`。修改它**绝不会**重新归属历史数据。
 
@@ -79,7 +83,22 @@ courses/
 manifest 声明的路径，`check_*.py` 的 `--published` 也只看 manifest 指向的文件）。它们只可能是旧课程的历史/回滚副本；
 `check_courses.py` 会把这类文件作为提示列出（见 7.1），编辑它不会生效。
 
-manifest（`schema_version: 1`）：
+manifest（`schema_version: 1`）——推荐让 `questions`/`glossary` 指向不可变发布副本：
+
+```json
+{
+  "schema_version": 1,
+  "course_id": "physical_design",
+  "title": "Physical Design",
+  "title_zh": "物理设计",
+  "enabled": true,
+  "questions": "versions/a8634a86…/questions.json",
+  "glossary": "versions/c3c68b98…/glossary.json",
+  "order": 20
+}
+```
+
+`--add` 与每次发布都会把内容归档到 `versions/<sha256>/`，并把 manifest 切换到那里，所以**新课程不会**在目录根部留下已发布副本。下面的 plain-file 形式只用于老课程或手工创建的课程（manifest 直接指向目录内的 `questions.json` / `glossary.json`）：
 
 ```json
 {
@@ -209,8 +228,12 @@ Web 层负责映射：stale worker → 503、stale form → 409、missing course
 
 * 每门课可选：`glossary: null` 表示没有。`/course/<id>/glossary` 在没有术语表时渲染明确的空状态，
   只下发空 payload，**绝不会**注入其他课程的术语。
-* 术语/别名只在本课程内可见（`(course_id, term_id)`）。
-* `glossary.json` **不参与**题库 generation：单独修改术语表不影响学习记录，也不会围栏 worker。
+* 术语/别名只在本课程内可见（`(course_id, term_id)`）；它只存在于当前课程的内存 `CourseServices` 中，
+  **不写入 SQLite**，术语 ID 也不是任何数据库注册表的主键。
+* `glossary.json` **不参与**题库 generation 或任何指纹：单独修改/发布术语表不影响学习记录，不会围栏 worker，
+  也不会让 worker 变 stale；`/ready` 与 `/ready/<course_id>` 很可能继续返回 200。
+* 但术语表只在**进程启动时**读入内存：已运行的 worker 仍在使用旧术语，**必须统一重启才能看到新内容**。
+  也就是说 readiness 不能证明术语表已重新加载，判断是否生效要用浏览器验收。
 * `app/static/js/glossary.js` 保持通用（只读取当前页面的 payload），不为不同课程复制算法。
 
 ---
@@ -322,8 +345,7 @@ python scripts/check_courses.py
 
 第 2 步与第 3 步的分工：
 
-* `--add` 对**新课程没有历史可比对**，所以它只做 schema 门禁（题库 `validate_bytes`、术语表离线覆盖校验），退出码
-  非 0 时不会创建课程目录；真正「与数据库比对」的报告只能在第 3 步做。
+* `--add` 对**新课程没有历史可比对**，所以它只做 schema 门禁（题库 `validate_bytes`、术语表离线覆盖校验）；任一校验失败时它**不会**写入 `course.json`，也**不会**写入任何 `versions/<sha256>/` 发布副本，但**不会**撤销你自己创建的目录或候选文件——`courses/<course_id>/` 与 `questions_candidate.json` / `glossary_candidate.json` 是维护者的工作副本，`--add` 只负责校验它们并创建课程声明。真正「与数据库比对」的报告只能在第 3 步做。
 * 第 3 步在 worker 首次启动之前运行也没问题：数据库里还没有该课程的 `question_registry` / `question_bank_state`
   行，检查会明确报告「该课程在数据库中没有 question_registry 记录：首次启动将建立基线」，退出码为 `0`；真实的历史
   差异要等该课程已激活后再用同一命令复查（那时它会读到已建立的基线）。
@@ -346,9 +368,7 @@ python scripts/check_courses.py
 课程目录**根部不会再写入** `questions.json` / `glossary.json`（那是 plain-file 布局，仅保留给旧课程与手工/legacy
 场景），所以新课程从第一天起就不存在「看起来一样、实际无人读取」的副本。
 
-`--add` 只做 schema 校验（新课程没有历史可比对），并提示 `created, pending worker activation`；重启 worker 后
-`/ready/<course_id>` 应返回 `ready`，`check_courses.py` 应列出该课程且状态为 `ok`。已有课程只能用
-`--questions`/`--glossary` 发布新内容，`--add` 会拒绝覆盖。
+`--add` 的执行顺序与提交点：读取候选 → 校验（题库 schema / 术语表覆盖）→ 创建 `courses/<course_id>/` → 取得 `.publish.lock` → 写入 `versions/<sha256>/` 归档副本 → **写入 `course.json`（唯一提交点）** → 版本清理。因此校验失败时不会有目录、manifest 或 `versions/` 副本；而 manifest 一旦写入，课程就已经被声明，后续（版本清理等）失败会在输出里说明。命令提示 `created, pending worker activation`；重启 worker 后 `/ready/<course_id>` 应返回 `ready`，`check_courses.py` 应列出该课程且状态为 `ok`。已有课程只能用 `--questions`/`--glossary` 发布新内容，`--add` 会拒绝覆盖。
 
 `courses` 表的那一行由 worker 启动时写入，`--add` 本身只改文件系统，所以新课程在第一次成功启动前，任何
 `--course <course_id>` 校验都还没有历史可比对；这不是错误，见第 3 步的说明。
@@ -368,7 +388,7 @@ python scripts/check_courses.py
 题库和术语表各自独立修改，标准流程都是「改候选 → 校验 → 发布」：
 
 ```bash
-# 题库：只编辑候选文件，不要原地覆盖正在使用的 questions.json
+# 题库：只编辑候选文件，不要原地覆盖正在使用的已发布文件
 python scripts/check_question_bank.py --course physical_design --db instance/mcq.db
 python scripts/publish_course.py --course physical_design --questions questions_candidate.json
 # （也可以省略 --questions：默认就发布 courses/physical_design/questions_candidate.json）
@@ -376,10 +396,22 @@ python scripts/publish_course.py --course physical_design --questions questions_
 # 术语表：同样先改候选文件
 python scripts/check_glossary.py --course physical_design
 python scripts/publish_course.py --course physical_design --glossary glossary_candidate.json
+```
 
-# 两个候选都改好了，可以一次发布（不传内容参数 = 使用两个默认候选）
+两个候选都改好时，可以一次命令发布两者（不传内容参数 = 使用该课程适用的默认候选）：
+
+```bash
 python scripts/publish_course.py --course physical_design
 ```
+
+但要理解这一次命令内部的语义：
+
+* `--questions` 与 `--glossary` 是**按顺序分别执行**的两个发布步骤，**不是两个文件的一次事务**。题库可能已经
+  切换成功而术语表步骤失败（此时命令以非 0 退出，但题库已经发布）；
+* 因此更稳妥的做法是**先分别完成两次只读预检**（`check_question_bank.py` 与 `check_glossary.py`），确认都通过；
+  需要清晰失败边界时按内容类型拆成两条命令发布；
+* 单个内容类型的 manifest 切换本身是原子的：候选字节被冻结一次、写入不可变副本、最后用一次 `os.replace` 切换 manifest；
+* 术语表不参与 generation：单独发布术语表不会推进 generation、不会让 worker stale，但**已运行的 worker 仍在使用旧的内存术语表，必须重启才能看到新内容**，而且 `/ready` 很可能一直是 200，不能用它证明术语表已重新加载。
 
 要点：
 
@@ -388,6 +420,9 @@ python scripts/publish_course.py --course physical_design
 * `publish_course.py` 默认会重跑对应的 `check_*.py` 并拒绝未通过的内容（`--skip-preflight` 可跳过，不推荐）。
 * 校验通过、发布成功后输出 `published, pending worker activation`；题库的结构性变化会让**该课程** generation +1，
   因此需要统一重启全部 worker，再用 `/ready/<course_id>` 确认；术语表不参与 generation。
+* bare `--course <course_id>` 只选取**存在且适用于当前 manifest** 的默认候选：题库候选存在就发布题库；术语表候选只有在
+  该课程 manifest 已声明 glossary（即 `glossary` 不是 `null`）时才自动发布。manifest 写 `glossary: null` 时，候选文件
+  仍然会被识别，但会被跳过并打印提示——启用术语表必须**显式**传 `--glossary`。
 * 确认最终数据：`python scripts/check_courses.py` 查看题目/术语数量，并重新启动应用后在页面上核对内容。
 
 ### 7.4 删除课程
@@ -434,6 +469,21 @@ python scripts/check_courses.py
 删除后该课程的题目 ID 退役记录一并消失：如果以后重新加入同名课程，它的 ID 从零开始，不会继承旧的退役状态。
 数据库里只剩身份、内容已不在的课程（`undeployed`）也可以用同一命令清理：它会报告为「未部署的课程身份」并只删除数据库记录。
 
+**执行顺序与失败语义（文件系统和数据库不是同一个事务）：**
+
+```text
+--dry-run 报告（不写任何内容）
+  → 复制带时间戳的数据库备份
+  → 删除课程目录（如果该课程有目录）
+  → 在一个事务里清理该课程的全部数据库行（提交前重新统计每张表的总行数）
+```
+
+* 数据库清理失败时（例如被占用或约束冲突），**目录已经被删除**，而数据库保持原样：命令会打印
+  「数据库清理失败（目录已删除，数据库保持原样）」并以退出码 1 结束。
+* 这种情况下课程会变成 `undeployed`（数据库有身份、内容已不在）。修复报错原因后**重新执行同一条命令**即可
+  只清理数据库记录（此时没有目录可删，命令会把它当作未部署身份处理），不需要手工写 SQL。
+* 目录删除失败时不会进入数据库清理阶段，数据库完全没有被改动。
+
 ### 7.5 停用 / 重新启用
 
 ```bash
@@ -449,17 +499,31 @@ python scripts/publish_course.py --course physical_design --enable
 
 ```bash
 # 先看会移动哪些行，不写任何内容
-python scripts/rename_course.py --db instance/mcq.db --from legacy --to eek5106 --dry-run
+python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_course_id> --dry-run
 
 # 真正执行（自动生成带时间戳的备份）
-python scripts/rename_course.py --db instance/mcq.db --from legacy --to eek5106
+python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_course_id>
 
 # 同时也移动课程目录并改写 manifest 的 course_id
-python scripts/rename_course.py --db instance/mcq.db --from legacy --to eek5106 \
+python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_course_id> \
   --courses-dir courses --rename-directory
 ```
 
 工具保证：先备份；在单个 `BEGIN IMMEDIATE` 事务内改写 `courses` / `quiz_progress` / `attempts` / `wrong_questions` / `weak_knowledge_points` / `exam_sessions` / `question_bank_state` / `question_registry`，并在前后重新计数校验（不一致就整体回滚）；目标 namespace 已有元数据或任何 learner 行时拒绝执行，避免把两个身份合并；`exam_questions` 不参与改写（它不含 `course_id`，始终跟随父 session）；如果改的正是持久化的 `legacy_course_id`，该键也会一起更新，所以重启后不会再出现一个空的 `legacy` 课程。
+
+**数据库改名与目录改名不是同一个事务。** 加 `--rename-directory` 时，
+
+```text
+备份数据库
+  → 一个事务内完成数据库 namespace rename（提交后即生效）
+  → 之后才作为独立步骤把 courses/<from> 改名为 courses/<to>
+      并改写新目录里 manifest 的 course_id（title / title_zh 属于内容决定，不自动改）
+```
+
+因此目录改名失败（权限、目标目录已存在、文件被占用）**不会**回滚数据库：命令以退出码 1 结束，数据库里历史已经挂在新的 `course_id` 下，但目录仍是旧名字。此时课程会表现为 `undeployed`（数据库有身份、本 worker 未声明）。修复方式二选一：
+
+* 手工完成目录改名（`mv courses/<from> courses/<to>`），并把新目录 `course.json` 的 `course_id` 改成目标值 —— 结果与工具一致；
+* 或者用备份回退数据库（`cp instance/mcq.db.bak-<timestamp> instance/mcq.db`），再重新执行一次完整的 rename。
 
 它**不会**清理数据、不会推进 generation、也不会重算 fingerprint：历史只是换了 namespace。完成后记得让 `courses/<course_id>/course.json` 的 `course_id` 与数据库一致，再重启 worker，并用 `/ready/<course_id>` 确认。
 
@@ -548,7 +612,7 @@ journalctl -u mcq-template.service -n 100 --no-pager | grep -E 'is stale|is unav
    `glossary_candidate.json`），不要原地覆盖正在使用的 `questions.json` / `glossary.json`。
 3. **运行校验**：`check_courses.py` 必须始终通过；题库再跑 `check_question_bank.py`，术语表再跑 `check_glossary.py`。
    不传文件参数时它们默认校验上面的候选文件（用 `--published` 可改为只校验已发布内容）。
-4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换，末尾会再做一次版本清理（见 7.11），最后统一重启全部 worker，并用 `/ready/<course_id>` 确认。
+4. **重新执行 publish course**：只有校验退出码为 `0` 才发布（`publish_course.py` 会在写入前内部重跑对应的 `check_*.py` 并拒绝未通过的内容；只有明确加 `--skip-preflight` 才跳过，且不推荐）。发布是纯文件系统切换：单个内容类型用一次 `os.replace` 切换 manifest；一条命令同时传 `--questions` 与 `--glossary` 时两者**顺序执行、各自独立**，不是跨文件事务（见 7.3 节）。末尾会再做一次版本清理（见 7.11），最后统一重启全部 worker，并用 `/ready/<course_id>` 确认（术语表不推进 generation，`/ready` 可能仍是 200，因此术语表是否生效必须靠浏览器验收确认）。
 
 校验未通过时不得发布：schema 校验失败或校验脚本返回非零时，发布命令不会替换、不会创建任何文件，也不会推进 generation。
 
@@ -609,7 +673,7 @@ python scripts/publish_course.py --course physical_design \
 | `chapter_ids` / `source_id` 变化 | 是 | +1 |
 | 课件/章节增删、顺序或归属（catalogue） | 是 | +1 |
 | 课程/课件/章节标题、`lecture`、`filename` | 是 | 不变 |
-| `glossary.json` | 是 | 不变 |
+| `glossary.json` | 是 | 不变（不推进 generation、不围栏 worker；但已运行的 worker 仍用旧术语，需要重启才生效） |
 | 一次成功发布（任意内容） | `versions/` 每个内容类型保留当前 + 上一版，更早的副本被清理（见 7.11） | 不变 |
 
 attempts 保留窗口是"每个 `(learner_id, course_id, question_id)` 最近 10 次"，仍跨 Normal / Review / Exam
@@ -629,7 +693,12 @@ generation → 旧 worker 才开始 learner 事务"这一竞态以**零 learner 
 * 历史考试**不会**神奇地获得完整的历史题目内容快照：报告始终基于当前 live 内容，且 grading fingerprint
   已变化的槽位会被排除在统计之外。
 * 被停用或不可用的课程**不会**用其他课程的同名题去补内容。
-* legacy migration 保留 namespace 与历史，但无法推断不可知的旧数据课程归属。
+* legacy migration 保留 namespace 与历史，但无法推断不可知的旧数据课程归属；持久化的 `legacy_course_id`
+  在普通运行时只读，只能通过 `scripts/rename_course.py` 显式迁移（见 7.6）。
 * 旧版应用无法在迁移后的 Schema 上安全运行（见
   [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)）。
+* 内容发布（文件系统）与数据库激活（worker 启动时的 reconciliation）**不是同一个事务**：`publish_course.py`
+  只报告 `published, pending worker activation`，从不会自行推进 generation。
+* 没有“跨课程的联合事务”：题库与术语表、多个课程之间都是各自独立的提交；遇到部分失败请按上面的
+  失败语义逐项收尾。
 

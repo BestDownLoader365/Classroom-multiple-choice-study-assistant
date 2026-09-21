@@ -2,6 +2,29 @@
 
 This document defines a standalone visual language for new interfaces. It specifies aesthetic character, color relationships, typography, layout, component proportions, interaction states, motion, and rules for extending the system. It does not prescribe a product structure, content model, navigation map, or technology stack.
 
+## How to read this document
+
+Three kinds of content live here, and they have different authority:
+
+| Kind | What it means | Where |
+|---|---|---|
+| **Normative design guidance** | The rules a new page or component must follow: color relationships, typography roles, spacing, motion character, accessibility. Changing them is a design decision. | The DNA, color, typography, layout, spacing, hierarchy, shape, interaction, motion, responsive, form-composition, feedback, accessibility and aesthetic-constraint sections |
+| **Currently implemented components** | Recipes that ship in `app/templates/` + `app/static/css/style.css` today, with the class names and markup the application actually uses. | Component recipes marked “Implemented”, plus [Implementation index](#implementation-index) |
+| **Extension specification (not implemented)** | Component recipes specified for future work. They follow this design language but **no template, CSS class, or JavaScript for them exists in this repository yet** — do not reference them in markup. | Component recipes marked “Extension spec” |
+
+Nothing in this document is a promise about the current repository. When a recipe and the code disagree, the code and its tests win.
+
+## Implementation index
+
+What actually ships today:
+
+* Templates (`app/templates/`): `base.html`, `auth.html`, `courses.html`, `home.html`, `quiz_setup.html`, `quiz.html`, `mistakes.html`, `review` (rendered through `quiz.html`), `dashboard.html`, `stats.html`, `exam_setup.html`, `exam.html`, `exam_report.html`, `glossary.html`, `error.html`.
+* Main CSS classes (`app/static/css/style.css`): page shell `page-shell` / `page-shell-workspace` / `content-stack`; headers `site-header` / `brand` / `header-actions` / `header-link`; course navigation `course-switcher` / `course-current` / `course-menu` / `course-menu-trigger` / `course-menu-list` / `course-menu-link` / `course-status`; surfaces `question-card` / `summary-card` / `auth-card` / `result-card` / `table-card` / `error-card`; data `data-table` / `table-wrap` / `metric-strip` / `report-metrics` / `trend-chart` / `mastery-bar` / `mastery-cell`; task continuation `task-band` / `task-progress` / `exam-resume`; controls `button` (`button-primary` / `button-secondary` / `button-ghost` / `button-danger` / `button-large`) / `field-group` / `size-picker-*` / `chapter-picker` / `chapter-option` / `option-row`; feedback `feedback` / `feedback-correct` / `feedback-wrong` / `flash` / `status` (`status-mastered` / `status-progressing` / `status-good` / `status-weak` / `status-pending` / `status-not-started`) / `empty-state`; glossary `glossary-grid` / `glossary-card` / `glossary-popover` / `glossary-reveal`.
+* `app.js` behavior: enable/disable the answer submit button and selection hint; confirm dialogs on restart/reset/submit forms; the bilingual toggle backed by `localStorage["mcq-bilingual"]`; focus management for the feedback region; the shared `initializePicker` listbox behavior for the quiz-size, mistake-filter and glossary-category pickers (hidden input + server-rendered option buttons); the global/per-source chapter checkbox synchronization (the “all chapters” box mirrors whether any specific chapter is ticked, and each per-source group toggle goes indeterminate when only part of that source is selected); the exam selection hint; the exam countdown mirror.
+* `glossary.js` behavior: longest-first literal term highlighting inside `data-glossary-highlight` containers, the keyboard-accessible definition popover, glossary search, category filtering, visible counts, empty state, and Chinese reveal.
+* `data-*` hooks in use: `data-answer-form`, `data-submit-answer`, `data-selection-hint`, `data-feedback`, `data-bilingual-toggle`, `data-confirm` / `data-confirm-restart` / `data-confirm-reset`, `data-picker` / `data-picker-value` / `data-picker-option` / `data-picker-submit-on-change` / `data-select-picker` / `data-select-menu` / `data-select-current` / `data-value`, `data-all-chapters` / `data-chapter-group` / `data-chapter-group-all` / `data-specific-chapter`, `data-exam-answer-form` / `data-exam-hint` / `data-exam-submit-form` / `data-exam-timer` / `data-remaining-seconds`, `data-course-id` / `data-current-course`, `data-glossary-highlight` / `data-glossary-page` / `data-glossary-grid` / `data-glossary-card` / `data-glossary-term` / `data-glossary-search` / `data-glossary-reveal` / `data-glossary-skip` / `data-glossary-visible-count` / `data-glossary-empty` / `data-term-id`, `data-option-row` / `data-correct-option` / `data-selected-option` / `data-corrected-question`, `data-table` / `data-label`, `data-error-course-id`.
+* Responsive breakpoints: `max-width: 820px` (header becomes two rows, the course picker takes a full-width row, the course grid collapses to one column, inner grids stack) and `max-width: 640px` (low-priority labels such as `当前课程` are dropped and long titles truncate). `prefers-reduced-motion: reduce` removes decorative transitions.
+
 # Design DNA
 
 The visual language is restrained, editorial, spacious, sharp, and predominantly flat.
@@ -436,7 +459,11 @@ Responsive design must change composition, not merely shrink typography.
 
 # Component Recipes
 
-## Button
+Each recipe below is marked either **Implemented** (present in `app/templates/` + `app/static/css/style.css` today, with the class names the application uses) or **Extension spec** (specified for future work; nothing in this repository implements it yet, so do not reference it from markup). See [Implementation index](#implementation-index) for the full inventory.
+
+## Button — Implemented
+
+Implemented as `.button` plus the variants `.button-primary`, `.button-secondary`, `.button-ghost`, `.button-danger` and the size modifier `.button-large`, together with the text-only affordance `.header-link` and the small square/circular controls `.agenda-arrow`, `.restart-button`, `.submit-answer` and `.glossary-popover-close`.
 
 - **Anatomy:** Container, text label, optional leading or trailing icon, optional secondary line, optional loading indicator.
 - **Dimensions:** Default min-height `46px`; compact `40px`; prominent `72px`. Default padding `12px 20px`; compact `8px 12px`; prominent `17px 22px`. Radius `2px`; content gap `14px`.
@@ -452,7 +479,9 @@ Responsive design must change composition, not merely shrink typography.
 - **Motion:** Color, border, and background `140ms ease`; optional press transform `100ms`.
 - **Usage rules:** Use one primary button per local action group. Use ghost for low-priority navigation or cancellation. Confirm irreversible destructive actions.
 
-## Metric Summary
+## Metric Summary — Implemented
+
+Shipped as .metric-strip, .report-metrics, .result-stats and .report-score.
 
 - **Purpose:** Compactly communicate counts, progress state, or lightweight product status without implying a full analytics dashboard.
 - **Anatomy:** Short label, value, and optional concise qualifier. Use tabular numerals where alignment benefits comparison.
@@ -460,7 +489,9 @@ Responsive design must change composition, not merely shrink typography.
 - **Hierarchy:** Metrics must not compete with the primary task. Do not enlarge zero values merely to preserve symmetry.
 - **Usage rules:** Do not automatically use equal three-column KPI layouts. Give metrics separate surfaces only when they require genuinely independent interaction, explanation, or comparison.
 
-## Task Continuation / Resume Block
+## Task Continuation / Resume Block — Implemented
+
+Shipped as .task-band with .task-progress / .task-position / .task-actions, and .exam-resume.
 
 - **Purpose:** Resume an unfinished learning session, draft, form, onboarding sequence, checkout, workflow, or other long-running task.
 - **Anatomy:** Context, current state or progress, optional progress indicator, one explicit primary continuation action, and an optional secondary restart or abandon action.
@@ -468,7 +499,9 @@ Responsive design must change composition, not merely shrink typography.
 - **Semantics:** Separate status from action. A phrase such as “Step 5 of 10” describes state; “Continue” invokes an action.
 - **Usage rules:** Do not combine status copy and the primary action into one ambiguous oversized CTA. Progress indicators must reflect completed work rather than merely echoing the current item number.
 
-## Icon Button
+## Icon Button — Implemented
+
+Shipped as .agenda-arrow, .restart-button, .submit-answer and .glossary-popover-close.
 
 - **Anatomy:** Button container, one icon, accessible name, optional tooltip.
 - **Dimensions:** Default `40×40px`; comfortable `46×46px`; icon `16px`; close glyph may be `20–22px`. Radius `2px`.
@@ -484,7 +517,9 @@ Responsive design must change composition, not merely shrink typography.
 - **Motion:** Color/background `140ms`; tooltip follows its own recipe.
 - **Usage rules:** Use for universally understood actions such as close or directional navigation. Prefer a labeled button when meaning could be ambiguous.
 
-## Input
+## Input — Implemented
+
+Shipped as .field-group with its label/help/error structure; inputs are styled from the shared control tokens.
 
 - **Anatomy:** Label, input control, optional helper text, optional error text, optional prefix/suffix.
 - **Dimensions:** Min-height `46px`; compact search height `38–40px`; horizontal padding `0–8px`; vertical padding `8px`; prefix/suffix icon `16px`.
@@ -500,7 +535,9 @@ Responsive design must change composition, not merely shrink typography.
 - **Motion:** Border and color `140ms ease`.
 - **Usage rules:** Every input needs a visible or programmatic label. Connect helper/error text programmatically. Use invalid-state semantics for errors.
 
-## Textarea
+## Textarea — Extension spec
+
+Not implemented in this repository yet: no template, class or script uses it. Treat the recipe below as a target for future work.
 
 - **Anatomy:** Label, multiline field, optional character count, helper, and error.
 - **Dimensions:** Min-height `120px`; padding `12px`; resize vertically by default; radius `0`.
@@ -516,7 +553,9 @@ Responsive design must change composition, not merely shrink typography.
 - **Motion:** Border/color `140ms`.
 - **Usage rules:** Use for genuinely multiline content. Keep line length readable and avoid auto-growing without a sensible maximum.
 
-## Select
+## Select — Implemented
+
+Shipped as the custom listbox picker (.size-picker-trigger / .size-picker-menu / .size-picker-option) and .chapter-picker; there is no native select element.
 
 - **Anatomy:** Label, trigger, selected value or placeholder, optional leading icon, trailing chevron, value representation.
 - **Dimensions:** Trigger min-height `38px` in compact rows or `46px` in standalone forms; right-side chevron reserve `32–36px`; icon `16px`.
@@ -532,7 +571,9 @@ Responsive design must change composition, not merely shrink typography.
 - **Motion:** Chevron `180ms ease.emphasized`; floating surface follows Dropdown.
 - **Usage rules:** Use for choosing one value. The control must expose its name, expanded state, selected value, and related list semantics to assistive technology.
 
-## Dropdown and Menu
+## Dropdown and Menu — Implemented
+
+Shipped as a native details/summary disclosure plus the .size-picker-menu and .course-menu / .course-menu-list floating list.
 
 ### Anatomy
 
@@ -601,7 +642,9 @@ Trigger, floating surface, optional group label, menu items, separators, optiona
 
 Use Select for choosing a value and Menu for invoking actions. Do not mix navigation, destructive actions, checkable options, and complex form fields without clear grouping. Do not place long explanatory content in a menu item.
 
-## Checkbox
+## Checkbox — Implemented
+
+Shipped as native checkboxes inside .chapter-option, .chapter-option-all, .source-select-all and .option-row.
 
 - **Anatomy:** Control, label, optional supporting text, optional indeterminate state.
 - **Dimensions:** Box `16–18px`; label hit target at least `40px` high; label gap `9–12px`.
@@ -617,7 +660,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Border/background/check opacity `100–140ms`.
 - **Usage rules:** Use for independent multi-selection. Support an indeterminate state for group selection.
 
-## Radio
+## Radio — Implemented
+
+Shipped as native radios inside .option-row for single-choice questions.
 
 - **Anatomy:** Circular control, label, optional supporting text.
 - **Dimensions:** Control `18px`; label target at least `40px` high; gap `10–12px`.
@@ -633,7 +678,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Color/background `100–140ms`.
 - **Usage rules:** Use for one choice among visible alternatives. Use Select when the option set is long or space is constrained.
 
-## Switch
+## Switch — Extension spec
+
+Not implemented in this repository yet: no template, class or script uses it. Treat the recipe below as a target for future work.
 
 - **Anatomy:** Track, thumb, label, optional state description.
 - **Dimensions:** Track `42×22px`; thumb `16px`; internal inset `3px`; label target at least `44px` high.
@@ -649,7 +696,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Thumb translation and track color `140–180ms ease.emphasized`.
 - **Usage rules:** Use for an immediately applied binary setting. Use Checkbox when submission is deferred.
 
-## Tabs
+## Tabs — Extension spec
+
+Not implemented in this repository yet: no template, class or script uses it. Treat the recipe below as a target for future work.
 
 - **Anatomy:** Tab list, tab triggers, active indicator, tab panels.
 - **Dimensions:** Trigger min-height `40px`; horizontal padding `0–4px`; gap `12–16px`; indicator `2px`.
@@ -665,7 +714,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Indicator position/width `180ms ease.emphasized`; text color `140ms`.
 - **Usage rules:** Support Left/Right/Home/End with roving focus. On narrow screens, scroll the tab list horizontally.
 
-## Card
+## Card — Implemented
+
+Shipped as .question-card, .summary-card, .auth-card, .result-card, .table-card, .error-card and .glossary-card.
 
 - **Anatomy:** Optional header, body, optional footer/actions, optional top rule.
 - **Dimensions:** Compact padding `16px`; default `22–24px`; reading panel `clamp(30px, 6vw, 70px)`. Grid gap `10–12px`.
@@ -681,7 +732,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Interactive border/background/transform `140ms`.
 - **Usage rules:** Do not make every section a card. Do not nest multiple raised cards.
 
-## Modal
+## Modal — Extension spec
+
+Not implemented in this repository yet: no template, class or script uses it. Treat the recipe below as a target for future work.
 
 - **Anatomy:** Overlay, dialog surface, title, body, close control, action row.
 - **Dimensions:** Width `min(520px, viewport width - 36px)`; optional wide variant up to `720px`; max-height `viewport height - 48px`; padding `24–32px`.
@@ -697,7 +750,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Overlay fade `180ms`; dialog opacity + `5px` translation + `.985→1` scale over `180–220ms`.
 - **Usage rules:** Support Escape and a visible close control. Decide outside-click dismissal according to consequence. Require explicit confirmation for destructive actions.
 
-## Popover
+## Popover — Implemented
+
+Shipped as the glossary definition popover only (.glossary-popover and its parts); there is no generic popover component.
 
 - **Anatomy:** Anchor, floating surface, optional heading, content, optional close control.
 - **Dimensions:** Width `min(340px, viewport width - 24px)`; max-height `viewport height - 24px`; padding `20px 22px`; offset `9px`; viewport gutter `12px`.
@@ -713,7 +768,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Opacity `130ms` plus `5px` translation over `160ms ease.emphasized`.
 - **Usage rules:** Reposition on scroll/resize, clamp horizontally, and flip vertically. Use for contextual content or compact interaction, not critical multi-step flows.
 
-## Tooltip
+## Tooltip — Extension spec
+
+Not implemented in this repository yet: no template, class or script uses it. Treat the recipe below as a target for future work.
 
 - **Anatomy:** Trigger relationship and short text bubble; optional small directional pointer.
 - **Dimensions:** Padding `6px 8px`; max-width `240px`; offset `6–8px`; radius `2px`.
@@ -729,7 +786,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Opacity + `2–3px` translation over `100–140ms`.
 - **Usage rules:** Tooltips provide supplementary labels, never essential instructions or interactive content.
 
-## Toast
+## Toast — Extension spec
+
+Not implemented in this repository yet: no template, class or script uses it. Treat the recipe below as a target for future work.
 
 - **Anatomy:** Semantic rule or marker, message, optional action, optional close button.
 - **Dimensions:** Width `min(360px, viewport width - 36px)`; padding `12px 16px`; stack gap `8px`.
@@ -745,7 +804,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Opacity + `8px` translation over `180ms`; no bounce.
 - **Usage rules:** Auto-dismiss low-risk success/information after `5–7s`; keep errors or actionable notices until dismissed. Announce with the appropriate live-region politeness.
 
-## Table
+## Table — Implemented
+
+Shipped as .table-wrap + .data-table with .table-link rows.
 
 - **Anatomy:** Optional caption/toolbar, header, body rows, cells, optional row actions, empty/loading region.
 - **Dimensions:** Desktop cells `19px 22px`; compact cells `14px`; row target at least `44px`.
@@ -761,7 +822,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 - **Motion:** Row color `140ms`; sorting/reordering should avoid large movement.
 - **Usage rules:** Use horizontal scrolling when cross-column comparison is essential. Otherwise, below `640px`, convert each row into labeled value blocks and retain accessible header relationships.
 
-## Navigation
+## Navigation — Implemented
+
+Shipped as .site-header, .brand, .course-switcher / .course-menu-*, and the .agenda-row / .resource-row link rows.
 
 - **Anatomy:** Brand or title, primary links, optional secondary actions, optional side rail, optional compact mobile control.
 - **Dimensions:** Top toolbar `64–66px`; text action min-height `38px`; side rail `240–280px`; icon `16px`.
@@ -793,7 +856,9 @@ Use Select for choosing a value and Menu for invoking actions. Do not mix naviga
 
 Secondary does not mean tiny. Keep a rail wide enough for readable titles and descriptions; adjust the column ratio or breakpoint before shrinking typography. Repeated entries should use a shared interactive-row rhythm rather than disconnected small cards. A comfortable desktop rail is typically `320–380px` when the main task has priority.
 
-## Badge
+## Badge — Implemented
+
+Shipped as the .status chips (.status-mastered / .status-progressing / .status-good / .status-weak / .status-pending / .status-not-started), .mode-pill and .knowledge-status.
 
 - **Anatomy:** Short text, optional `6px` status dot, optional compact icon.
 - **Dimensions:** Padding `4px 7px`; min-height approximately `22px`; icon/dot gap `6–7px`; radius `0` by default.
@@ -809,7 +874,9 @@ Secondary does not mean tiny. Keep a rail wide enough for readable titles and de
 - **Motion:** Color/background `100–140ms` when interactive.
 - **Usage rules:** Keep labels brief. Do not use large rounded pills as decoration.
 
-## Avatar
+## Avatar — Extension spec
+
+Not implemented in this repository yet: no template, class or script uses it. Treat the recipe below as a target for future work.
 
 - **Anatomy:** Image or initials, accessible text alternative, optional status dot.
 - **Dimensions:** Compact `32px`; default `40px`; large `56px`; status dot `6–8px`.
@@ -825,7 +892,9 @@ Secondary does not mean tiny. Keep a rail wide enough for readable titles and de
 - **Motion:** Border/color `140ms`; no image zoom.
 - **Usage rules:** Avatars identify people or persistent identities; do not use them as generic decoration.
 
-## Skeleton
+## Skeleton — Extension spec
+
+Not implemented in this repository yet: no template, class or script uses it. Treat the recipe below as a target for future work.
 
 - **Anatomy:** Shape blocks matching the final layout.
 - **Dimensions:** Match the expected text lines, controls, images, and cards; text lines use `8–12px` height with realistic varying widths.
@@ -841,7 +910,9 @@ Secondary does not mean tiny. Keep a rail wide enough for readable titles and de
 - **Motion:** `1000–1400ms` low-contrast pulse; static under reduced motion.
 - **Usage rules:** Use when structure is known and loading lasts long enough to perceive. Use concise progress text when structure is unknown.
 
-## Empty State
+## Empty State — Implemented
+
+Shipped as .empty-state with .empty-actions.
 
 - **Anatomy:** Heading, description, optional primary action, optional secondary action.
 - **Dimensions:** Vertical padding `clamp(54px, 9vw, 100px)` and horizontal padding `24px`; keep text in a compact centered measure.
@@ -911,6 +982,35 @@ Use the accent family for important neutral notices. Keep informational feedback
 # Design Tokens
 
 The following CSS variables are an illustrative, technology-neutral encoding. Equivalent tokens may be represented in any platform as long as names, values, and relationships remain consistent.
+
+**Token → implemented CSS variable.** The shipped stylesheet predates this document and uses its own names, so this table is the authoritative translation between the two. Use the right-hand column when writing CSS for this application:
+
+| Design token | Implemented CSS variable | Value |
+|---|---|---|
+| `surface.canvas` | `--paper` | `#f1eee6` |
+| `surface.subtle` | `--paper-deep` | `#e5dfd2` |
+| `surface.primary` | `--sheet` | `#faf8f2` |
+| `surface.raised` / `surface.hover` | `--sheet-bright` | `#fffdf8` |
+| `surface.selected` / `accent.subtle` | `--accent-soft` | `#f2e2da` |
+| `text.primary` | `--ink` | `#20231f` |
+| `text.secondary` | `--ink-soft` | `#51564f` |
+| `text.muted` | `--muted` | `#747970` |
+| `text.disabled` | *(no dedicated variable; `--muted` is used)* | — |
+| `text.inverse` | *(no dedicated variable; `--sheet-bright` is used)* | — |
+| `border.subtle` | `--line` | `#d1ccbf` |
+| `border.default` | `--line-strong` | `#aaa598` |
+| `border.strong` | `--ink` | `#20231f` |
+| `border.focus` / `accent.focus` | `--focus` | `rgba(161, 68, 47, 0.26)` |
+| `accent.primary` | `--accent` | `#a1442f` |
+| `accent.hover` / `accent.active` | `--accent-dark` | `#783122` |
+| `positive` / `positive-subtle` | `--success` / `--success-soft` | `#356b55` / `#e4eee7` |
+| `destructive` / `destructive-subtle` | `--danger` / `--danger-soft` | `#9d3c35` / `#f3e2de` |
+| `warning` / `warning-subtle` | `--warning` / `--warning-soft` | `#8a642c` / `#f2ead8` |
+| `font.display` | `--font-display` | Iowan Old Style / Palatino / Noto Serif SC / Songti SC / Georgia, serif |
+| `font.interface` | `--font-ui` | Inter / system-ui / Segoe UI / Microsoft YaHei, sans-serif |
+| `font.metadata` | `--font-data` | SFMono-Regular / Consolas / Liberation Mono, monospace |
+
+There is no implemented variable for the spacing, radius, shadow, motion or size scales below: the stylesheet writes those values literally (page shell `1180px`, control height `46px`, radius `0–2px`, durations `100–220ms`). Treat the scale below as the normative target when adding new rules, and keep the literal values consistent with it.
 
 ```css
 :root {
@@ -1170,3 +1270,26 @@ introducing a second look:
 The header always names the course the current page belongs to, and every page's
 forms post back to the same `course_id`, so the selector is navigation only — it
 never resets progress and never restarts the service.
+
+### What each surface actually lists
+
+The two course surfaces are deliberately different, and neither invents a course:
+
+* **Header menu** (`base.html`): only courses that are *declared by this worker's
+  catalogue and enabled*. A declared, enabled course that is `unavailable` or
+  `stale` **is** listed — with its state appended as a `.course-status` suffix
+  (`（unavailable）` / `（stale）`) — because the learner must be able to navigate to
+  it and get an honest 503. Courses that are `disabled` (`enabled: false`) and
+  `undeployed` (known to the database but absent from this worker's catalogue) are
+  **not** listed in the header menu at all. The last entry is always
+  `全部课程`, which links to `/courses`.
+* **`/courses` page** (`courses.html`): renders **every** `CourseState` this worker
+  knows, including `disabled` and `undeployed`, each as a `.course-card` with the
+  status chip `可学习` / `等待更新` / `已停用` / `未部署` / `不可用` and the state-specific
+  tint class (`.course-card-disabled`, `.course-card-stale`, `.course-card-undeployed`,
+  `.course-card-unavailable`). Only a `ready` card carries the primary
+  `开始学习` action; the others explain themselves with a `.launcher-note` instead.
+  An empty catalogue falls back to the `.empty-state` block.
+
+Because the state is recomputed against the database on every request, a course can
+move between `可学习` and `等待更新` without any page or process reload.

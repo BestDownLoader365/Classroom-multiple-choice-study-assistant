@@ -6,27 +6,44 @@
 
 ## 1. 文件用途与放置位置
 
-`glossary.json` 属于**某门课程**，放在该课程的目录里，也就是与它的 `course.json`（manifest）和 `questions.json` 同级：
+`glossary.json` 属于**某门课程**。它可能是下面五种情形之一，注意区分：
+
+| 路径 / 取值 | 角色 | 谁读它 |
+| --- | --- | --- |
+| `courses/<course_id>/glossary_candidate.json` | **candidate**：维护者编辑、`check_glossary.py` 与 `publish_course.py --glossary` 的默认输入 | 只读校验脚本与发布命令（不被 worker 加载） |
+| `courses/<course_id>/course.json` 的 `glossary` 字段 | **published content pointer**：唯一已发布指针，指向下面两种之一；写 `null` 表示本课程明确没有术语表 | 应用启动时的 `CourseLoader` |
+| `courses/<course_id>/versions/<sha256>/glossary.json` | **immutable version**：`--add` 与每次发布写入的不可变副本（推荐布局） | 通过 manifest 指针间接读取 |
+| `courses/<course_id>/glossary.json` | **plain-file 兼容布局**：老课程或手工创建的课程，manifest 直接指向它 | 通过 manifest 指针间接读取 |
+| 根目录 `glossary.json` | **legacy root adapter**：没有 manifest 的兼容入口，作为 `course_id = legacy` 的虚拟课程术语表加载 | 应用启动时的 legacy adapter |
 
 ```text
 courses/<course_id>/
-├── course.json      # 声明 "glossary": "glossary.json"，或 "glossary": null 表示没有术语表
-├── questions.json
-└── glossary.json
+├── course.json      # "glossary": "versions/<sha256>/glossary.json"，或 "glossary": null
+├── glossary_candidate.json
+└── versions/<sha256>/glossary.json
 ```
 
-应用启动时读取并完整校验它，修改后需要重启开发服务器或生产 worker 才会生效。manifest 声明了 glossary 但文件缺失/损坏时，该课程会被标记为 `unavailable`（不会假装“没有术语表”）；`glossary: null` 才是明确的“本课程没有术语表”。旧版的根目录 `glossary.json` 仍然可用：它会作为 `legacy` 课程的术语表加载。发布后 manifest 指向 `versions/<sha256>/glossary.json`，每次发布只保留“当前 + 上一版”两份副本（见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节），上一版可随时当作候选重新发布以回退。
+应用启动时读取并完整校验它，修改后需要重启开发服务器或生产 worker 才会生效。manifest 声明了 glossary 但文件缺失/损坏时，该课程会被标记为 `unavailable`（不会假装“没有术语表”）；`glossary: null` 才是明确的“本课程没有术语表”。
 
 两个 JSON 文件职责不同：
 
-- `questions.json` 保存题目、选项、答案、解析和课程目录；
-- `glossary.json` 保存专业术语、别名、翻译、释义和分类；
-- 术语数据不写入 SQLite，也不参与任何题库指纹（`bank_version` 与 grading / content / placement / catalogue 指纹），并且**按课程隔离**（术语身份是 `(course_id, term_id)`）：题面高亮只用当前课程的术语，课程之间不会互相注入、也不会共用别名；
-- 只修改 `glossary.json` 不会清空账号、答题记录、错题状态或练习进度，也不会推进该课程的 generation：`/ready/<course_id>` 依旧为 200，学习页面不会因此返回 503。
+- `questions.json` 保存题目、选项、答案、解析和课程目录，**包括中文字段** `text_zh`、`options[].text_zh`、`explanation_zh`；
+- `glossary.json` 保存专业词汇：规范词条 `term`、别名 `aliases`、中文译名 `term_zh`、中文释义 `definition_zh` 和分类 `category`；
+- 术语表**只存在于当前课程的内存中**（`CourseServices.glossary_repository`），**不写入 SQLite**，也**不参与任何题库指纹或 generation**（`bank_version` 与 grading / content / placement / catalogue 指纹都不包含它）；
+- 术语 ID 是**课程内本地身份**（`(course_id, term_id)`），不是任何数据库注册表的主键：题面高亮只用当前课程的术语，课程之间不会互相注入、也不会共用别名；
+- 只修改/发布 `glossary.json` 不会清空账号、答题记录、错题状态或练习进度，也**不会**推进该课程的 generation、**不会**让 worker 变 stale：`/ready` 与 `/ready/<course_id>` 仍可能是 200，学习页面不会因此返回 503。
+
+### 1.1 发布术语表之后仍然要重启 worker
+
+术语表只在**进程启动时**读入内存，所以上面那条“不影响 generation”不等于“无需重启”：
+
+* 已经运行的 worker 会继续使用**旧的内存术语表**，直到它被重启；页面上的高亮、释义新内容都不会出现；
+* 因为 generation 没有变化，`/ready` 与 `/ready/<course_id>` 很可能**继续返回 200**——readiness 只证明课程可以服务，**不能**用来证明术语表已经重新加载；
+* 因此术语表发布的收尾动作依然是“统一重启全部 worker”，再用浏览器确认新术语生效（见第 10 节）。判断“是否需要重启”请以内容是否已发布为准，而不是以 `/ready` 的状态为准。
 
 ## 2. 可直接使用的完整示例
 
-当前术语库使用 `schema_version: 1`。下面的统计学示例不依赖部署中的半导体课程（例如 `eek5106`），可以直接通过 Loader 校验：
+当前术语库使用 `schema_version: 1`。下面的统计学示例不依赖部署中的任意一门课程，可以直接通过 Loader 校验（把它保存为某门课的 candidate 文件，或直接传给 Loader 的路径参数）。
 
 ```json
 {
@@ -162,26 +179,28 @@ ID、文件名、页码、中文翻译和答案 ID 不属于覆盖语料。校�
 
 ## 9. 校验命令
 
-以下命令均在项目根目录执行，`<course_id>` 用课程 manifest 里的身份（例如 `eek5106`）；只声明了一门启用课程时可以省略 `--course`。
+以下命令均在项目根目录执行，`<course_id>` 用课程 manifest 里的身份（例如 `physical_design`）；只声明了一门启用课程时可以省略 `--course`。
 
 ### 9.1 检查 JSON 语法
+
+先检查候选文件（`courses/<course_id>/glossary_candidate.json`）；如果你要检查别的文件（manifest 指向的已发布文件或某个 `versions/<sha256>/glossary.json`），把路径换成它即可。
 
 Linux、macOS 或 WSL：
 
 ```bash
-python -m json.tool courses/<course_id>/glossary.json > /dev/null
+python -m json.tool courses/<course_id>/glossary_candidate.json > /dev/null
 ```
 
 PowerShell：
 
 ```powershell
-python -m json.tool courses/<course_id>/glossary.json | Out-Null
+python -m json.tool courses/<course_id>/glossary_candidate.json | Out-Null
 ```
 
 ### 9.2 使用当前 Loader 校验完整契约
 
 ```bash
-python -c "from pathlib import Path; from app.repositories import GlossaryLoader; g = GlossaryLoader(Path('courses/eek5106/glossary.json')).load(); print(f'OK: {len(g.terms)} terms, {sum(len(t.aliases) for t in g.terms)} aliases')"
+python -c "from pathlib import Path; from app.repositories import GlossaryLoader; g = GlossaryLoader(Path('courses/<course_id>/glossary_candidate.json')).load(); print(f'OK: {len(g.terms)} terms, {sum(len(t.aliases) for t in g.terms)} aliases')"
 ```
 
 也可以直接让课程目录校验把每门课的题目数与术语数一次报出来：
@@ -197,14 +216,14 @@ python scripts/check_courses.py
 校验单门课程（用该课程自己的题库做语料）：
 
 ```bash
-python scripts/check_glossary.py --course eek5106
+python scripts/check_glossary.py --course <course_id>
 ```
 
 课程目录里存在 `questions_candidate.json` / `glossary_candidate.json` 时，它们就是默认校验对象（报告会打印实
 际读取的两个文件与来源）；只想复核已发布内容时加 `--published`：
 
 ```bash
-python scripts/check_glossary.py --course eek5106 --published
+python scripts/check_glossary.py --course <course_id> --published
 ```
 
 校验全部启用课程：
@@ -248,13 +267,14 @@ pytest -q
 重启应用并登录后，至少检查：
 
 1. 首页“专业词汇”入口显示新术语库的中文标题。
-2. `/glossary` 显示正确标题、简介、术语数量和动态分类数量。
+2. `/course/<course_id>/glossary` 显示正确标题、简介、术语数量和动态分类数量。
 3. 搜索可以匹配英文 term、alias、中文释义和分类。
 4. 选择分类后卡片立即筛选，无需提交按钮；选择“全部分类”可恢复全部词条。
 5. “显示中文 / 隐藏中文”按钮能显示中文术语与中文释义；卡片与弹层里都不再出现英文定义。
-6. 题目、反馈和错题中的 term/alias 被正确高亮，点击、Enter 和 Space 均可打开释义。
+6. `/course/<course_id>/`、`/course/<course_id>/quiz`、反馈和 `/course/<course_id>/mistakes` 中的 term/alias 被正确高亮，点击、Enter 和 Space 均可打开释义。
 7. 短词没有误命中较长单词，重叠短语由更长术语优先匹配。
 8. 手机宽度下词汇卡片、分类下拉框和弹层可正常阅读。
+9. 切到另一门课程后只看到那门课程的术语（课程没有术语表时无高亮、空状态明确）。
 
 ## 11. 常见错误
 
@@ -282,13 +302,16 @@ pytest -q
 5. 编写简洁、课程语境明确的中文释义 `definition_zh`（英文定义 `definition` 已退役，不要再写）。
 6. 运行 `python -m json.tool`、`python scripts/check_glossary.py --course <course_id>` 覆盖校验；课程目录或 manifest 有改动时再跑 `python scripts/check_courses.py`。
 7. 人工处理 retired field、orphan 与候选报告，不要把候选结果直接批量写入术语库。
-8. 校验通过后再部署 `questions.json` 和 `glossary.json`（`python scripts/publish_course.py --course <course_id> --questions questions_candidate.json --glossary glossary_candidate.json` 可一次发布两者，不传内容参数时默认发布的也正是这两个候选文件；默认会重跑对应校验），重启应用进程并完成浏览器验收。发布结束会打印版本保留结果：每个内容类型只保留**当前版本 + 上一版**（见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节），因此上一版随时可以回退。
+8. 校验通过后再发布（见第 12 节），默认会重跑 `check_glossary.py`：`python scripts/publish_course.py --course <course_id> --glossary glossary_candidate.json`（不传 `--glossary` 时，若该课程 manifest 已声明术语表，默认发布的正是这个候选文件；manifest 写 `glossary: null` 时默认候选**不会**自动发布，必须显式传 `--glossary`）。
+
+术语表发布与题库发布是**两次独立的文件系统切换**，不是跨文件事务：同时传 `--questions` 与 `--glossary` 时它们按顺序分别执行，题库可能已经发布成功而术语表步骤失败。推荐先完成两次只读预检，必要时按内容类型分成两条命令发布，以获得清晰的失败边界。发布后必须**统一重启全部 worker**才能让新术语生效（术语表不参与 generation，`/ready` 很可能仍是 200，因此 readiness 不能证明术语表已重新加载；见第 1.1 节）。发布结束会打印版本保留结果：每个内容类型只保留**当前版本 + 上一版**（见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节），因此上一版随时可以回退。
 
 更换 `questions.json` 时按 [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) 第 11.6 节发布：先预检（`--course <course_id>`）、再原子发布（`publish_course.py --questions`）、最后更新 worker。题库按 `question.id` **在该课程内**逐题增量同步，**不会重置该课程的学习数据**；只有结构性变化（增删题目、判题规则变化、题目归属 `chapter_ids`/`source_id` 变化、课件/章节目录结构变化）会推进**该课程**的 generation，让仍在运行旧内容的 worker 只在该课程的学习页面返回 503，因此这类发布要更新 worker，但**不影响其他课程**。`glossary.json` 不属于任何题库指纹，单独修改它既不触发同步、也不影响 worker 围栏。发布新课程时建议两个文件一起审核，避免旧术语出现在新题库中。
 
 ## 13. 发布前检查清单
 
-- [ ] manifest 的 `glossary` 指向该课程目录内正确的文件名（或明确写 `null`），编码为 UTF-8。
+- [ ] manifest 的 `glossary` 指向该课程目录内正确的文件名（推荐 `versions/<sha256>/glossary.json`；plain-file 布局可写 `glossary.json`），或明确写 `null`，编码为 UTF-8。
+- [ ] 编辑的是 candidate 文件（`courses/<course_id>/glossary_candidate.json`），且已用 `python scripts/check_glossary.py --course <course_id>` 校验过它（`--published` 用于复核已发布内容）。
 - [ ] `schema_version` 是整数 `1`。
 - [ ] 根级 `title`、`title_zh` 和 `terms` 已提供。
 - [ ] 每个词条都有唯一稳定的 `id`、`term` 和 `term_zh`。
@@ -300,6 +323,7 @@ pytest -q
 - [ ] 分类名称与粒度一致，词条顺序符合学习需要。
 - [ ] 标准 JSON、GlossaryLoader、`check_glossary.py` 覆盖校验、`check_courses.py` 和完整测试集已运行且通过。
 - [ ] orphan 和候选报告已经人工复核。
-- [ ] 校验全部通过后才执行 publish course（`publish_course.py --glossary …`，默认会重跑 `check_glossary.py`）；任一校验失败时没有发布任何内容。
+- [ ] 校验全部通过后才执行 publish course（`publish_course.py --course <course_id> --glossary …`，默认会重跑 `check_glossary.py`）；任一校验失败时没有发布任何内容。
+- [ ] 已了解联合发布（同时传 `--questions` 与 `--glossary`）是**顺序执行的两个步骤**，并按需要拆成两条命令。
 - [ ] 发布输出里的版本保留结果符合预期（默认每个内容类型保留当前版本 + 上一版，见 `COURSE_GUIDE.md` 第 7.11 节）。
-- [ ] 已更新 worker 并完成桌面端、手机端、鼠标和键盘验收。
+- [ ] 已**统一重启全部 worker**（术语表不推进 generation，`/ready` 可能一直为 200，不能用它判断术语表是否已重新加载），并完成桌面端、手机端、鼠标和键盘验收。

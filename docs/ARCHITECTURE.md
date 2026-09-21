@@ -19,10 +19,10 @@ The project has four different kinds of state:
 
 | State | Storage | Examples |
 |---|---|---|
-| Question-bank state (per course) | `courses/<course_id>/questions.json`, then immutable in-memory objects | question text, options, correct answers, explanations, Chinese translations |
-| Glossary content | `glossary.json`, then immutable in-memory objects | canonical terms, aliases, Chinese translations, Chinese definitions, dynamic categories |
-| Persistent learner state | `instance/mcq.db` | users, attempts, question correction state and SRS schedule, weak-chapter verification, normal/review progress |
-| Temporary browser state | Flask's signed session cookie | signed-in user ID, flash messages |
+| Question-bank state (per course) | the file each course manifest points at (a `versions/<sha256>/questions.json` snapshot, a plain-file `questions.json`, or the legacy root adapter), then immutable in-memory objects | question text, options, correct answers, explanations, Chinese translations |
+| Glossary content (per course, optional) | the file that course's manifest points at (or `null`), then immutable in-memory objects | canonical terms, aliases, Chinese translations (`term_zh`), Chinese definitions (`definition_zh`), dynamic categories |
+| Persistent learner state | `instance/mcq.db`, namespaced by `(learner_id, course_id)` | users, attempts, question correction state and SRS schedule, weak-chapter verification, normal/review progress |
+| Temporary browser state | Flask's signed session cookie | signed-in user ID, flash messages, the last course (navigation preference only) |
 
 Question content is not copied into SQLite. Persistent records refer to questions by their stable question IDs.
 
@@ -46,42 +46,69 @@ Python dependencies are managed only through `requirements.txt`: Flask `>=3.1,<4
 
 ```mermaid
 flowchart TD
-    Browser[Browser] --> Nginx[Nginx :8080 in production]
+    Browser[Browser] --> Nginx[Nginx loopback :8080 in production]
     Nginx --> Gunicorn[Gunicorn 127.0.0.1:8001]
-    Gunicorn --> FlaskApp[Flask application]
-    DevBrowser[Development browser] -. Flask dev server :5000 .-> FlaskApp
+    Gunicorn --> FlaskApp[Flask create_app]
+    DevBrowser[Development browser] -. Werkzeug dev server 127.0.0.1:5000 .-> FlaskApp
     FlaskApp --> Health[GET /health liveness]
-    FlaskApp --> Ready[GET /ready readiness]
-    FlaskApp --> Routes[app/routes/web.py]
-    Routes --> UserRepo[UserRepository]
-    Routes --> ProgressRepo[ProgressRepository]
-    Routes --> QuizService[QuizService]
-    Routes --> WrongService[WrongQuestionService]
-    Routes --> WeakService[WeakKnowledgePointService]
-    QuizService --> Grading[GradingService]
-    QuizService --> WrongService
-    WrongService --> AttemptRepo[AttemptRepository]
-    WrongService --> WrongRepo[WrongQuestionRepository]
-    WrongService --> WeakService
-    WrongService --> SRS[srs_service scheduling rules]
-    WeakService --> WeakRepo[WeakKnowledgePointRepository]
-    QuizService --> QuestionRepo[QuestionRepository]
-    WrongService --> QuestionRepo
+    FlaskApp --> Ready["GET /ready and /ready/<course_id>"]
+    FlaskApp --> Routes["app/routes/web.py (course_id always in the URL)"]
+    Routes --> Registry[CourseRegistry: read-only CourseState lookup]
+    Routes --> Guard["guarded learner transaction (course_consistency)"]
+
+    subgraph Deployment["Deployment-wide repositories"]
+        UserRepo[UserRepository]
+        RateLimitRepo[RateLimitRepository]
+        CourseRepo[CourseRepository: courses + schema_meta]
+        CrossCourse["CrossCourseQueries (explicit cross-course reads)"]
+    end
+
+    subgraph PerCourse["One graph per enabled course: CourseServices"]
+        QRepo["QuestionRepository (in-memory, read-only)"]
+        GRepo["GlossaryRepository or None (in-memory)"]
+        ProgressRepo[ProgressRepository]
+        AttemptRepo[AttemptRepository]
+        WrongRepo[WrongQuestionRepository]
+        WeakRepo[WeakKnowledgePointRepository]
+        ExamRepo[ExamRepository]
+        RegistryRepo[QuestionRegistryRepository]
+        StateRepo[QuestionBankStateRepository]
+        Sync[QuestionBankSyncService]
+    end
+
+    subgraph Content["Published content files, loaded once per worker"]
+        Manifest["courses/<course_id>/course.json"]
+        QBank["questions.json snapshot"]
+        Gloss["glossary.json snapshot or none"]
+    end
+
+    Manifest --> Loader[CourseLoader]
+    QBank --> Loader
+    Gloss --> Loader
+    Loader --> Bundle[CourseBundle]
+    Bundle --> QRepo
+    Bundle --> GRepo
+    Registry --> PerCourse
+    CourseRepo --> Registry
+    Sync --> RegistryRepo
+    Sync --> StateRepo
+
+    Routes --> Templates[Jinja templates]
+    Templates --> Browser
     UserRepo --> SQLite[(instance/mcq.db)]
+    RateLimitRepo --> SQLite
+    CourseRepo --> SQLite
     ProgressRepo --> SQLite
     AttemptRepo --> SQLite
     WrongRepo --> SQLite
     WeakRepo --> SQLite
-    JSON[questions.json] --> Loader[QuestionLoader]
-    Loader --> QuestionRepo
-    GlossaryJSON[glossary.json] --> GlossaryLoader[GlossaryLoader]
-    GlossaryLoader --> GlossaryRepo[GlossaryRepository]
-    GlossaryRepo --> Routes
-    Routes --> Templates[Jinja templates]
-    Templates --> Browser
+    ExamRepo --> SQLite
+    RegistryRepo --> SQLite
+    StateRepo --> SQLite
+    CrossCourse --> SQLite
 ```
 
-The route layer translates HTTP input into service calls. Services implement learning rules. Repositories own data access. Domain dataclasses carry data between those layers.
+The route layer translates HTTP input into service calls, and it resolves **which course** a request belongs to from the URL alone. Every service of that course comes from one immutable `CourseServices` graph; repositories own data access; domain dataclasses carry data between those layers. There is no process-wide "current course" and no global content repository.
 
 ## 4. Project Layout and File Responsibilities
 
@@ -256,19 +283,17 @@ Defines the single Python dependency set used to run and test the project, inclu
 
 #### `deploy/`
 
-Contains source-controlled templates for the `mcq-template.service` systemd unit and the Nginx HTTP site. These files do not become active merely by editing them; deployment copies them to `/etc` and reloads the relevant service.
+Contains this machine's systemd unit and Nginx site configuration. It is **not** source-controlled: `.gitignore` excludes `deploy/`, so a fresh clone does not contain this directory and must recreate the two files. They do not become active merely by editing them; deployment copies them to `/etc` and reloads the relevant service (see [§18](#18-local-production-deployment)).
 
 #### `scripts/start_production.sh` and `scripts/stop_production.sh`
 
 Convenience operations scripts for WSL. The start script validates Nginx, starts Gunicorn and Nginx, verifies both services, and polls the `/ready` readiness URL (which fails while a worker still serves a superseded question bank). The stop script stops Nginx before Gunicorn and verifies that both are inactive. They control already-deployed services and do not copy templates into `/etc`.
 
-#### `courses/<course_id>/questions.json` (or the optional legacy root `questions.json`)
+#### `courses/<course_id>/questions_candidate.json` (working copy) and the manifest's `questions` pointer
 
-Holds one course's complete question bank; the course's manifest names the file that is
-loaded (a plain `questions.json` for the plain-file layout or an immutable
-`versions/<sha256>/questions.json`, which is what `--add` and every publish write).
+The **candidate** is the maintainer's working copy and the default input of every `check_*.py` and `publish_course.py` command; no worker ever loads it. What a worker loads is the file the course manifest's `questions` field points at: an immutable `versions/<sha256>/questions.json` (what `--add` and every publish write) or a plain root `questions.json` in the plain-file layout, and — when no manifest exists at all — the root `questions.json` through the legacy adapter.
 Every application process reads and validates each enabled course's bank once during
-startup. Editing one requires restarting the active server: `python run.py` in
+startup. Editing a candidate has no effect until it is published and the workers are restarted: `python run.py` in
 development or `mcq-template.service` in production. Publish it atomically
 (`scripts/publish_course.py`) rather than with `cp` or an editor save: a partially
 written file is read by a worker starting in that window and reported as misleading
@@ -278,18 +303,18 @@ next to a manifest that points at `versions/<sha256>/` is read by nothing at all
 `check_courses.py` reports it as an unreferenced copy so it cannot be mistaken for
 the live content.
 
-#### `courses/<course_id>/glossary.json` (or the optional legacy root `glossary.json`)
+#### `courses/<course_id>/glossary_candidate.json` (working copy) and the manifest's `glossary` pointer
 
-Holds one course's domain-neutral terminology metadata, canonical terms,
-aliases, Chinese translations, the Chinese definition (`definition_zh`) and
-optional categories. Every process validates and loads it once at startup, and a
-manifest may declare `"glossary": null` to state that the course has none. The
-English `definition` field was retired: the loader ignores a leftover key (so a
+Holds one course's domain-neutral terminology metadata: canonical terms,
+aliases, Chinese translations (`term_zh`), the Chinese definition (`definition_zh`) and
+optional categories. As with the question bank, the **candidate** is only the maintainer's working copy; a worker loads the file the manifest's `glossary` field points at. Every process validates and loads it once at startup, and a
+manifest may declare `"glossary": null` to state that the course has none (a missing field is a manifest error).
+The English `definition` field was retired: the loader ignores a leftover key (so a
 previously published copy stays rollback-loadable) and `check_glossary.py`
 reports it as a retired field to delete. It is independent of learner state and
 of every question-bank fingerprint (`bank_version` plus the grading, content,
-placement and catalogue fingerprints), so glossary maintenance never triggers
-reconciliation and never fences sibling workers.
+placement and catalogue fingerprints), is never written to SQLite, and therefore never triggers
+reconciliation or fences sibling workers — but a running worker keeps serving the glossary it loaded, so a glossary publish still needs a restart to be visible.
 
 #### `docs/QUESTION_GUIDE.md`, `docs/GLOSSARY_GUIDE.md`, `docs/COURSE_GUIDE.md` and `docs/MULTI_COURSE_MIGRATION.md`
 
@@ -432,43 +457,58 @@ The SQLite database created automatically on first startup. It contains accounts
 
 #### `pytest.ini`
 
-Contains Pytest configuration used by the test suite.
+Contains Pytest configuration used by the test suite (`testpaths = tests`, quiet output).
+
+#### `scripts/course_tooling.py`
+
+The thin shared tooling layer behind every course CLI script. It resolves a course through the application's own `CourseLoader`, freezes candidate bytes once, validates them with the application's own loaders, writes immutable `versions/<sha256>/` copies, switches the manifest with a single `os.replace()`, takes the course publication lock (`.publish.lock`), runs the per-content-type retention pass, and provides `preferred_candidate()` (explicit path, then the course's working copy, then the published file). No business rule is duplicated here: a rule change belongs in `app/` and is picked up automatically.
+
+#### `scripts/migrate_courses.py`
+
+The transactional multi-course migration and inspection CLI: `--dry-run` only reads (table list, `schema_version`, persisted `legacy_course_id`, whether a migration is needed, per-table row counts, orphan `exam_questions` rows); a real run copies the database to a timestamped backup next to it unless `--no-backup`, then migrates. `--layout` additionally materialises the legacy root files as `courses/<legacy>/` (see [`MULTI_COURSE_MIGRATION.md`](MULTI_COURSE_MIGRATION.md)). Exit codes: `0` success, `1` migration refused (nothing written), `2` usage/IO.
+
+#### `scripts/rename_course.py`
+
+The administrative namespace rename: it backs the database up (unless `--no-backup`), rewrites `course_id` across every course-scoped table in one `BEGIN IMMEDIATE` transaction with before/after row-count validation, refuses to run when the target namespace already owns data, leaves `exam_questions` untouched (it follows its parent session), and updates the persisted `legacy_course_id` when that is the renamed namespace. `--rename-directory` performs the filesystem half as a separate step after the database commit. Exit codes: `0` success, `1` refused, `2` usage/IO.
 
 ## 5. Application Assembly
 
 ### `app/__init__.py`
 
-This module is the composition root. Its `create_app()` function performs all application assembly:
+This module is the composition root, and it is deliberately thin. `create_app()` performs exactly these steps:
 
-1. Create the Flask application.
-2. Load configuration, cookie defaults, and optional test overrides. If `MCQ_SECRET_KEY` is absent outside tests, generate an ephemeral development secret and log a warning.
-3. Load and validate `questions.json` with `QuestionLoader`.
-4. Build the in-memory `QuestionRepository`.
-5. Load and validate `glossary.json` with `GlossaryLoader`, then build the immutable `GlossaryRepository`. The display timezone is resolved from `DISPLAY_TIMEZONE` once and injected into the statistics service and blueprint.
-6. Initialize the current SQLite schema (including `question_registry` and the per-slot exam grading fingerprints).
-7. Create the user, progress, attempt, exam, wrong-question, and weak-knowledge-point repositories.
-8. Create the grading, weak-knowledge-point, wrong-question, quiz, and exam services, then run `QuestionBankSyncService.synchronize()`: the freshly loaded bank is diffed against the persistent per-question registry by stable `question.id`, and only genuinely affected data is reconciled — content edits keep everything, grading-identity changes clear exactly that question's attempts and correction state, and deleted questions keep their attempts but silently lose their correction/SRS state, weak-point references, progress-queue entries, and unfinished-exam slots. The bank generation only advances on structural changes (new, grading-changed, deleted, resurrected, chapter/source-moved questions, or a changed catalogue shape), never on cosmetic edits such as source/chapter titles. Missing weak rows are then backfilled from the surviving live wrong-question IDs with safe 0/2 progress.
-9. Create the statistics and global statistics services.
-10. Expose the assembled repositories and services through `app.extensions["mcq_services"]` for tests and diagnostics.
-11. Register the application-level `GET /health` liveness route and the `GET /ready` readiness route.
-12. Build and register the authenticated web blueprint.
+1. Create the Flask application (with `instance/` as the instance path) and load configuration, cookie defaults, and optional test overrides. If `MCQ_SECRET_KEY` is absent outside tests, generate an ephemeral development secret and log a warning; tests additionally get `SESSION_COOKIE_SECURE=False` unless they set it themselves.
+2. Build the `CourseLoader` (courses directory plus the root-file legacy adapter paths) and discover every course **definition**: one per `courses/<course_id>/course.json`, plus the synthetic `legacy` definition when the root `questions.json` exists. A duplicate `course_id` or an unreadable manifest directory raises `CourseDefinitionError` here — that is an application-assembly failure.
+3. Run `Database.initialize()`, which calls `schema_migrations.ensure_schema()`, enforces the attempt-retention window, and registers the accepted course metadata (`courses` rows) for the discovered definitions.
+4. Create the deployment-wide repositories once: `UserRepository`, `RateLimitRepository`, `CourseRepository` and `CrossCourseQueries`. There is deliberately no global `QuestionRepository`/`GlossaryRepository` at this level: content is only reachable through a course.
+5. Call `build_course_registry()`, which for each **enabled** definition loads the `CourseBundle` (immutable in-memory `QuestionRepository`, optional `GlossaryRepository`, headline and publication identity), assembles the course's `CourseServices` (scoped persistence repositories + every service), and reconciles that course's bank once inside `BEGIN IMMEDIATE` (re-checking the publication identity inside the transaction and reloading once if the course was republished during startup). A course-scoped failure is recorded as `CourseStatus.UNAVAILABLE`; the other courses keep loading. Undeployed database identities are added as `CourseStatus.UNDEPLOYED`.
+6. Assemble `AppServices`: `CourseServices` of the navigation default course, the `CourseRegistry`, the deployment-wide repositories, the resolved display timezone, and the persisted `legacy_course_id` (read-only).
+7. Register the serializer used to sign `form_context`, the built-in `course_id`-aware template `url_for`, and publish everything under `app.extensions["mcq_services"]`, `["mcq_form_serializer"]`, `["mcq_course_loader"]` and `["mcq_cross_course"]` for tests and diagnostics.
+8. Register `GET /health`, `GET /ready` and `GET /ready/<course_id>`.
+9. Register the `after_request` security-header hook and the authenticated web blueprint.
 
-Dependencies are created once and explicitly passed to the objects that need them. Route functions therefore do not construct databases or services during individual requests.
+Dependencies are created once and explicitly passed to the objects that need them. Route functions therefore never construct databases or services during individual requests, and no request can observe a half-assembled course.
 
 Important configuration values are:
 
 | Setting | Purpose |
 |---|---|
 | `SECRET_KEY` | Signs Flask session cookies. Tests may override it; development generates a new random value when `MCQ_SECRET_KEY` is absent; `wsgi.py` requires the environment value in production. |
-| `QUESTION_FILE` | Path to the active JSON question bank |
-| `GLOSSARY_FILE` | Path to the active schema-version-1 JSON glossary |
-| `DATABASE` | Path to the SQLite database |
-| `KNOWLEDGE_VERIFICATION_TARGET` | Distinct correct Review question IDs required per active chapter; currently `2` |
-| `DISPLAY_TIMEZONE` | Display timezone for rendered timestamps and dashboard trend days; defaults to the server local zone (environment `MCQ_DISPLAY_TIMEZONE`, IANA name such as `Asia/Shanghai`); invalid names fail startup fast |
-| `PERMANENT_SESSION_LIFETIME` | Lifetime of a persistent login/session cookie |
-| `SESSION_COOKIE_HTTPONLY` | Prevents browser JavaScript from reading the session cookie; enabled by default |
-| `SESSION_COOKIE_SAMESITE` | Uses `Lax` cross-site behavior for the session cookie |
-| `SESSION_COOKIE_SECURE` | Explicitly remains false in this HTTP-only deployment; enabling it without HTTPS would prevent the browser from sending the cookie |
+| `COURSES_DIR` | Directory holding one `<course_id>/course.json` manifest per course (default `<project root>/courses`). |
+| `QUESTION_FILE` | Path the **legacy root adapter** reads as `questions.json` (default `<project root>/questions.json`). It is not the only active content path: manifest courses load their own files, and when the root file is absent `legacy` exists only as a database identity. |
+| `GLOSSARY_FILE` | Same, for the legacy root `glossary.json`. |
+| `DATABASE` | Path to the shared SQLite database (default `instance/mcq.db`). |
+| `DEFAULT_COURSE_ID` | Navigation preference (environment `MCQ_DEFAULT_COURSE`): the course a browser without an explicit course URL is sent to. It never re-owns historical data. |
+| `KNOWLEDGE_VERIFICATION_TARGET` | Distinct correct Review question IDs required per active chapter; currently `2`. |
+| `DISPLAY_TIMEZONE` | Display timezone for rendered timestamps and dashboard trend days; defaults to the server local zone (environment `MCQ_DISPLAY_TIMEZONE`, IANA name such as `Asia/Shanghai`); invalid names fail startup fast. |
+| `PERMANENT_SESSION_LIFETIME` | Lifetime of a persistent login/session cookie (30 days). |
+| `SESSION_COOKIE_HTTPONLY` | Prevents browser JavaScript from reading the session cookie; enabled by default. |
+| `SESSION_COOKIE_SAMESITE` | Uses `Lax` cross-site behavior for the session cookie. |
+| `SESSION_COOKIE_SECURE` | Enabled by default, including in development, because `wsgi.py` requires the production path to be HTTPS-terminated. Tests that do not care flip it off explicitly (`tests/conftest.py`), and the cookie is only withheld by browsers on plain-HTTP origins; serving the app over plain HTTP therefore requires an explicit override. |
+| `MAX_CONTENT_LENGTH` | Request-body limit (64 KiB). |
+| `ENABLE_CSRF` | Turns the CSRF check on; enabled by default. |
+| `AUTH_LOGIN_ACCOUNT_LIMIT` / `AUTH_LOGIN_IP_LIMIT` / `AUTH_LOGIN_WINDOW_SECONDS` | Login throttle per account (10) and per IP (100) inside a 5-minute window. |
+| `AUTH_REGISTER_IP_LIMIT` / `AUTH_REGISTER_WINDOW_SECONDS` | Registration throttle per IP (10 per hour). |
 
 The ephemeral development secret prevents a source-controlled fallback secret, but it also intentionally invalidates existing development sessions after a process restart. The production secret is stable, generated outside the repository, and loaded from the systemd environment file.
 
@@ -503,9 +543,16 @@ The `__init__.py` files in `models`, `repositories`, `services`, and `routes` re
 
 Repositories are responsible for loading or persisting data. They do not decide learning rules or render pages.
 
+Two kinds of repository exist, and the difference is the namespace rule of the whole application:
+
+* **content repositories** (`question_loader.py`, `question_repository.py`, `glossary_loader.py`, `glossary_repository.py`) are loaded once per course and are read-only in memory;
+* **persistence repositories** (everything else that touches learner state) are constructed with a **required, immutable `course_id`** and restrict every statement to it, so `get_all()`/`list_all()`/`count()`/`distinct_question_ids()` mean "this course", never "the whole database". `app/repositories/course_scope.py::require_course_id()` enforces that missing namespace loudly at construction time.
+
+Genuinely cross-course operations (resolving which course owns a bare `exam_id`, counting rows per course for a report) live in `app/repositories/database.py::CrossCourseQueries`, plus the migration/administrative CLI scripts, so an accidental cross-course read is always a visible, reviewed choice.
+
 ### `app/repositories/database.py`
 
-`Database.initialize()` creates the current schema and indexes with `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`.
+`Database.initialize()` is a three-stage startup: it runs the transactional namespace migration once (`schema_migrations.ensure_schema`), then the per-`(learner_id, course_id, question_id)` attempt-retention sweep as its own step, then records the accepted course metadata. The ordering is deliberate — the migration touches no learner semantics, and neither the retention sweep nor course registration is part of its transaction.
 
 `Database.connect()` reuses the context-local connection when called inside `Database.transaction()`. Otherwise, it is a context manager that:
 
@@ -515,9 +562,34 @@ Repositories are responsible for loading or persisting data. They do not decide 
 - rolls back failed operations;
 - always closes the connection.
 
-There is no database migration framework. Schema creation is additive, and column additions use guarded, idempotent `ALTER TABLE` statements: `Database.initialize()` checks `PRAGMA table_info(...)` before adding the `wrong_questions.srs_level` and `next_review_at` columns to databases that predate spaced repetition, and the `exam_questions.grading_fingerprint` column to databases that predate grading-identity tracking. Legacy rows keep `srs_level = 0` and `next_review_at = NULL`, so they are never scheduled until corrected again; legacy exam slots keep a `NULL` fingerprint and render as recorded. `weak_knowledge_points` and `question_registry` are created with `CREATE TABLE IF NOT EXISTS`, so an unchanged old database starts without a manual command. Bank changes never clear learner data wholesale anymore; see the per-question reconciliation section at the end of this document.
-
 `Database.transaction()` uses `BEGIN IMMEDIATE` and a context-local connection so progress token checks, answer attempts, correction/weak-point updates and progress changes commit or roll back together. SQLite serializes these transactions across threads and Gunicorn workers. Repository operations inside the transaction reuse its connection.
+
+Schema changes are **not** applied by guarded `ALTER TABLE` statements. The single place that rebuilds a table layout is `schema_migrations.ensure_schema()`; see [§11](#11-sqlite-schema) for the table bodies, the primary keys and the transaction shape.
+
+### `app/repositories/course_loader.py`
+
+`CourseLoader` owns course discovery and content loading. `discover_definitions()` walks `COURSES_DIR` for `course.json` manifests, validates each one (`schema_version: 1`, `course_id` slug, required `questions`, explicit `glossary` key, resolved-and-contained paths), and finally appends the **legacy root adapter** definition when the root `questions.json` exists. A directory without a manifest is ignored with a log line, not treated as a course. A duplicate `course_id` or an unreadable manifest raises `CourseDefinitionError` (application assembly fails); a single broken course raises `CourseLoadError` (that course becomes `unavailable`).
+
+`load_bundle()` loads one definition into a `CourseBundle`: the in-memory `QuestionRepository`, the optional `GlossaryRepository`, the bank fingerprint and the *publication identity* — a SHA-256 over the names and bytes of every content file the manifest currently points at. `publication_identity()` is recomputed inside the reconciliation transaction, which is how the "worker preloaded the old files, then a newer publication landed" race is detected.
+
+Safety rules enforced here: `course_id` must be a URL-safe lowercase ASCII slug; every declared path is resolved relative to the manifest directory and must stay inside it (so request parameters are never concatenated into filesystem paths); the manifest is authoritative for the displayed course title whenever it exists, so a disabled and an enabled course cannot disagree about their own name, and only the manifest-less legacy adapter takes its title from the question bank.
+
+### `app/repositories/course_repository.py`
+
+Owns the permanent `courses` table (identity plus the accepted metadata: `title`, `title_zh`, `enabled`, `sort_order`, timestamps) and the `schema_meta` keys. `accept()` upserts metadata while preserving `created_at`; `list_accepted()` returns every identity this database knows, and `is_enabled()` is re-read inside learner transactions so a course disabled after a page was rendered cannot accept new writes.
+
+Two different IDs live here and must never be confused:
+
+* `legacy_course_id` — decided once by the namespace migration and persisted. The public API only offers reading it (`legacy_course_id()`), because changing it would silently re-own history. The one supported way to move it is the explicit administrative rename in `scripts/rename_course.py`.
+* `default_course_id` — a pure navigation preference (`default_course_id()` / `set_default_course_id()`), which never re-owns historical data.
+
+### `app/repositories/course_scope.py`
+
+`require_course_id()` validates the namespace a bound repository was constructed with and raises `ValueError` when it is missing or malformed. It exists so that "forgot the course scope" can never degrade into a silent cross-course read or write.
+
+### `app/repositories/schema_migrations.py`
+
+The one place that rebuilds a table layout. `ensure_schema()` creates a fresh database or migrates an existing one transactionally, losslessly and idempotently, and returns a `SchemaInfo` (`schema_version`, persisted `legacy_course_id`, whether the file existed, whether anything was migrated). `SCHEMA_VERSION` is `2`; the pre-multi-course layout is version `1`. It adds the `course_id` namespace column to every learner table, replaces the `question_bank_state` singleton with one row per course, widens the `question_registry` primary key, and records the schema version plus the persisted legacy assignment. It deliberately does **not** run retention cleanup, weak-knowledge backfill, question-bank diffing, registry reconciliation, content cleanup, fingerprint recomputation or score rewriting. See [§11](#11-sqlite-schema).
 
 ### `app/repositories/rate_limit_repository.py`
 
@@ -559,15 +631,11 @@ Stores all validated questions and the normalized curriculum catalogue in memory
 
 ### `app/repositories/glossary_loader.py`
 
-Reads and validates the separate glossary file. Normalization is used only to reject
-duplicate or ambiguous labels; original strings remain unchanged for display and
-literal browser matching. Validation errors identify the entry and field that failed.
+Reads and validates one course's glossary file (`schema_version` `1`, required root and term fields, unique IDs, normalized canonical-term uniqueness, alias types, empty aliases, duplicate aliases and cross-entry term/alias collisions). It creates frozen `Glossary` and `GlossaryTerm` objects. Normalization is used only to reject duplicate or ambiguous labels; original strings remain unchanged for display and literal browser matching, and every validation error identifies the entry and field that failed. The English `definition` field is retired — the loader ignores a leftover key on purpose so an earlier published copy stays rollback-loadable, and `scripts/check_glossary.py` reports it instead.
 
 ### `app/repositories/glossary_repository.py`
 
-Keeps the glossary process-wide and read-only, independent of SQLite. It provides
-tuple-based term access, ID lookup, categories in stable first-appearance order, and
-defensive JSON-ready serialization for templates.
+Holds one course's glossary for the life of the process, read-only and independent of SQLite. It provides tuple-based term access, ID lookup, categories in stable first-appearance order, and defensive JSON-ready serialization for templates. It is not passed into grading, correction, weak-knowledge, wrong-question, attempt or progress logic, and it is not part of any question-bank fingerprint — so glossary maintenance never triggers reconciliation and never fences sibling workers.
 
 ### `app/repositories/user_repository.py`
 
@@ -617,6 +685,23 @@ Normal: filter → fairness selection → round queue
 Review: wrong correction state + due SRS schedule + weak knowledge state
         → original/srs/transfer selection → review queue
 ```
+
+### `app/services/course_service.py`
+
+The single composition root for **course-scoped** dependencies. `assemble_course_services()` takes one `CourseBundle` and constructs every repository and service of that course with the *same* `course_id`, then returns an immutable `CourseServices` (content repositories from the bundle, persistence repositories bound to the namespace, and every service). Because the whole graph is built per course, a wiring mistake cannot silently mix namespaces: `QuestionBankSyncService`, `WrongQuestionService` and `ExamService` validate at construction that everything they were handed is bound to the same course, so a mis-assembled graph fails at startup instead of writing one course's reconciliation into another course's history.
+
+`synchronize_course()` then runs that one course's startup reconciliation and records the loaded generation (`with_generation()` returns a copy carrying it). The publication identity is re-checked *inside* the sync transaction, so a publication that landed while this worker was starting makes the caller discard the preloaded snapshot and reload instead of writing stale content back into the database (see `app/course_runtime.py::_load_and_synchronize`, which retries once).
+
+### `app/services/course_consistency.py`
+
+Flask-independent guards for every learner write, applied *inside* the transaction rather than by a pre-check. `guarded_learner_transaction()` opens `Database.transaction()` (`BEGIN IMMEDIATE`) and then:
+
+1. checks the course is still enabled (`CourseServabilityChangedError`, mapped to 503);
+2. compares this worker's loaded generation with the course's live `question_bank_state` generation (`StaleWorkerError`, mapped to 503);
+3. re-validates the signed form context — bound course, operation and generation (`StaleFormError`, mapped to 409);
+4. yields so the caller can perform the business operation and the learner writes, then commits.
+
+This closes two races: a worker whose outer pre-check passed just before a sibling published a structural change, and a form rendered by a superseded worker (or for a different course). Both are rejected with zero learner writes. The web layer owns the HTTP mapping (503 stale/unavailable, 409 stale form, 404 unknown course).
 
 ### `app/services/grading_service.py`
 
@@ -713,7 +798,22 @@ Pure fingerprint helpers over the normalized `Question` model. `grading_fingerpr
 
 ### `app/services/question_bank_sync_service.py`
 
-`QuestionBankSyncService` runs once per worker startup inside a single `BEGIN IMMEDIATE` transaction. It bootstraps an empty registry from the deployed bank (adopting IDs that only exist in learner history as retired tombstones, and backfilling a placement baseline for rows written before placement tracking), classifies the diff (`diff_questions()` is a pure function shared with the pre-deploy check script), fails fast when a retired ID is reused for a grading-different question, and applies the per-question consequences: targeted attempt/correction deletion for grading changes, silent correction/SRS removal plus weak-point, progress-round, and unfinished-exam reconciliation for unusable questions, and a generation bump for structural changes (including chapter/source moves, which keep learner records but change what the bank means). It also compares the stored `catalogue_fingerprint()` with the loaded catalogue and bumps the generation when the catalogue shape changed, because menus and filter validation are per worker; a database that predates catalogue tracking adopts the current shape as its baseline instead. Everything is idempotent, so a second worker's run is a no-op.
+`QuestionBankSyncService` runs once per course per worker startup inside a single `BEGIN IMMEDIATE` transaction. It bootstraps an empty registry from the deployed bank (adopting IDs that only exist in learner history as retired tombstones, and backfilling a placement baseline for rows written before placement tracking), classifies the diff (`diff_questions()` is a pure function shared with the pre-deploy check script), fails fast when a retired ID is reused for a grading-different question, and then applies only what actually changed:
+
+| Change to one course's published bank | Learner history | Generation |
+|---|---|---|
+| Content-only (`text`/`text_zh`, explanation, option text or order, an added wrong option, `section`, `pages`, JSON formatting) | fully preserved | unchanged |
+| Chapter/source move (`chapter_ids` or `source_id`) | preserved, but it is a **structural** change: it decides chapter filtering, Review/weak-knowledge selection and chapter progress | +1 |
+| Catalogue shape (a source or chapter added, removed, reordered or re-assigned) | preserved; still structural, because each worker builds its own menus and validates submitted filter values against them (the old worker would reject a chapter the new one serves with `400`) | +1 |
+| Catalogue labels (bank `title`/`title_zh`, `sources[].title`/`lecture`/`filename`, `chapters[].title`) | preserved | unchanged — workers may briefly disagree about wording |
+| Grading identity (`type`, correct-answer set, removed/renamed option IDs) | exactly that question's `attempts` and `wrong_questions` rows are cleared, and it is stripped from weak-point verifications, unfinished rounds and unfinished exams | +1 |
+| Deleted question | `attempts` are kept, but its correction/SRS state, weak-point references, progress-queue entries and unfinished-exam slots are dropped (exam positions resequenced, `question_count` shrunk) | +1 |
+| New question | untouched | +1 |
+| Retired ID reuse (same ID, different grading identity) | nothing is written: that course becomes `unavailable` at startup and only that course is affected | — |
+
+It also compares the stored `catalogue_fingerprint()` with the loaded catalogue and bumps the generation when the catalogue shape changed; a database that predates catalogue tracking adopts the current shape as its baseline instead. Missing weak rows are backfilled from the surviving live wrong-question IDs with safe 0/2 progress. Users are never touched, no flash or banner is shown for bank maintenance, everything is idempotent, and concurrent workers serialize on the same transaction — the second worker's diff simply finds nothing to do, so one publication bumps a course's generation at most once however many structural changes it contains. The current publication is re-checked *inside* the transaction (`CoursePublicationChangedError`), so a worker that preloaded superseded files reloads instead of writing them back.
+
+Two consequences are easy to miss. First, "attempts are preserved" is not the same as "displayed statistics stay identical": every learner-facing statistic counts only *live* questions, so deleting a question can lower cumulative counts and move accuracy until the question is restored. Second, a retired ID is reserved **inside its own course** and the fingerprint algorithms never include `course_id`, so the same hash may legitimately appear in two courses; the namespace migration recomputes nothing.
 
 ### `app/services/exam_service.py`
 
@@ -748,8 +848,8 @@ Every learning row below is registered twice: canonically as `/course/<course_id
 | GET/POST | `/register` | Show the registration form or create a user; the same stale-aware redirect applies after a successful registration |
 | POST | `/logout` | Clear the signed-in session |
 | GET | `/` | Redirect to the session's preferred course, or to `/courses` when none is known; a preference pointing at a course this worker cannot serve answers 503 instead of silently landing in another course |
-| GET | `/courses` | Show the course selector: one card per declared course with its status, linking only into a course that is `ready` |
-| GET | `/glossary` | Show this course's glossary with live search and category filtering |
+| GET | `/courses` | Show the course list: one card per course this worker knows (including `disabled` and `undeployed` states) with its status label, linking into a course only when it is `ready` |
+| GET | `/glossary` | Show this course's glossary with live search and category filtering (canonically `/course/<course_id>/glossary`) |
 | POST | `/quiz/start` | Start or restart normal practice |
 | GET | `/quiz/setup` | Dynamically list course materials/chapters before normal practice |
 | GET | `/quiz` | Render the current normal-practice question or result |
@@ -930,26 +1030,71 @@ Adds small client-side enhancements:
 
 Safely highlights canonical terms and aliases in marked English content, owns the keyboard-accessible Chinese-definition popover, and provides client-side glossary search, category filtering, visible counts, empty state, and Chinese reveal behavior.
 
+It builds a literal, case-insensitive matcher from the canonical terms and aliases of **the current course only**, ordered longest-first, so `standard cell` wins over `cell`. A match is accepted only when any letter/number edge is not attached to another Unicode letter, number, combining mark or underscore — consequently `die` does not match inside `dielectric`, while punctuation-bearing data such as `SC-1`, `Cu/low-k`, `AR(1)` or `χ²` is not constrained to an ASCII token grammar. Only containers explicitly marked `data-glossary-highlight` are scanned; the engine walks text nodes with `TreeWalker`, builds replacements with a `DocumentFragment` and never rewrites container `innerHTML`, and it skips scripts, styles, form controls, Chinese translation blocks, existing highlights and the popover. Highlight controls support pointer activation, Enter, Space, visible focus, Escape, outside-click close and viewport-safe repositioning, and stopping the highlight's own event prevents a term inside an answer row from selecting that answer.
+
+On the glossary page the search covers canonical English, aliases, the Chinese term, the Chinese definition and the category; the category picker is populated from repository-derived categories, English is shown first, and each card uses a real button to reveal or hide Chinese. The quiz-size, mistake-filter and glossary-filter pickers share one `initializePicker` helper in `app.js` with hidden inputs and server-rendered listbox buttons (no native `<select>`, no third-party UI library); glossary category choices filter cards immediately in the browser, while mistake source/chapter choices submit the GET form immediately.
+
 The server repeats important validation, so client-side JavaScript is not treated as a security boundary.
 
 ## 11. SQLite Schema
+
+The schema is defined by `app/repositories/schema_migrations.py::TABLE_BODIES` and `INDEX_STATEMENTS`; `ensure_schema()` creates a fresh database from exactly those bodies or rebuilds an existing one into them. The current multi-course layout is `SCHEMA_VERSION = 2` (the pre-multi-course layout is version `1`). One file holds every course: courses are a **namespace inside it** (`course_id`), not one database per course. No table stores question text, chapter titles or glossary content.
+
+Migration mechanics, at a glance:
+
+```text
+dedicated connection
+  PRAGMA foreign_keys = OFF (before the transaction)
+  BEGIN IMMEDIATE
+    re-read the schema version after taking the write lock
+    create the new tables (one per table body)
+    copy every old row (missing columns fall back to a documented default)
+    field-level validation (row counts, course_id NOT NULL/non-empty, exam_questions parentage)
+    replace the old tables, then create the indexes
+    write schema_version + the persisted legacy_course_id
+  COMMIT
+  PRAGMA foreign_key_check (full, after commit)
+```
+
+Any failure rolls the whole thing back and the CLI reports the reason; re-running always reaches the same state. A pre-existing parent/child violation in the old data aborts the migration with a report instead of silently dropping rows. The transaction itself never runs retention cleanup, weak-knowledge backfill, question-bank diffing, registry reconciliation or fingerprint recomputation — those are separate stages (`Database.enforce_attempt_retention`, `register_courses`, and each course's `QuestionBankSyncService.synchronize()` at startup).
+
+### `schema_meta`
+
+| Column | Purpose |
+|---|---|
+| `key` | PRIMARY KEY: `schema_version`, `legacy_course_id`, optional `default_course_id` |
+| `value` | Stored value |
+
+### `courses`
+
+| Column | Purpose |
+|---|---|
+| `course_id` | PRIMARY KEY: the permanent, URL-safe course slug |
+| `title` / `title_zh` | Accepted metadata (the manifest is the source of truth for the displayed name) |
+| `enabled` | `0`/`1`; a disabled course is not loaded on any worker |
+| `sort_order` | Display order in the selector and course list |
+| `created_at` / `updated_at` | UTC ISO timestamps; `created_at` is preserved across metadata upserts |
+
+The `legacy` row always exists because `legacy_course_id` is part of the schema this build writes: learner tables declare a restrictive foreign key onto `courses`, and rows written under the legacy namespace must always have an owner. `Database.register_courses()` re-inserts the **persisted** `legacy_course_id` (not the module default), so a renamed namespace is never resurrected as a phantom `legacy` course on every startup.
 
 ### `users`
 
 | Column | Purpose |
 |---|---|
 | `id` | UUID primary key |
-| `username` | Case-insensitive unique login name |
+| `username` | Case-insensitive unique login name (`COLLATE NOCASE`) |
 | `password_hash` | Werkzeug password hash |
 | `created_at` | UTC ISO timestamp |
+
+Users are a **deployment-wide identity**: one account signs in to every course on this deployment. The table has no `course_id`.
 
 ### `quiz_progress`
 
 | Column | Purpose |
 |---|---|
-| `learner_id` / `mode` | Composite primary key, one round per account and practice mode |
+| `learner_id` / `course_id` / `mode` | Composite PRIMARY KEY, one round per account, course and practice mode (`normal` or `review`) |
 | `bank_version` | Last bank fingerprint that wrote the row; informational only — rounds survive cosmetic bank edits and are reconciled per question instead; it never triggers a write by itself |
-| `state` | JSON round state, or SQL NULL for cleared progress |
+| `state` | JSON round state, or SQL NULL for cleared progress (a tombstone that must never be resurrected from a stale device) |
 
 ### `attempts`
 
@@ -957,20 +1102,21 @@ The server repeats important validation, so client-side JavaScript is not treate
 |---|---|
 | `id` | Auto-incrementing attempt ID |
 | `learner_id` | User UUID |
-| `question_id` | Stable ID from `questions.json` |
+| `course_id` | Course namespace (required) |
+| `question_id` | Stable course-local ID |
 | `mode` | `normal`, `review`, or `mock_exam` |
 | `selected_answers` | JSON array of selected option IDs |
 | `is_correct` | Boolean stored as `0` or `1` |
 | `answered_at` | UTC ISO timestamp |
 
-At most ten rows are retained for each `(learner_id, question_id)` pair, ordered by `answered_at` and then `id`. This retention rule is enforced after every insert and once during application startup. The cumulative `wrong_count` in `wrong_questions` is independent of this rolling attempt window. Databases created before mock exams are upgraded in place: because SQLite cannot alter a `CHECK` constraint, the startup migration rebuilds the table with the widened mode list (preserving every row and id) exactly once, guarded by the stored table definition.
+At most ten rows are retained for each `(learner_id, course_id, question_id)` triple, ordered by `answered_at` and then `id`; the window is shared across all three modes. The retention rule is enforced after every insert and once during each application startup (`Database.enforce_attempt_retention()`), which is a step **outside** the namespace migration. The cumulative `wrong_count` in `wrong_questions` is independent of this rolling window.
+
 
 ### `wrong_questions`
 
 | Column | Purpose |
 |---|---|
-| `learner_id` | User UUID |
-| `question_id` | Stable ID from `questions.json` |
+| `learner_id` / `course_id` / `question_id` | Composite PRIMARY KEY: one current correction record per account, course and question |
 | `wrong_count` | Total number of wrong answers |
 | `review_streak` | Legacy compatibility column: `0` before correction, `1` after correction |
 | `mastered` | Legacy compatibility column mapped to domain `corrected` |
@@ -979,13 +1125,27 @@ At most ten rows are retained for each `(learner_id, question_id)` pair, ordered
 | `last_wrong_at` | Most recent wrong-answer timestamp |
 | `last_reviewed_at` | Most recent review timestamp, if any |
 
-The composite primary key `(learner_id, question_id)` guarantees one current correction record per user and question. The columns keep their historical SQL names to avoid destructive migration; knowledge-point completion is never inferred from them. An invariant ties the two state machines together: `mastered=0` rows always have `next_review_at IS NULL`, so a question is either pending correction or scheduled, never both. The two SRS columns are added at startup through guarded `ALTER TABLE` statements when missing, and pre-existing rows stay unscheduled (`next_review_at = NULL`) until they are corrected again.
+The columns keep their historical SQL names (the namespace migration copies them into the new layout instead of renaming anything); knowledge-point completion is never inferred from them. An invariant ties the two state machines together: `mastered=0` rows always have `next_review_at IS NULL`, so a question is either pending correction or scheduled, never both. A question corrected before this schema existed keeps `next_review_at = NULL` until it is corrected again.
+
+### `weak_knowledge_points`
+
+| Column | Purpose |
+|---|---|
+| `learner_id` / `course_id` / `chapter_id` | Composite PRIMARY KEY, one weak state per account, course and chapter |
+| `active` | Whether this chapter still requires reinforcement |
+| `verified_question_ids` | JSON array of distinct correct Review question IDs (defensive: malformed JSON reads as empty) |
+| `last_wrong_at` | Most recent wrong answer that activated/reset the chapter |
+| `updated_at` | Most recent state change |
+
+Every query and write is bound to the learner *and* the course. Question content and chapter titles remain in the live per-course `QuestionRepository`; only stable course-local IDs are persisted, which is why `chapter_id` intentionally has no foreign key to any content table.
+
 
 ### `exam_sessions`
 
 | Column | Purpose |
 |---|---|
-| `id` | Random hex primary key |
+| `id` | Random hex primary key (**deployment-wide unique**, not course-local) |
+| `course_id` | The namespace this exam belongs to; every read also filters on it |
 | `learner_id` | User UUID owning the exam; every query is scoped by it |
 | `status` | `in_progress`, `submitted`, or `expired` |
 | `question_count` | Fixed number of questions drawn at creation |
@@ -1003,31 +1163,21 @@ The composite primary key `(learner_id, question_id)` guarantees one current cor
 | Column | Purpose |
 |---|---|
 | `exam_id` / `position` | Composite primary key fixing the slot order |
-| `question_id` | Stable ID from `questions.json`; unique per exam |
+| `question_id` | Stable course-local ID; `UNIQUE (exam_id, question_id)` keeps a frozen set deduplicated |
 | `selected_answers` | JSON array of the saved selection, `NULL` until answered |
 | `is_correct` | Graded outcome, `NULL` until submission |
 | `answered_at` | UTC ISO timestamp of the latest save, `NULL` when cleared |
 | `grading_fingerprint` | The question's grading identity at creation; detects drifted slots in historical reports, `NULL` for pre-tracking exams |
 
+This table deliberately stores **no `course_id`**: a slot is always reached through its parent session, so the namespace cannot desynchronise. Every slot statement proves parent membership with `EXISTS (… exam_sessions.course_id = ?)`, and the schema carries `FOREIGN KEY (exam_id) REFERENCES exam_sessions(id) ON DELETE RESTRICT`.
+
 The question set is fixed at creation and never re-drawn, so refreshes, reopens, and cross-device resumes all see identical slots. Submission flips `status` with a conditional `UPDATE ... WHERE status = 'in_progress'`, which makes repeated submits no-ops before any attempt or mistake side effects run.
-
-### `weak_knowledge_points`
-
-| Column | Purpose |
-|---|---|
-| `learner_id` / `chapter_id` | Composite primary key, one weak state per account/chapter |
-| `active` | Whether this chapter still requires reinforcement |
-| `verified_question_ids` | JSON array of distinct correct Review question IDs |
-| `last_wrong_at` | Most recent wrong answer that activated/reset the chapter |
-| `updated_at` | Most recent state change |
-
-Every query and write is learner-scoped. Question content and chapter titles remain in the live `QuestionRepository`; only stable IDs are persisted.
 
 ### `question_registry`
 
 | Column | Purpose |
 |---|---|
-| `question_id` | Permanent question identity (primary key) |
+| `course_id` / `question_id` | Composite PRIMARY KEY: the permanent per-course question identity |
 | `status` | `active` while in the bank, `retired` after deletion; rows are never removed |
 | `question_type` | Grading identity: `single` or `multiple` at last sight |
 | `option_ids` | Grading identity: JSON array of the sorted option IDs |
@@ -1037,18 +1187,43 @@ Every query and write is learner-scoped. Question content and chapter titles rem
 | `first_seen_at` / `last_seen_at` | UTC ISO timestamps of first sight and latest registry change |
 | `retired_at` | Deletion timestamp, `NULL` while active |
 
-### `courses` / `schema_meta`
-
-The permanent course identity table (`courses`) and the migration bookkeeping table (`schema_meta`) live here. `courses` records the accepted metadata of every course this database has ever served; `schema_meta` records `schema_version`, the **persisted** `legacy_course_id` decided by the namespace migration, and the optional `default_course_id` navigation preference. Changing the preference never re-owns historical data; changing the legacy id is not offered at all.
+A retired ID is reserved permanently **inside its own course**: the same ID may be an active question in another course, and two courses legitimately hash identical question content.
 
 ### `question_bank_state`
 
 | Column | Purpose |
 |---|---|
 | `course_id` | PRIMARY KEY: one state row per course (the pre-multi-course singleton `id = 1` row migrates into the legacy course) |
-| `bank_version` | Raw-bytes SHA-256 of the last loaded `questions.json` **of this course**; diagnostic only |
-| `generation` | **This courses** structural bank generation; bumped when that courses question set changes, a grading identity changes, a question's `chapter_ids`/`source_id` placement changes, or the catalogue shape (sources/chapters added, removed, reordered or re-assigned) changes |
-| `catalogue_fingerprint` | Normalized shape of this courses loaded catalogue (source IDs in order, chapter IDs with source assignment and order); `NULL` for rows written before catalogue tracking, which the next startup adopts as the baseline without a generation bump |
+| `bank_version` | Raw-bytes SHA-256 of the last loaded question bank **of this course**; diagnostic only |
+| `generation` | **This course's** structural bank generation; bumped when its question set changes, a grading identity changes, a question's `chapter_ids`/`source_id` placement changes, or the catalogue shape (sources/chapters added, removed, reordered or re-assigned) changes |
+| `catalogue_fingerprint` | Normalized shape of this course's loaded catalogue (source IDs in order, chapter IDs with their source assignment and order); `NULL` for rows written before catalogue tracking, which the next startup adopts as the baseline without a generation bump |
+
+There is deliberately no global generation: a structural publication of course A bumps only A's row, which is why a stale worker fences that course and leaves every other course serving.
+
+### `auth_rate_limits`
+
+| Column | Purpose |
+|---|---|
+| `scope` / `identifier_hash` | PRIMARY KEY of a fixed-window counter (`login-account`, `login-ip`, `register-ip`); identifiers are SHA-256 hashed, so raw usernames and IP addresses are never stored |
+| `window_started_at` / `expires_at` | Unix timestamps bounding the window |
+| `attempt_count` | Attempts consumed inside the window |
+
+Throttling is deployment-wide (one account, one IP), not per course.
+
+### Foreign keys and indexes
+
+Foreign keys are deliberately minimal: `course_id` on every course-scoped table, and `exam_questions.exam_id`, reference their parents with `ON DELETE RESTRICT`. There is **no** foreign key from `attempts`/`wrong_questions` to live questions or from `weak_knowledge_points` to live chapters, because historical records must remain valid after the corresponding content is deleted.
+
+`INDEX_STATEMENTS` creates exactly these indexes:
+
+```text
+attempts               (learner_id, course_id, question_id, answered_at, id)
+attempts               (course_id, answered_at, id)
+wrong_questions        (learner_id, course_id, mastered, next_review_at)
+weak_knowledge_points  (learner_id, course_id, active)
+exam_sessions          (learner_id, course_id, created_at)
+exam_sessions          (course_id, status, deadline_at)
+```
 
 ## 12. Question-Bank Contract
 
@@ -1100,34 +1275,36 @@ The bundled bank catalogue is maintained as schema v2 metadata directly; new gen
 
 ## 13. End-to-End Request Examples
 
+Every path below is shown in its course-scoped form `/course/<course_id>/…`, which is the canonical registration; the same routes also exist as course-less legacy aliases whose `GET` redirects to the explicit course URL and whose other methods answer `409`. The route layer resolves the course from the URL before any service is called, then opens a `guarded learner transaction` for every write.
+
 ### Starting and answering a normal quiz
 
 ```text
-Browser POST /quiz/start
+Browser POST /course/<course_id>/quiz/start
   -> web.py validates the requested size and stable chapter IDs
   -> QuestionRepository resolves eligible IDs before Normal Selection Policy
   -> QuizService validates the eligible-set scope, consumes the coverage bag,
      crosses a cycle boundary without duplicating an ID in the round, and limits IDs
   -> web.py stores the queue, remaining bag, scope signature and shuffle seed in SQLite
-  -> redirect to GET /quiz
+  -> redirect to GET /course/<course_id>/quiz
   -> web.py loads the current Question from QuestionRepository
   -> QuizService.order_options() creates a stable option order
   -> quiz.html renders the page
 
-Browser POST /quiz/answer
+Browser POST /course/<course_id>/quiz/answer
   -> web.py validates shared progress state, answer token, and non-empty selection
   -> QuizService.answer()
   -> GradingService validates and grades option IDs
   -> WrongQuestionService records the Attempt
   -> an incorrect answer updates WrongQuestionRepository
-  -> web.py stores feedback and redirects to GET /quiz
+  -> web.py stores feedback and redirects to GET /course/<course_id>/quiz
   -> quiz.html renders correct, missed, and wrong option feedback
 ```
 
 ### Reviewing a mistake
 
 ```text
-Browser POST /review/start
+Browser POST /course/<course_id>/review/start
   -> WrongQuestionService returns this user's uncorrected real wrong IDs
   -> QuizService creates persisted original_correction items
   -> if no original is pending, due SRS reviews are queued as srs_review items
@@ -1135,7 +1312,7 @@ Browser POST /review/start
      transfer_verification item
   -> web.py stores role-bearing Review progress in its own account/mode row
 
-Browser POST /review/answer
+Browser POST /course/<course_id>/review/answer
   -> the answer is graded and persisted
   -> one correct original answer marks that concrete question corrected and
      starts its SRS schedule at level 0, one day later
@@ -1146,7 +1323,7 @@ Browser POST /review/answer
      schedule, and resets all chapters
   -> role and chapter progress are stored in feedback; no next candidate is randomized
 
-Browser POST /review/next
+Browser POST /course/<course_id>/review/next
   -> advances the persisted occurrence and rotates the answer token
   -> only when the existing queue is exhausted, Review Selection Policy chooses
      another pending original, then a due SRS review, then a same-chapter transfer
@@ -1156,30 +1333,30 @@ Browser POST /review/next
 ### Running a mock exam
 
 ```text
-Browser POST /exam/start
+Browser POST /course/<course_id>/exam/start
   -> web.py parses the requested size/time limit
   -> ExamService validates both against fixed allow-lists and the live bank size
   -> ExamRepository persists the session and one frozen, deduplicated slot list
-  -> redirect to GET /exam/<id> ( refreshes and other devices see the same set )
+  -> redirect to GET /course/<course_id>/exam/<id> ( refreshes and other devices see the same set )
 
-Browser POST /exam/<id>/answer
+Browser POST /course/<course_id>/exam/<id>/answer
   -> web.py resolves ownership; ExamService rejects expired/finished exams
   -> GradingService validates option IDs without grading feedback
   -> ExamRepository stores the selection verbatim and the visited position
 
-Browser POST /exam/<id>/submit (or any page load after the deadline)
+Browser POST /course/<course_id>/exam/<id>/submit (or any page load after the deadline)
   -> ExamService grades the frozen answers
   -> ExamRepository flips status with a conditional UPDATE (double submits are no-ops)
   -> each answered question is recorded once as a mock_exam Attempt through
      WrongQuestionService, so mistakes rejoin the regular correction/SRS flow
-  -> redirect to GET /exam/<id>/report with score, chapter breakdown, and
+  -> redirect to GET /course/<course_id>/exam/<id>/report with score, chapter breakdown, and
      wrong-question explanations
 ```
 
 ### Dashboard statistics
 
 ```text
-Browser GET /dashboard
+Browser GET /course/<course_id>/dashboard
   -> ExamService settles any expired exams first (touch-based sweep)
   -> StatisticsService aggregates the learner's retained attempt window:
      totals, accuracy, 7/30-day activity, chapter mastery with coverage and
@@ -1273,11 +1450,11 @@ The Windows `.venv` contains Windows executables and is not reused by WSL. Produ
 2. systemd reads `MCQ_SECRET_KEY` from the root-owned `/etc/mcq-template/mcq-template.env` without exposing it in the repository.
 3. systemd changes to the project root and executes `.venv-prod/bin/gunicorn --config gunicorn.conf.py wsgi:app` as `fangsihan`.
 4. `wsgi.py` rejects a missing production secret, calls `create_app()` with debug/testing disabled, and applies one-layer `ProxyFix`.
-5. Each of the two Gunicorn workers validates and loads `questions.json` and `glossary.json`, initializes/checks the SQLite schema, and builds its own immutable services/repositories.
+5. Each of the two Gunicorn workers discovers the course catalogue, validates and loads every enabled course's manifest, published question bank and optional glossary, initializes/checks the SQLite schema, and builds its own immutable per-course services and repositories.
 6. Gunicorn listens only on `127.0.0.1:8001`.
-7. Nginx listens on `0.0.0.0:8080` and `[::]:8080`, then proxies HTTP requests to Gunicorn.
+7. Nginx listens only on the loopback address (`127.0.0.1:8080` and `[::1]:8080`) and proxies HTTP requests to Gunicorn.
 
-The startup sequence is intentionally fail-fast: an invalid question bank or glossary, absent production secret, unavailable upstream port, or failed worker boot prevents a healthy Gunicorn service. Nginx then reports 502 rather than silently falling back to the Flask development server.
+The startup is fail-fast for the deployment and isolated for the content: a missing production secret, an unavailable upstream port or a failed worker boot prevents a healthy Gunicorn service (Nginx then reports 502 rather than silently falling back to the Flask development server), and a *global* catalogue ambiguity — a duplicate `course_id` or an unreadable manifest directory — aborts assembly. A single course whose manifest-declared content is invalid or missing does **not** stop the worker: that course is recorded as `unavailable`, its learner state is left untouched, and the other courses keep serving.
 
 ## 16. Important Invariants
 
@@ -1302,14 +1479,18 @@ Developers should preserve these rules when extending the application:
 17. Apply curriculum filters before fairness/review selection and size limiting, never only in the browser.
 18. Reuse the existing visual language, responsive structures and accessible text/focus patterns.
 19. Do not expose Normal fairness as a new user-facing control or algorithm panel.
-20. Keep glossary labels globally unambiguous; keep glossary content outside SQLite and the question-bank fingerprint.
-21. An uncorrected wrong question never carries an SRS due timestamp; a failed review always returns to the correction flow before being rescheduled at level 0.
-22. Keep SRS timestamps as UTC ISO strings, evaluate "due" with `next_review_at <= now` (inclusive), and keep the interval ladder in `srs_service.SRS_INTERVAL_DAYS` rather than scattering numbers across layers.
-23. A `question.id` is a permanent identity: never change it for content edits, never recycle a retired ID for a different question, and never judge question identity from text.
-24. Keep the worker fence and each course's structure consistent: the question set, grading identities, a question's `chapter_ids`/`source_id` placement, and the catalogue *shape* advance **that course''s** `question_bank_state.generation` (labels never do), a stale worker answers 503 on that course's learning pages until it is updated, other courses keep serving, and `generation` is never hand-edited to bypass the check.
-25. Keep every course namespace closed under its own `course_id`: repositories are constructed with a required `course_id`, every query is restricted to it, `get_all()`/`list_all()`/`count()`/`distinct_question_ids()` mean "this course", and genuinely cross-course work goes through `CrossCourseQueries` or the migration tooling.
-26. Never reinterpret content across courses: a missing, disabled, or unavailable course answers 404/503 and is never served another course's questions, chapters, glossary or learner state.
-27. Never let caller-controlled input raise: a form field (including `csrf_token`/`answer_token`) may hold arbitrary text, so reject it with the documented status code instead of crashing — compare tokens with `app/web/auth.py::tokens_match()`, never with `secrets.compare_digest(str, str)`.
+20. Keep glossary labels unambiguous **inside one course** (cross-course collisions are expected and harmless) and keep glossary content outside SQLite and outside every question-bank fingerprint. Publishing a glossary never advances a generation, never makes a worker stale, and never triggers reconciliation.
+21. Keep every course namespace closed under its own `course_id`: repositories are constructed with a required `course_id`, every query is restricted to it, `get_all()`/`list_all()`/`count()`/`distinct_question_ids()` mean "this course", and genuinely cross-course work goes through `CrossCourseQueries` or the migration tooling.
+22. Never reinterpret content across courses: a missing, disabled or unavailable course answers 404/503 and is never served another course's questions, chapters, glossary or learner state.
+23. Treat the URL's `<course_id>` as the only authority for a request's course; `session["last_course_id"]` is a navigation preference for `/` and for legacy `GET` redirects, and a legacy `POST` without a course is always rejected instead of guessed.
+24. Scope every learner row by **learner *and* course**: `(learner_id, course_id, …)` is the namespace of persistent learning state, while `user_id` and `exam_id` stay deployment-wide. Exam slots carry no `course_id` of their own — they always follow their parent session.
+25. Treat the persisted `legacy_course_id` as read-only at runtime: ordinary application code never rewrites it. The only supported way to move that namespace is the explicit administrative rename in `scripts/rename_course.py`, which updates the key together with the rows it describes.
+26. An uncorrected wrong question never carries an SRS due timestamp; a failed review always returns to the correction flow before being rescheduled at level 0.
+27. Keep SRS timestamps as UTC ISO strings, evaluate "due" with `next_review_at <= now` (inclusive), and keep the interval ladder in `srs_service.SRS_INTERVAL_DAYS` rather than scattering numbers across layers.
+28. A `question.id` is a permanent identity: never change it for content edits, never recycle a retired ID for a different question **inside the same course**, and never judge question identity from text.
+29. Keep the worker fence and each course's structure consistent: the question set, grading identities, a question's `chapter_ids`/`source_id` placement, and the catalogue *shape* advance **that course's** `question_bank_state.generation` (labels never do), a stale worker answers 503 on that course's learning pages until it is updated, other courses keep serving, and `generation` is never hand-edited to bypass the check.
+30. Keep failure isolation per course: a broken course is `unavailable` and keeps its learner state untouched, while only a *global* ambiguity (duplicate `course_id`, an unreadable manifest directory) may abort application assembly. Readiness is a monitoring signal and must never fence a healthy course.
+31. Never let caller-controlled input raise: a form field (including `csrf_token`/`answer_token`) may hold arbitrary text, so reject it with the documented status code instead of crashing — compare tokens with `app/web/auth.py::tokens_match()`, never with `secrets.compare_digest(str, str)`.
 
 ## 17. Common Extension Points
 
@@ -1323,6 +1504,24 @@ Developers should preserve these rules when extending the application:
 - Add a new learning mode: extend `QuizMode`, define its queue and persistence rules, add an independent mode in the progress table, and update the database mode constraint if attempts use the new mode.
 - Replace the question bank: put the working copy at `courses/<course_id>/questions_candidate.json` and publish it with `python scripts/publish_course.py --course <course_id>` (the default candidate; an explicit `--questions <path>` also works — it re-runs `scripts/check_question_bank.py` by default; never `cp` over the live file) and then restart **all** workers together. Ordinary maintenance is reconciled per question without clearing learner data; grading-identity changes and deletions affect exactly the involved questions, and chapter/source moves or catalogue-shape changes bump the generation so slicing workers stop serving until the shared restart (labels alone do not).
 - Remove a course: never `rm -rf courses/<course_id>`. Use `python scripts/delete_course.py --course <course_id> --dry-run` first, then run it without `--dry-run` so the content directory, `courses` identity, course-scoped learner rows, `question_bank_state`, `question_registry` and the `default_course_id` preference are removed together (`--force` is required while learner data exists, and the database is backed up first).
+- Replace a course's **subject**: provide schema-compatible question/glossary files for that course and restart all workers. No Python, HTML, JavaScript, CSS or database change is required; the authoring contracts live in [`QUESTION_GUIDE.md`](QUESTION_GUIDE.md) and [`GLOSSARY_GUIDE.md`](GLOSSARY_GUIDE.md).
+
+### Publishing a new question bank for one course
+
+1. Write the candidate bank to its own file — the default location is `courses/<course_id>/questions_candidate.json`, which the commands below then need no path argument for. Never edit the live file in place.
+2. Run `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db` (add `--strict` in CI to fail on updates that clear learner state, and `--simulate` to run the real reconciliation against a temporary copy of the database; `--published` re-checks the deployed file while a working copy exists). Read the report with the semantics of ["How to read the two bank-level report lines"](#how-to-read-the-two-bank-level-report-lines) above: `catalogue-changed: yes` means that course's workers need the restart, while `presentation-only: no` does not mean the labels stayed identical.
+3. Publish atomically: `python scripts/publish_course.py --course <course_id> --questions questions_candidate.json` (or simply `--course <course_id>` when the working copy is the default one). The candidate bytes are read once, validated as-is, written to an immutable `versions/<sha256>/questions.json`, re-validated against the publication baseline inside the course publication lock, and then the manifest is switched over with a single `os.replace()`. Filesystem publication and database activation are **not** one transaction, so the command reports `published, pending worker activation` and never bumps the generation itself.
+4. Restart all workers (`systemctl restart mcq-template.service`) and confirm `/ready` and `/ready/<course_id>` answer `200`. A course that is still stale only fences its own pages. See [`COURSE_GUIDE.md`](COURSE_GUIDE.md) for the full operational flow.
+
+### Restoring a database backup
+
+`generation` lives in the database, and each worker compares it with the value it loaded at startup. Restoring an older backup therefore makes the *database* generation differ from a running worker's generation, and that worker keeps answering 503 (with `/ready` reporting `stale`) even though no bank file changed. Treat a restore as a deployment that re-establishes the "database + worker bank state" pair: restore the backup, put the matching content in place (atomically), restart all workers together, then confirm `/ready`. Never forge or hand-edit `generation` to skip this step — the check exists to prevent mixed-bank writes.
+
+### Pre-registry tombstone compatibility
+
+When a database predates `question_registry`, the bootstrap adopts question IDs that only appear in learner tables (attempts, progress rounds, exam slots, weak-point verifications) as retired tombstones **without a grading identity** (`option_ids` empty). If such an ID later reappears in the bank, `sync` cannot prove whether it is the same question and adopts it, so the new question inherits the old ID's attempt/review history — always inside that one course.
+
+This is a one-time tolerance for migration-era data, not a general licence to reuse retired IDs; a tombstone that does record a grading identity still rejects a different question and makes that course `unavailable`. `scripts/check_question_bank.py` prints every `legacy tombstones without grading identity` record so maintainers can see the exposure, and new content should always get a fresh ID.
 
 ## 18. Local Production Deployment
 
@@ -1332,12 +1531,12 @@ The long-running local production deployment runs entirely inside WSL2 Ubuntu:
 Internet
   -> Sakura FRP TCP tunnel
   -> Windows localhost:8080
-  -> WSL2 Nginx HTTP 0.0.0.0:8080
+  -> WSL2 Nginx HTTP loopback 127.0.0.1:8080 / [::1]:8080
   -> Gunicorn 127.0.0.1:8001
   -> Flask wsgi:app
 ```
 
-Sakura FRP remains an external transport concern. Nginx terminates ordinary HTTP and is the only component exposed on port 8080; Gunicorn is loopback-only on port 8001. Port 8001 is used because the host rejects binds to 8000 even though neither Windows nor WSL reports a visible listener there. No domain, DNS, TLS, certificate, Nginx `stream` block, Windows startup task, or WSL auto-start behavior is part of this deployment.
+The path names, the `fangsihan` service account and the `/home/fangsihan/CodeSpace/Python/MCQ_Template` working directory below are **this machine's values**, not general project requirements; a different host substitutes its own account and checkout path. Sakura FRP remains an external transport concern. Nginx terminates plain HTTP on port 8080, but only on the loopback interface — the Windows-side `localhost:8080` forwarding and the tunnel are what make it reachable — and Gunicorn is loopback-only on port 8001. Port 8001 is used because the host rejects binds to 8000 even though neither Windows nor WSL reports a visible listener there. No domain, DNS, TLS, certificate, Nginx `stream` block, Windows startup task, or WSL auto-start behavior is part of this deployment.
 
 ### Port and trust boundaries
 
@@ -1345,7 +1544,7 @@ Sakura FRP remains an external transport concern. Nginx terminates ordinary HTTP
 |---|---|---|---|
 | `127.0.0.1:5000` | Werkzeug | WSL loopback, development only | `python run.py` |
 | `127.0.0.1:8001` | Gunicorn | WSL loopback only | Private Nginx upstream |
-| `0.0.0.0:8080`, `[::]:8080` | Nginx | WSL and Windows localhost forwarding | Stable local HTTP endpoint and Sakura FRP target |
+| `127.0.0.1:8080`, `[::1]:8080` | Nginx | Loopback only; reached from Windows through WSL localhost forwarding | Stable local HTTP endpoint and Sakura FRP target |
 
 Sakura FRP must target TCP `127.0.0.1:8080`. It must never target 8001 directly. Because Sakura FRP carries the HTTP bytes transparently rather than acting as an HTTP reverse proxy, the application trusts exactly one HTTP proxy: Nginx.
 
@@ -1366,7 +1565,7 @@ The conservative worker count serves concurrent local requests without creating 
 
 ### systemd supervision
 
-The source-controlled unit is `deploy/mcq-template.service`; its active copy is `/etc/systemd/system/mcq-template.service`. It:
+`deploy/mcq-template.service` is this machine's unit file (the `deploy/` directory is git-ignored, so a fresh clone must recreate it); its active copy is `/etc/systemd/system/mcq-template.service`. It:
 
 - runs Gunicorn as the unprivileged `fangsihan` user and group;
 - uses the real project root as `WorkingDirectory`;
@@ -1381,7 +1580,7 @@ The environment directory is root-owned with mode `0700`, and the environment fi
 
 ### Nginx HTTP proxy
 
-Nginx uses `deploy/nginx-mcq-template.conf`, installed as `/etc/nginx/sites-available/mcq-template` and linked from `sites-enabled`. It preserves the incoming HTTP Host, records forwarding metadata, limits request bodies to 2 MiB because the application has no upload feature, applies bounded proxy timeouts, and explicitly denies hidden files, SQLite files, and common backup suffixes. Static files remain served by Flask because they are small and this avoids a second asset-path contract.
+Nginx uses `deploy/nginx-mcq-template.conf`, installed as `/etc/nginx/sites-available/mcq-template` and linked from `sites-enabled`. It listens **only on the loopback interface** (`listen 127.0.0.1:8080 default_server;` and `listen [::1]:8080 default_server;`), preserves the incoming HTTP Host, records forwarding metadata, limits request bodies to 2 MiB because the application has no upload feature, applies bounded proxy timeouts, and explicitly denies hidden files, SQLite files, and common backup suffixes. Static files remain served by Flask because they are small and this avoids a second asset-path contract.
 
 The site is a normal Nginx `http`/`server`/`location` reverse proxy; there is no `stream` block. It uses `server_name _`, has no domain dependency, and deliberately configures no HTTPS redirect, TLS certificate, or certificate automation. The default port-80 site is disabled to avoid owning a port outside this deployment.
 
@@ -1393,7 +1592,7 @@ Project-specific logs are:
 
 ### Template deployment
 
-The repository files are canonical templates, while `/etc` contains the active system configuration:
+The files in the (git-ignored) `deploy/` directory are templates, while `/etc` contains the active system configuration:
 
 ```text
 deploy/mcq-template.service
@@ -1457,291 +1656,3 @@ curl.exe http://localhost:8080/health
 ```
 
 A `200` response containing `{"status":"ok"}` from Windows proves the complete local path required by Sakura FRP.
-
-
-## Generic glossary subsystem
-
-The glossary is a course-agnostic, data-driven subsystem parallel to the quiz system:
-
-```mermaid
-flowchart LR
-    Questions[questions.json] --> QLoader[QuestionLoader]
-    QLoader --> QRepo[QuestionRepository]
-    QRepo --> Quiz[Quiz services and pages]
-
-    GlossaryJSON[glossary.json] --> GLoader[GlossaryLoader]
-    GLoader --> GRepo[GlossaryRepository]
-    GRepo --> GlossaryPage[GET /glossary]
-    GRepo --> Jinja[Jinja tojson payload]
-    Jinja --> GlossaryJS[glossary.js]
-    GlossaryJS --> Highlight[Generic term highlighting and popover]
-```
-
-`GlossaryLoader` validates schema version 1, required root and term fields,
-unique IDs, normalized canonical-term uniqueness, alias types, empty aliases,
-duplicate aliases and cross-entry term/alias collisions. It creates frozen
-`Glossary` and `GlossaryTerm` objects. `GlossaryRepository` holds these objects
-for the life of the process, indexes them by ID, derives categories in stable
-first-appearance order, and exposes JSON-ready copies. Neither component knows
-which academic or professional subject the data describes.
-
-`create_app()` loads `GLOSSARY_FILE` once at startup, independently of
-`QUESTION_FILE`. The repository is injected into the web blueprint and exposed
-in `AppServices` for diagnostics. It is not persisted in SQLite and is not
-passed into grading, correction, weak-knowledge, wrong-question, attempt, or progress logic.
-
-Authenticated templates receive the serialized glossary through Jinja's
-`tojson` filter. `glossary.js` builds a literal, case-insensitive matcher from
-canonical terms and aliases. Candidates are ordered longest-first. A match is
-accepted only when any letter/number edge is not attached to another Unicode
-letter, number, combining mark, or underscore; consequently `die` does not
-match inside `dielectric`, while punctuation-bearing data such as `SC-1`,
-`Cu/low-k`, `AR(1)`, or `χ²` is not constrained to an ASCII token grammar.
-Aliases always resolve to the same canonical entry.
-
-Only containers explicitly marked `data-glossary-highlight` are scanned.
-The engine walks text nodes with `TreeWalker`, creates replacement nodes with a
-`DocumentFragment`, and never rewrites container `innerHTML`. It skips scripts,
-styles, form controls, Chinese translation blocks, existing highlights and the
-popover. Highlight controls support pointer activation, Enter, Space, visible
-focus, Escape, outside-click close, and viewport-safe repositioning. Stopping
-the highlight's own event prevents a term inside an answer row from selecting
-or submitting that answer; the rest of the row retains its normal behavior.
-
-`GET /glossary` renders metadata and terms from the repository. Search covers
-canonical English, aliases, Chinese term, the Chinese definition, and category. Its
-category picker is populated from repository-derived categories. English is
-shown first and each card uses a real button to reveal or hide Chinese. The
-quiz-size, mistake-filter, and glossary-filter pickers share one small
-`initializePicker` behavior in `app.js`; they use hidden form inputs and
-server-rendered listbox buttons, with no native `<select>` or third-party UI
-library. Glossary category choices filter cards immediately in the browser;
-mistake source/chapter choices submit the GET form immediately and preserve
-both filter values, so no separate filter button is needed.
-
-The components reuse the existing 1180px page shell, paper/sheet surfaces,
-accent and focus variables, display/UI/data font stack, line-based cards,
-button variants, 100–220ms motion, reduced-motion handling, and the existing
-820px/640px responsive breakpoints.
-
-To replace this course with Statistics, Finance, Medicine, or another domain,
-provide schema-compatible `questions.json` and `glossary.json` files and restart
-all application workers. No Python, HTML, JavaScript, CSS, or database changes
-are required. The exact authoring contracts are maintained in
-`docs/QUESTION_GUIDE.md` and `docs/GLOSSARY_GUIDE.md`.
-
-## Course replacement and per-course bank state
-
-`question_registry` stores one permanent row per **`(course_id, question_id)`**
-with that question's grading identity (type, option-ID set, correct-answer set),
-a content fingerprint, and a placement fingerprint (`source_id` + `chapter_ids`);
-that course's `question_bank_state` row also records a catalogue fingerprint (the
-shape of its `sources`/`chapters`). Every repository involved is constructed with
-a required `course_id`, so a diff, a bootstrap, a retirement, a cleanup or a
-generation bump can only ever touch one course. At startup,
-`QuestionBankSyncService.synchronize()` uses `BEGIN IMMEDIATE` to diff the freshly
-loaded bank against **this course's** registry by stable `question.id` and applies
-only what actually changed, atomically:
-
-- **content-only changes** (wording, translations, explanations, option text
-  or order, added wrong options, section/pages, JSON formatting) keep every
-  learner record and do not move the generation;
-- **chapter/source moves** (`chapter_ids` or `source_id` changes) keep every
-  learner record but are **structural**: they decide chapter filtering, Review
-  and weak-knowledge selection and chapter progress, so the generation advances
-  and sibling workers holding the old mapping are fenced off. They are never
-  treated as "content only";
-- **catalogue shape changes** (a source or chapter added, removed, reordered or
-  re-assigned in that course's catalogue) are **structural** as well, even when no
-  question references them: each worker builds its menus and validates submitted
-  filter values against its own copy, so without the fence the old worker's menu
-  could submit a chapter the new worker rejects with `400 提交的章节筛选不存在`, or
-  the two menus would disagree about which chapters exist;
-- **catalogue label changes** (bank `title`/`title_zh`, `sources[].title/lecture`
-  /`filename`, `chapters[].title`) are *not* structural: they change text only,
-  so workers may show different labels until the next worker restart;
-- **grading-identity changes** (type, correct-answer set, removed/renamed
-  option IDs) delete exactly that question's `attempts` and `wrong_questions`
-  rows for every account and strip it from weak-point verifications,
-  unfinished rounds, and unfinished exams;
-- **deleted questions** keep their `attempts` but silently lose their
-  `wrong_questions`/SRS state, weak-point references, progress-queue entries,
-  and unfinished-exam slots (positions resequenced, `question_count` shrunk);
-- **new questions** are registered without touching any history;
-- **retired IDs** are tombstoned forever **inside that course**: re-adding the
-  same question with an identical grading identity resurrects it, while reusing
-  the ID for a different question turns that course `unavailable` before
-  anything is written (other courses keep serving).
-
-Users are preserved unchanged, and no flash, banner, or confirmation is ever
-shown for bank maintenance. Concurrent workers serialize on the same
-transaction: the second worker's diff simply finds nothing to do, so
-reconciliation never runs twice. One publication bumps a course's generation at
-most once, no matter how many structural changes it contains. Invalid packages
-and retired-ID reuse leave that course `unavailable` before any write — and only
-that course. The structural `generation` in that course's `question_bank_state`
-row advances when its question set changes, when one of its grading identities
-changes, or when a question's placement changes. A worker whose generation no
-longer matches answers 503 for **that course's** learning pages until it is
-updated; `/ready` reports the aggregate and `/ready/<course_id>` the course,
-while `/health` stays `200` because the process is still alive and must keep
-serving login/logout. Wording-only edits let unchanged workers keep serving.
-Because the guard is evaluated per course, a stale course A never blocks course
-B: B's data, generation and request behaviour are untouched. The fence is also
-re-checked inside every learner write transaction, which is what closes the
-"outer pre-check passed, sibling published, then we write" race with zero
-learner writes.
-
-The generation fence is deliberately fail-fast: the alternative (letting a
-stale worker keep reading and writing learner state) makes the same database
-flip between two question-to-chapter mappings depending on which worker served
-a request, which is exactly the inconsistency this design prevents. Never
-"fix" a stale worker by ignoring the mismatch, resetting learner progress, or
-hand-editing the generation.
-
-### Publishing a new question bank
-
-1. Write the candidate bank to its own file (never edit the live file in place).
-   The default location is `courses/<course_id>/questions_candidate.json`, which
-   the commands below then need no path argument for.
-2. Run `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db`
-   (add `--strict` in CI to fail on updates that clear learner state, and
-   `--simulate` to run the real reconciliation against a temporary copy of the
-   database; `--published` re-checks the deployed file while a working copy
-   exists). Read the report with the semantics of “How to read the two
-   bank-level report lines” above: `catalogue-changed: yes` means that course's
-   workers need the restart, while `presentation-only: no` does not mean the
-   labels stayed identical.
-3. Publish atomically: `python scripts/publish_course.py --course <course_id> --questions questions_candidate.json`
-   (or simply `--course <course_id>` when the working copy is the default one)
-   reads the candidate **once**, validates exactly those bytes, writes them to an
-   immutable `versions/<sha256>/questions.json`, re-validates the publication
-   baseline inside the course publication lock, and switches `course.json` over
-   with a single `os.replace()`. Do not `cp` over the live file and do not rely on
-   an editor's in-place save: a truncated or partially written JSON is read by a
-   worker starting up in that window and surfaces as a misleading
-   `Invalid JSON in question bank at line 1, column N`. Filesystem publication and
-   database activation are **not** one transaction, so the command reports
-   `published, pending worker activation` and never bumps the generation itself.
-4. Restart the workers (`systemctl restart mcq-template.service`). Confirm
-   `/ready` answers `200` and `/ready/<course_id>` answers `200`; a course that is
-   still stale only fences its own pages.
-
-Deleting a question also changes the numbers learners see: `attempts` rows are
-kept in the database, but every learner-facing statistic counts only live
-questions, so cumulative answer counts can drop and accuracy can move; if the
-question is later restored, its historical attempts are counted again. "History
-is preserved" therefore never means "all displayed statistics stay identical".
-
-Chapter and catalogue metadata splits into a structural part and a presentation
-part. A question's `chapter_ids`/`source_id` (its placement) and the *shape* of
-the root catalogue (sources/chapters added, removed, reordered or re-assigned)
-are structural and bump the generation, as above. Pure presentation metadata —
-the bank `title`/`title_zh`, `sources[].title`/`lecture`/`filename`, and
-`chapters[].title` — is not part of any fingerprint, so workers may briefly
-disagree about labels until the next coordinated restart; that inconsistency is
-accepted and only affects wording, never which chapters exist or a question's
-filtering/progress. One nuance: menus are ordered by `(order, title)`, so when two
-chapters share the same `order`, a title edit can still shift their relative order
-in the menu. `scripts/check_question_bank.py`
-reports the two cases separately (`catalogue-changed` vs `presentation-only`) so
-maintainers know whether the coordinated restart is required or merely optional.
-
-The raw-bytes SHA-256 of `questions.json` is still recorded in
-`question_bank_state.bank_version`, but only for diagnostics — never as a
-reset trigger. `glossary.json` bytes remain excluded, so
-glossary maintenance never affects learner data.
-
-### Database restore and rollback
-
-`generation` lives in the database, and each worker compares it with the value
-it loaded at startup. Restoring an older backup therefore makes the *database*
-generation lower than a running worker's generation, and that worker keeps
-answering 503 (with `/ready` reporting `stale`) even though nothing about the
-bank file changed. Treat a restore as a deployment that re-establishes the
-"database + worker bank state" pair:
-
-1. restore the database backup;
-2. put the matching `questions.json` in place (atomically, as above);
-3. restart all workers together;
-4. confirm `/ready` answers `200`.
-
-Never forge or hand-edit `generation` to skip this step: the check exists to
-stop mixed-bank writes, and faking it re-introduces exactly the inconsistency
-described above.
-
-### Pre-registry tombstone compatibility
-
-When a database predates `question_registry`, the bootstrap adopts question IDs
-that only appear in learner tables (attempts, progress rounds, exam slots,
-weak-point verifications) as retired tombstones **without a grading identity**
-(`option_ids` is empty). If such an ID later reappears in the bank, `sync`
-cannot prove whether it is the same question and adopts it, so the new question
-inherits the old ID's attempt/review history.
-
-This is a one-time tolerance for migration-era data, not a general licence to
-reuse retired IDs; a tombstone that does record a grading identity still rejects
-a different question and blocks startup. `scripts/check_question_bank.py`
-prints every `legacy tombstones without grading identity` record so maintainers
-can see the exposure, and new content should always get a fresh ID instead of
-reusing one of those.
-
-On first upgrade from a pre-registry database, the currently deployed bank is
-adopted as the baseline: every existing learner record is preserved, question
-IDs found only in learner tables become retired tombstones and are reconciled
-like deletions, and no data is cleared. `scripts/check_question_bank.py`
-validates a candidate bank and dry-runs this diff read-only before deployment,
-exiting non-zero when a retired ID is being reused.
-
-## Multi-course runtime (per-course namespaces)
-
-The course runtime is assembled once per worker and is read-only afterwards.
-
-| Module | Responsibility |
-|---|---|
-| `app/models/course.py` | `Course`, `CourseDefinition`, course-slug validation, `LEGACY_COURSE_ID` |
-| `scripts/rename_course.py` | the administrative namespace rename (backup, one transaction, before/after row-count validation) |
-| `app/repositories/course_loader.py` | manifest discovery/validation, path containment, `CourseBundle` loading, publication identity |
-| `app/repositories/course_repository.py` | the permanent `courses` rows and the `schema_meta` keys |
-| `app/repositories/schema_migrations.py` | the transactional namespace migration and its validation |
-| `app/services/course_service.py` | one course's full dependency graph (`CourseServices`) plus its startup reconciliation |
-| `app/course_runtime.py` | `CourseRegistry`, `CourseState`, `AppServices`, and the load/sync loop |
-| `app/services/course_consistency.py` | the Flask-independent learner-write guard |
-| `app/web/course_context.py` | signed form contexts and the course-aware template `url_for` |
-
-A course's displayed name comes from its manifest whenever one exists (so a
-`disabled` and an `enabled` course cannot disagree about their own name); only
-the manifest-less legacy adapter takes its name from the question bank.
-
-A course's `course_id` is its namespace, so renaming it is a data migration:
-`scripts/rename_course.py` rewrites the key across every scoped table in one
-transaction (and the persisted `legacy_course_id` when that is the renamed
-namespace) after taking a backup, refusing to run when the target namespace
-already owns data.
-
-The startup sequence per enabled course is: load the bundle → assemble the
-course's repositories/services → reconcile inside one `BEGIN IMMEDIATE`
-(re-checking the publication identity taken at load time) → record the loaded
-generation. A course that fails any step is recorded as `unavailable` and is
-neither served nor synced; a duplicate `course_id` or an unreadable manifest is a
-global assembly failure instead.
-
-Namespace invariants enforced in code, not by convention:
-
-* every learner-persistence repository requires a `course_id` at construction
-  (`app/repositories/course_scope.py`) and restricts every statement to it, so
-  `get_all()`/`list_all()`/`count()`/`distinct_question_ids()` mean "this
-  course";
-* exam slots carry no `course_id` of their own — every slot statement proves
-  parent membership with `EXISTS (… exam_sessions.course_id = ?)`, so the
-  namespace cannot desynchronise;
-* `QuestionBankSyncService`, `WrongQuestionService` and `ExamService` validate at
-  construction that every injected repository/weak-knowledge service is bound to
-  the same course, turning a mis-wired graph into a startup error;
-* genuinely cross-course reads (`exam_id` → owning course) go through
-  `app.repositories.CrossCourseQueries`, so they are always an explicit choice.
-
-The fingerprint algorithms are unchanged and never include `course_id`: the same
-hash may legitimately appear in two courses, every comparison happens inside one
-course's registry, the namespace migration recomputes nothing, and a retired ID
-is reserved permanently only inside its own course.

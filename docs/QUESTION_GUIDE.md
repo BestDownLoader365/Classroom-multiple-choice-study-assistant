@@ -2,7 +2,9 @@
 
 本文面向生成、审核和维护题库的开发者。目标是生成一份可以被当前应用直接加载的 `questions.json`，无需为不同课程修改 Python、HTML 或 JavaScript 代码。
 
-本文描述的是当前项目实际支持的题库契约。最终校验逻辑以 [`app/repositories/question_loader.py`](../app/repositories/question_loader.py) 为准。专业术语、别名、中文翻译、中文释义和分类不写在题库中，请使用独立的 [`glossary.json` 专业术语库编写指南](GLOSSARY_GUIDE.md)。
+本文描述的是当前项目实际支持的题库契约。最终校验逻辑以 [`app/repositories/question_loader.py`](../app/repositories/question_loader.py) 为准。
+
+**中文字段属于题库**：`text_zh`、`options[].text_zh`、`explanation_zh` 是题库内容的一部分（随题库一起发布、参与内容指纹），中英双语显示也由题库驱动。**术语表只负责专业词汇**：规范词条 `term`、别名 `aliases`、中文译名 `term_zh`、中文释义 `definition_zh` 和分类 `category` 写在 [`glossary.json`](GLOSSARY_GUIDE.md) 里，不写进题库。
 
 ## 1. 适用范围
 
@@ -18,7 +20,21 @@
 
 当前代码不会解释或渲染图片、音频、视频、公式对象、填空题、排序题、主观题等额外题型。即使把 `image`、`difficulty`、`tags` 等未知字段写入 JSON，Loader 也会忽略它们，界面不会自动获得对应功能。
 
-`questions.json` 属于**某门课程**：它位于 `courses/<course_id>/questions.json`，并由同目录的 `course.json`（manifest）声明。应用启动时会加载并校验每一门启用课程的题库与（可选）`glossary.json`。题库维护按 `question.id` **在该课程内**逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该课程该题的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db` 预检题库变更的实际影响（不传路径时默认校验该课程目录里的 `questions_candidate.json`，没有候选文件时回退到已发布题库；候选文件放在中间过程之外时把路径作为位置参数传入）。
+### 1.1 题库文件有四种出现方式
+
+题库**不是**永远位于 `courses/<course_id>/questions.json`。同一门课的内容在磁盘上可能是下面五种情形之一，先分清自己在编辑哪一种，再套用后文的所有命令：
+
+| 路径 | 角色 | 谁读它 |
+| --- | --- | --- |
+| `courses/<course_id>/questions_candidate.json` | **candidate**：维护者日常编辑、也是所有 `check_*.py` / `publish_course.py` 的默认输入 | 只读校验脚本与发布命令（不被 worker 加载） |
+| `courses/<course_id>/course.json` 的 `questions` 字段 | **published content pointer**：唯一已发布指针，指向下面两种之一 | 应用启动时的 `CourseLoader` |
+| `courses/<course_id>/versions/<sha256>/questions.json` | **immutable version**：`--add` 与每次发布写入的不可变副本（推荐布局） | 通过 manifest 指针间接读取 |
+| `courses/<course_id>/questions.json` | **plain-file 兼容布局**：老课程或手工创建的课程，manifest 直接指向根文件 | 通过 manifest 指针间接读取 |
+| 根目录 `questions.json` | **legacy root adapter**：没有 manifest 的兼容入口，被转换为 `course_id = legacy` 的虚拟课程 | 应用启动时的 legacy adapter |
+
+因此：manifest 指向 `versions/<sha256>/questions.json` 时，课程目录根部那份 `questions.json` **不会被任何进程读取**（`check_courses.py` 会把它列为未引用副本），编辑它不会生效。修改题库的正确做法是编辑 candidate，然后走第 11.6 节的预检与发布流程，让 manifest 指针切换过去。
+
+`questions.json` 属于**某门课程**：题目、章节、课件和选项 ID 都是该课程的**本地 ID**（注册表主键是 `(course_id, question_id)`），两门课可以各自拥有 `q001` 而内容完全不同。应用启动时会加载并校验每一门启用课程的题库与（可选）`glossary.json`。题库维护按 `question.id` **在该课程内**逐题增量生效：修改措辞、翻译、解析、选项文案、选项顺序、section/pages 或 JSON 格式不会影响任何学习记录；只有判题规则变化（题型、正确答案集合、删除或重命名已有 option ID）会清理该课程该题的历史；删除题目会保留其历史作答但静默移除其错题/SRS 状态。单独修改 `glossary.json` 不参与题库同步。发布前可用 `python scripts/check_question_bank.py --course <course_id> --db instance/mcq.db` 预检题库变更的实际影响（不传路径时默认校验该课程目录里的 `questions_candidate.json`，没有候选文件时回退到已发布题库；候选文件放在中间过程之外时把路径作为位置参数传入）。
 
 “不会影响学习记录”与“不改变题库结构”是两件事。`chapter_ids`（章节归属）和 `source_id` 决定题目出现在哪些章节筛选、哪些 Review 强化目标和哪些章节进度里，因此它们的变化属于**结构性变化**：学习历史仍然保留，但**该课程**的 generation 会 +1，运行旧题库的 worker 在该课程的学习页面（包括 `/stats`）返回 503，直到 worker 更新；**其他课程完全不受影响**。课件/章节的**增删、顺序或归属变化**同样是结构性变化（每个 worker 用自己那份课程目录生成菜单并校验提交的筛选值，新旧菜单不一致会让旧 worker 提交出新 worker 拒绝为 400 的章节）。只有纯展示文案——题库 `title`/`title_zh`、`sources[].title`/`lecture`/`filename`、`chapters[].title` 与 JSON 格式——不推进 generation，允许新旧 worker 在下次更新前短暂显示不同文案。发布题库文件必须原子替换，详见第 11.6 节；`check_question_bank.py` 会分别报告 `catalogue-changed` 与 `presentation-only`，便于判断是否需要安排更新。
 
@@ -199,11 +215,24 @@ JSON 文件必须使用 UTF-8 编码。标准 JSON 不允许注释、尾随逗�
 
 用户作答记录和错题记录通过 `question.id` 关联题目。系统启动时会按 ID 逐题对比新旧题库（grading identity = `type` + 已有 option ID 集合 + `correct_answers` 集合）：
 
+| 变更 | 学习历史 | 该课程 generation |
+| --- | --- | --- |
+| 题干 / 翻译 / 解析 / 选项文案 / 选项顺序 / `section` / `pages` / JSON 格式 | 全部保留 | 不变 |
+| 新增一个错误选项（判题身份不变） | 全部保留 | 不变 |
+| `chapter_ids` / `source_id` 变化 | 保留，但属于**结构性变化**：影响章节筛选、Review / 薄弱知识点选题与章节进度 | +1 |
+| 课件 / 章节的增删、顺序或归属（catalogue 结构） | 保留，但各 worker 的菜单与筛选校验不同 | +1 |
+| 课件 / 章节标题、题库 `title`/`title_zh`、`lecture`、`filename` | 全部保留 | 不变（文案可能在重启前短暂不一致） |
+| 题型、正确答案集合、删除或重命名已有 option ID | 只定向清理该题的历史作答与错题/SRS 状态 | +1 |
+| 删除题目 | `attempts` 保留；该题的错题/SRS、薄弱知识点引用、未完成 round 与未完成考试槽位被静默清理 | +1 |
+| 新增题目 | 不受影响 | +1 |
+| 恢复（resurrect）原题：原 ID + 原判题规则 | 自动识别为同一道题的回归 | +1（若该 ID 之前处于退役状态） |
+
 - 修正题干、翻译、解析、选项文案、选项顺序、section/pages，或新增一个错误选项时，**保留原 question ID**，该题的全部学习历史自动保留。
 - 修改题型、正确答案集合，或删除/重命名已有 option ID，属于判题规则变化：该题的历史作答和错题状态会被定向清理（不影响其他题），请谨慎操作并确认确有必要。
-- 删除题目后，该 ID 会被永久保留为退役状态，**不能再分配给另一道题**；把退役 ID 复用于判题规则不同的新题会导致应用拒绝启动（预检脚本会提前发现）。
+- 删除题目后，该 ID 会在**本课程内**被永久保留为退役状态，**不能再分配给另一道题**；把退役 ID 复用于判题规则不同的新题会导致该课程在启动时变为 `unavailable`（预检脚本会提前发现，退出码 2）。其他课程不受影响，同一 ID 在别的课程里可以合法存在。
 - 例外只存在于迁移历史中：pre-registry 阶段由历史作答推导出的退役 ID 没有判题身份（`option_ids` 为空），第一次重新出现时会被直接采用，因此新题可能继承这些 ID 上的旧作答历史。这是迁移期的一次性宽容，不是通用规则；`python scripts/check_question_bank.py --course <course_id>` 会把这些记录列为 `legacy tombstones without grading identity`，新内容应改用全新的 ID。
 - 如果误删后想恢复，把原题按原 ID、原判题规则原样加回即可，系统会自动识别为同一道题的回归。
+- 统计口径只统计**仍在题库中**的题目：`attempts` 行会被保留，但删除题目后累计答题数可能下降、正确率可能变化，题目恢复后这些历史作答又会重新计入。“保留历史”不等于“页面统计数字不变”。
 - 替换为另一门课程并继续使用原数据库时，不要重新从通用的 `q001` 开始复用旧 ID。推荐加入课程命名空间，例如 `calculus-q001`、`history-q001`。
 
 ### 6.2 一题属于多个章节
@@ -586,25 +615,27 @@ schema 不要求代码理解某个学科的语义。课程差异应由目录和�
 
 ### 11.1 检查标准 JSON 语法
 
+先检查候选文件（`courses/<course_id>/questions_candidate.json`）；如果编辑的是别的布局，把路径换成实际编辑的文件（manifest 指向的已发布文件或 `versions/<sha256>/questions.json`）。
+
 Linux 或 WSL：
 
 ```bash
-python -m json.tool questions.json > /dev/null
+python -m json.tool courses/<course_id>/questions_candidate.json > /dev/null
 ```
 
 PowerShell：
 
 ```powershell
-python -m json.tool questions.json | Out-Null
+python -m json.tool courses/<course_id>/questions_candidate.json | Out-Null
 ```
 
 ### 11.2 使用项目 Loader 校验完整契约
 
 ```bash
-python -c "from pathlib import Path; from app.repositories.question_loader import QuestionLoader; loader = QuestionLoader(Path('questions.json')); questions = loader.load(); print(f'OK: {len(questions)} questions, {len(loader.sources)} sources, {len(loader.chapters)} chapters')"
+python -c "from pathlib import Path; from app.repositories.question_loader import QuestionLoader; loader = QuestionLoader(Path('courses/<course_id>/questions_candidate.json')); questions = loader.load(); print(f'OK: {len(questions)} questions, {len(loader.sources)} sources, {len(loader.chapters)} chapters')"
 ```
 
-只有看到 `OK` 才表示题库已通过当前应用的结构、类型、ID 唯一性和引用关系校验；这不表示自然语言答案语义唯一，也不表示 source 真正支持答案。
+把 `courses/<course_id>/questions_candidate.json` 换成你实际要校验的文件（已发布文件或某个 `versions/<sha256>/questions.json` 同样可以这样直接校验）。只有看到 `OK` 才表示题库已通过当前应用的结构、类型、ID 唯一性和引用关系校验；这不表示自然语言答案语义唯一，也不表示 source 真正支持答案。仓库自带的课程目录校验（`python scripts/check_courses.py`）会用同一套 Loader 复核每门已声明课程的实际文件。
 
 ### 11.3 运行题库测试和完整测试集
 
@@ -619,15 +650,20 @@ pytest -q
 
 ### 11.5 手工浏览器验收
 
-- 首页显示新的题库标题，而不是旧课程名称。
-- 练习设置页显示正确的 source 数量和 chapter 列表。
-- 选择每个 chapter 都能启动练习。
-- 一道多章节题能从其任意所属 chapter 被筛选出来，且页面显示全部所属章节。
-- 单选题使用单选控件，多选题使用多选控件。
-- 正确、少选、多选和错选的判定符合预期。
-- 中文字段存在时正确显示，不存在时页面布局仍正常。
-- 错题列表和复习模式可以正常找到新题目；错题页选择课件或章节后应立即筛选，不再出现“筛选错题”按钮。
-- 题目、选项、反馈和解析中的专业术语能按 `glossary.json` 正确高亮。
+重启应用并登录后，在**该课程自己的 URL** 下验收（`<course_id>` 是 manifest 里的身份，例如 `physical_design`）：
+
+- `/course/<course_id>/` 首页显示新的题库标题，而不是旧课程名称；
+- `/course/<course_id>/quiz/setup` 练习设置页显示正确的 source 数量和 chapter 列表；
+- 选择每个 chapter 都能启动练习；
+- 一道多章节题能从其任意所属 chapter 被筛选出来，且页面显示全部所属章节；
+- 单选题使用单选控件，多选题使用多选控件；
+- 正确、少选、多选和错选的判定符合预期；
+- 中文字段存在时正确显示，不存在时页面布局仍正常；
+- `/course/<course_id>/mistakes` 错题列表和 `/course/<course_id>/review` 复习模式可以正常找到新题目；错题页选择课件或章节后应立即筛选，不再出现“筛选错题”按钮；
+- `/course/<course_id>/dashboard` 与 `/course/<course_id>/stats` 的统计口径与题库一致（只统计仍在题库中的题目）；
+- 题目、选项、反馈和解析中的专业术语能按该课程的 `glossary.json` 正确高亮（该课程没有术语表时不出现高亮，也不会串入其他课程的术语）；
+- `/course/<course_id>/glossary` 在课程没有术语表时给出明确的空状态；
+- 用 `/courses` 或页头的课程菜单切到另一门课时，两门课的题目、进度与术语互不影响。
 
 ### 11.6 预检、原子发布与 worker 更新
 
@@ -657,6 +693,9 @@ courses/<course_id>/questions_candidate.json
 `publish_course.py` 则显式传 `--questions other_questions.json`；显式路径始终优先于默认值。
 
 `publish_course.py --questions` 只读一次候选文件，校验与发布使用**同一份字节**；它输出 `published, pending worker activation`，**不会**自行推进 generation（由 worker 启动时的 reconciliation 完成），也不声称文件系统发布与数据库激活是同一个事务。回滚就是把旧内容当作新候选再发布一次，不要手工改 `generation`：发布结束后 `versions/` 只保留每个内容类型的**当前版本 + 上一版**，所以回退一步可以直接发布保留的上一版副本（`--questions courses/<course_id>/versions/<previous-sha256>/questions.json`），归档字节相同、不会产生新目录；保留数量与 `--prune` / `--keep-versions` / `--no-prune` 的规则见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.11 节。
+
+> [!NOTE]
+> 同时传 `--questions` 和 `--glossary` 时，两个内容是**按顺序分别发布**的，不是两个文件的一次事务：题库可能已经切换成功而术语表步骤失败。建议先分别完成两次只读预检，需要清晰失败边界时按内容类型分成两条命令发布；完整顺序语义与失败处理见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.3 节与 7.10 节。
 
 预检脚本的退出码含义：`0` 可部署（可能同时打印“将清理学习状态”的警告），`1` 题库校验失败，`2` 非法复用退役 ID（该课程会被标记为不可用），`3` 仅在使用 `--strict` 时出现，表示更新会清理学习状态，`4` 课程无法解析或数据库尚未迁移（未迁移的数据库只能映射到 legacy 课程）。**只要输出中出现清理学习状态的警告，脚本就不会打印“可以安全部署”**；请确认可以接受后再部署。
 
@@ -699,6 +738,7 @@ courses/<course_id>/questions_candidate.json
 | `chapter_ids contains duplicates` | 同一题重复填写章节 | 去重，并重新审核是否真的需要多章节。 |
 | `chapter ... belongs to a different source` | 题目的 source 与章节 source 不一致 | 选择同一 source 下的章节，或修正题目 source。 |
 | `pages must be an array of positive integers` | 使用了字符串、0、负数或小数 | 使用如 `[1, 2]` 的正整数数组。 |
+| `Question bank "schema_version" must be a positive integer` | `schema_version` 缺失、写成字符串/布尔值或小于 1 | 写入正整数；新题库用 `2`（省略字段时 Loader 按 `1` 处理）。 |
 | JSON 能加载但新字段没有效果 | 字段不在当前 Loader/domain/template 契约中 | 不要依赖未知字段；如确需功能，必须先修改代码和测试。 |
 
 ### 12.2 Semantic question failures
@@ -740,8 +780,8 @@ courses/<course_id>/questions_candidate.json
 
 ### 14.1 技术与发布检查
 
-- [ ] 文件名为项目实际加载的 `questions.json`，编码为 UTF-8。
-- [ ] `schema_version` 为 `2`。
+- [ ] 编辑的是该课程的 candidate 文件（`courses/<course_id>/questions_candidate.json`），或明确知道自己在校验/发布哪个文件（manifest 指向的 `versions/<sha256>/questions.json` 或 plain-file 根文件），编码为 UTF-8。
+- [ ] `schema_version` 为正整数，新题库使用 `2`。
 - [ ] 根标题与当前课程一致。
 - [ ] `sources` 和 `chapters` 均非空，所有 ID 唯一。
 - [ ] 所有 question ID 唯一、稳定，没有复用其他课程的历史 ID，也没有复用本题库中已删除题目的退役 ID。
