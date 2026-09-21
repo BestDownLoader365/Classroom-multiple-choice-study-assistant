@@ -27,6 +27,11 @@ from typing import Any
 
 from flask import Flask, request
 
+from app.config import (
+    McqEnvironment,
+    resolve_environment,
+    resolve_session_cookie_secure,
+)
 from app.course_runtime import (
     AppServices,
     CourseRegistry,
@@ -83,7 +88,6 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         PERMANENT_SESSION_LIFETIME=timedelta(days=30),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
-        SESSION_COOKIE_SECURE=True,
         MAX_CONTENT_LENGTH=64 * 1024,
         ENABLE_CSRF=True,
         AUTH_LOGIN_ACCOUNT_LIMIT=10,
@@ -92,15 +96,40 @@ def create_app(test_config: dict[str, Any] | None = None) -> Flask:
         AUTH_REGISTER_IP_LIMIT=10,
         AUTH_REGISTER_WINDOW_SECONDS=3600,
     )
+    # ``SESSION_COOKIE_SECURE`` is deliberately *not* in the mapping above: it
+    # depends on the environment and on whether the entry point passed a value in
+    # code.  ``app.config`` cannot be used to detect the latter because Flask
+    # installs ``SESSION_COOKIE_SECURE = False`` as its own default, so only the
+    # entry point's dict counts.
+    explicit_secure = (test_config or {}).get("SESSION_COOKIE_SECURE")
     if test_config:
         app.config.update(test_config)
-        if app.config.get("TESTING") and "SESSION_COOKIE_SECURE" not in test_config:
-            app.config["SESSION_COOKIE_SECURE"] = False
         if app.config.get("TESTING") and "ENABLE_CSRF" not in test_config:
             app.config["ENABLE_CSRF"] = False
     elif configured_secret is None:
         app.logger.warning(
             "MCQ_SECRET_KEY is not set; using an ephemeral development secret."
+        )
+
+    environment = resolve_environment(
+        os.environ, testing=bool(app.config.get("TESTING"))
+    )
+    app.config["MCQ_ENVIRONMENT"] = environment.value
+    app.config["SESSION_COOKIE_SECURE"] = resolve_session_cookie_secure(
+        environment=environment,
+        environ=os.environ,
+        explicit=explicit_secure,
+        testing=bool(app.config.get("TESTING")),
+    )
+    app.logger.info(
+        "运行环境=%s，SESSION_COOKIE_SECURE=%s（显式传入=%s）",
+        environment.value,
+        app.config["SESSION_COOKIE_SECURE"],
+        explicit_secure,
+    )
+    if explicit_secure is False and environment is McqEnvironment.PRODUCTION:
+        app.logger.warning(
+            "入口显式关闭了 SESSION_COOKIE_SECURE：生产环境的登录凭据会以明文传输。"
         )
 
     display_timezone = resolve_display_timezone(app.config["DISPLAY_TIMEZONE"])

@@ -512,7 +512,7 @@ Flask
 > [!CAUTION]
 > **公网入口必须使用 HTTPS**，并把原始协议可靠地传递为 `X-Forwarded-Proto: https`。生产入口（`wsgi.py`）强制使用 `Secure` Session Cookie：直接把明文 HTTP 的 8080 端口暴露到公网会泄露登录凭据，且浏览器不会在后续 HTTP 请求中发送登录 Cookie。TLS 可以终止在受信任的公网反向代理、CDN 或隧道服务，但代理到本机的 8080 只能作为受保护的回源链路，**不能作为公网入口**。
 
-`wsgi.py` 在启动时强制要求 `MCQ_SECRET_KEY`，并固定 `DEBUG=False`、`SESSION_COOKIE_SECURE=True`、`ENABLE_CSRF=True`，同时只信任一层代理头（`ProxyFix(x_for=1, x_proto=1)`）。
+`wsgi.py` 在启动时强制要求 `MCQ_SECRET_KEY`，声明 `MCQ_ENV=production`，并固定 `DEBUG=False`、`SESSION_COOKIE_SECURE=True`、`ENABLE_CSRF=True`，同时只信任一层代理头（`ProxyFix(x_for=1, x_proto=1)`）。
 
 <details>
 <summary><b>Production deployment (WSL2 + Ubuntu + Nginx + Gunicorn)：完整步骤</b></summary>
@@ -703,12 +703,25 @@ Local HTTP URL: http://127.0.0.1:8080
 | 变量 | 作用 |
 | --- | --- |
 | `MCQ_SECRET_KEY` | 会话与表单签名密钥；生产入口（`wsgi.py`）要求必须设置。开发环境未设置时使用临时随机密钥并打印警告（重启会失效）。 |
+| `MCQ_ENV` | 声明本进程是什么部署：`production` / `development` / `testing`。它决定环境相关的安全默认值（Session Cookie 是否 `Secure`、启动时如何处理旧 schema）。未设置表示“未知”，按**安全默认**处理（Cookie `Secure`、拒绝启动时自动迁移）。`run.py` 与 `wsgi.py` 会各自 `setdefault` 为 `development` / `production`。 |
+| `MCQ_SESSION_COOKIE_SECURE` | 严格布尔（`1/0`、`true/false`、`yes/no`、`on/off`），覆盖 Session Cookie 的 `Secure` 标志。`MCQ_ENV=production` 下只允许设为真；非法值直接让启动失败。 |
 | `MCQ_DEFAULT_COURSE` | 导航偏好：决定没有显式课程 URL 的浏览器跳转到哪门课，**不会**重新归属历史数据。 |
 | `MCQ_DISPLAY_TIMEZONE` | 页面时间与 Dashboard 趋势日期使用的 IANA 时区（如 `Asia/Shanghai`）；默认跟随服务器本地时区，非法值会让启动失败。 |
 
-其他固定默认值（见 `app/__init__.py`）：Session 有效期 30 天、`SESSION_COOKIE_HTTPONLY=True`、`SESSION_COOKIE_SAMESITE="Lax"`、`SESSION_COOKIE_SECURE=True`、`MAX_CONTENT_LENGTH=64KB`、`ENABLE_CSRF=True`、知识点强化目标 `KNOWLEDGE_VERIFICATION_TARGET=2`。
+其他固定默认值（见 `app/__init__.py`）：Session 有效期 30 天、`SESSION_COOKIE_HTTPONLY=True`、`SESSION_COOKIE_SAMESITE="Lax"`、`MAX_CONTENT_LENGTH=64KB`、`ENABLE_CSRF=True`、知识点强化目标 `KNOWLEDGE_VERIFICATION_TARGET=2`。
 
-`SESSION_COOKIE_SECURE` 的**默认值也是 `True`**（包括开发环境），因为生产入口 `wsgi.py` 固定要求 HTTPS 终结；浏览器只会在 HTTPS 页面发送该 Cookie，所以用纯 HTTP 直接访问时需要显式覆盖为 `False`。测试集通过 `tests/conftest.py` 显式关闭它，原因是测试客户端走 HTTP。
+`SESSION_COOKIE_SECURE` **不是固定默认值**：它由运行环境决定（见 `app/config.py`，规则集中在一个可单测的模块里）。解析优先级：入口代码显式传入 > 环境变量 `MCQ_SESSION_COOKIE_SECURE` > 环境默认值。
+
+| 运行环境（`MCQ_ENV`） | `SESSION_COOKIE_SECURE` 默认 | 说明 |
+| --- | --- | --- |
+| `development` | `False` | 纯 HTTP 的 `python run.py` 能登录并保持会话（`run.py` 会设置 `MCQ_ENV=development`） |
+| `production` | `True` | `wsgi.py` 会设置 `MCQ_ENV=production`，并额外在代码里显式传 `True` |
+| `testing` | `False` | 测试客户端走 HTTP；结果不依赖开发机的环境变量 |
+| 未设置 / 未知 | `True` | **安全默认**：进程说不清自己是什么时，不做降级假设 |
+
+* `MCQ_SESSION_COOKIE_SECURE` 使用严格布尔解析（`1/0`、`true/false`、`yes/no`、`on/off`，大小写不敏感），其他值会让启动失败并报出允许值——**不会**用 `bool("false")==True` 静默误判。
+* `MCQ_ENV=production` 时，环境变量**只能**把它打开、不能关闭：`MCQ_SESSION_COOKIE_SECURE=false` 会被拒绝并给出解释（避免 systemd env 文件里一个手误就静默降级）。确实要在生产关闭，必须在入口代码里显式传 `SESSION_COOKIE_SECURE=False`，届时会打印明文传输的警告。
+* 反向代理：`wsgi.py` 用 `ProxyFix(x_for=1, x_proto=1)` 只信任一层代理头；Secure Cookie 的安全前提是公网入口为 HTTPS（见上文），本机 Nginx→Gunicorn 的回源链路不改变这一点。
 
 </details>
 
