@@ -252,7 +252,7 @@ python scripts/publish_course.py --course physical_design --questions old_questi
 
 ---
 
-## 5. 重命名课程的 namespace（rename 与目录改名是两步）
+## 5. 重命名课程的 namespace（提交点是数据库事务）
 
 `course_id` 是这门课所有学习数据的 namespace，因此“改课程 ID”是一次数据迁移，用
 `scripts/rename_course.py` 完成（细节见 [`COURSE_GUIDE.md`](COURSE_GUIDE.md) 第 7.6 节）：
@@ -270,23 +270,22 @@ python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_cou
   并在提交前重新计数校验；目标 namespace 已有任何身份或 learner 行时拒绝执行；
 * 当被改名的 namespace 正是持久化的 `legacy_course_id` 时，该 `schema_meta` 键**会一起更新**，所以重启后不会再
   冒出一个空的 `legacy` 课程（这也是**唯一**受支持的 `legacy_course_id` 变更方式）；
+* 指向被改名课程的 `schema_meta.default_course_id` 也会一起更新，导航偏好不会指向已不存在的课程；
 * `exam_questions` 不参与改写：它不存 `course_id`，始终跟随父 session；
-* `--rename-directory` 是数据库提交**之后**的独立文件系统步骤：它把 `courses/<from>` 改名为 `courses/<to>`，并把新目录
-  manifest 的 `course_id` 改成目标值。
+* `--rename-directory` 是三阶段协议，**提交点是数据库事务**：先把 `courses/<from>` 原子移到
+  `courses/.rename-staging-<from>-<时间戳>` 并在暂存目录内原子改写 manifest 的 `course_id`，再执行数据库事务，
+  最后把暂存目录改名为 `courses/<to>`。状态记录写在 `courses/.rename-state-<from>.json`。
 
-**失败语义：目录改名失败不会回滚数据库。** 此时命令以退出码 1 结束，数据库里历史已经挂在新 namespace，而目录仍是旧名字，
-课程表现为 `undeployed`。恢复方式（二选一）：
+**失败语义**（不再需要手工 `mv`）：
 
-```bash
-# A) 手工补做目录改名（结果与工具一致）
-mv courses/<from> courses/<to>
-# 然后编辑 courses/<to>/course.json，把 course_id 改成 <to>
+| 中断位置 | 结果 | 处理 |
+| --- | --- | --- |
+| 阶段 1 / 2 失败 | 自动补偿：manifest 恢复原始字节、目录恢复原名，退出码 1 | 修复原因后重跑；若补偿也失败，退出码 3 并打印 `mv` 命令与状态文件路径 |
+| 提交后（阶段 3）失败 | 数据库已改名，目录仍在暂存位置，退出码 3 | `python scripts/rename_course.py --db instance/mcq.db --courses-dir courses --recover` |
+| 进程在阶段 1/2 之间被杀 | 状态文件与暂存目录仍在，数据库未改 | 同上 `--recover`（此时会**回滚**） |
 
-# B) 用备份回退数据库，再重新执行一次完整的 rename
-cp -a instance/mcq.db.bak-<timestamp> instance/mcq.db
-python scripts/rename_course.py --db instance/mcq.db --from <from> --to <to> \
-  --courses-dir courses --rename-directory
-```
+`--recover`（可加 `--dry-run`）依据可观察事实（数据库属于哪个 namespace、目录当前在哪）决定回滚或收尾；
+协议不可能产生的状态会被拒绝并要求人工介入。存在未完成状态文件时，主命令会拒绝执行并指向 `--recover`。
 
 无论走哪条路，收尾都要统一重启全部 worker，并用 `/ready/<to>` 确认。
 

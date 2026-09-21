@@ -444,6 +444,82 @@ def discard_isolated(entry: Path, courses_dir: Path) -> None:
     shutil.rmtree(entry)
 
 
+# ----------------------------------------------------------------- rename state
+
+#: One in-flight rename per source course is recorded in this file, so an
+#: interrupted run can be finished (or undone) deterministically.  Dot-prefixed
+#: for the same reason the quarantine directory is: the loader ignores it.
+RENAME_STATE_PREFIX = ".rename-state-"
+
+#: Staging directory for a rename in progress.  Dot-prefixed so the loader never
+#: sees it as a course directory: at no point does a *half-renamed* course become
+#: discoverable.
+RENAME_STAGING_PREFIX = ".rename-staging-"
+
+
+def rename_state_path(courses_dir: Path, source: str) -> Path:
+    """Return the state file recording the in-flight rename of ``source``."""
+    return Path(courses_dir) / f"{RENAME_STATE_PREFIX}{source}.json"
+
+
+def _unique_directory(parent: Path, stem: str) -> Path:
+    for ordinal in range(100):
+        candidate = parent / (stem if ordinal == 0 else f"{stem}-{ordinal}")
+        if not candidate.exists():
+            return candidate
+    raise FilesystemTransactionError(  # pragma: no cover - 100 same-second runs
+        f"同名目录过多，拒绝继续：{parent}/{stem}"
+    )
+
+
+def staging_directory(
+    courses_dir: Path, source: str, *, stamp: str | None = None
+) -> Path:
+    """Return a fresh staging directory name for renaming ``source``."""
+    from datetime import datetime, timezone
+
+    stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return _unique_directory(
+        Path(courses_dir), f"{RENAME_STAGING_PREFIX}{source}-{stamp}"
+    )
+
+
+def read_rename_state(path: Path) -> dict | None:
+    """Return the recorded rename state, or ``None`` when unreadable/absent."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def write_rename_state(path: Path, payload: dict) -> None:
+    """Record the current phase of a rename, atomically."""
+    write_file_atomically(
+        Path(path),
+        json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n",
+    )
+
+
+def list_rename_states(courses_dir: Path) -> list[Path]:
+    """Return every recorded in-flight rename, oldest name first."""
+    root = Path(courses_dir)
+    if not root.is_dir():
+        return []
+    return sorted(
+        entry
+        for entry in root.iterdir()
+        if entry.is_file()
+        and entry.name.startswith(RENAME_STATE_PREFIX)
+        and entry.name.endswith(".json")
+    )
+
+
+def remove_rename_state(path: Path) -> None:
+    """Forget one finished (or abandoned) rename."""
+    Path(path).unlink(missing_ok=True)
+
+
 def fsync_directory(directory: Path) -> None:
     """Persist a rename itself, where the filesystem supports it."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)

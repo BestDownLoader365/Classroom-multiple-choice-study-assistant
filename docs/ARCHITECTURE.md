@@ -479,7 +479,9 @@ The transactional multi-course migration and inspection CLI: `--dry-run` only re
 
 #### `scripts/rename_course.py`
 
-The administrative namespace rename: it backs the database up (unless `--no-backup`), rewrites `course_id` across every course-scoped table in one `BEGIN IMMEDIATE` transaction with before/after row-count validation, refuses to run when the target namespace already owns data, leaves `exam_questions` untouched (it follows its parent session), and updates the persisted `legacy_course_id` when that is the renamed namespace. `--rename-directory` performs the filesystem half as a separate step after the database commit. Exit codes: `0` success, `1` refused, `2` usage/IO.
+The administrative namespace rename: it backs the database up (unless `--no-backup`) with the shared verified snapshot, verifies every precondition read-only *before* touching anything, rewrites `course_id` across every course-scoped table in one `BEGIN IMMEDIATE` transaction with before/after row-count validation, refuses to run when the target namespace already owns data, leaves `exam_questions` untouched (it follows its parent session), and updates the persisted `legacy_course_id` and — new — a `schema_meta.default_course_id` that pointed at the renamed course.
+
+`--rename-directory` runs a three-phase protocol whose commit point is the database transaction: stage `courses/<from>` into `courses/.rename-staging-…` while atomically rewriting its manifest, commit the database, then promote the staging directory. Failures before the commit are compensated (manifest bytes and directory name restored) and exit `1`; a failed compensation or a failure after the commit exits `3` with the paths and the `--recover` command, and the state file records the phase. `--recover` finishes or undoes an interrupted run from the state file plus the observable state, and refuses combinations the protocol cannot produce. Exit codes: `0` success, `1` refused (nothing written, or fully compensated), `2` usage/IO, `3` committed with the filesystem half still pending.
 
 ## 5. Application Assembly
 

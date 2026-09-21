@@ -526,23 +526,47 @@ python scripts/rename_course.py --db instance/mcq.db --from legacy --to <new_cou
   --courses-dir courses --rename-directory
 ```
 
-工具保证：先备份；在单个 `BEGIN IMMEDIATE` 事务内改写 `courses` / `quiz_progress` / `attempts` / `wrong_questions` / `weak_knowledge_points` / `exam_sessions` / `question_bank_state` / `question_registry`，并在前后重新计数校验（不一致就整体回滚）；目标 namespace 已有元数据或任何 learner 行时拒绝执行，避免把两个身份合并；`exam_questions` 不参与改写（它不含 `course_id`，始终跟随父 session）；如果改的正是持久化的 `legacy_course_id`，该键也会一起更新，所以重启后不会再出现一个空的 `legacy` 课程。
+工具保证：先备份（SQLite 在线备份 + `quick_check` 校验）；在单个 `BEGIN IMMEDIATE` 事务内改写 `courses` / `quiz_progress` / `attempts` / `wrong_questions` / `weak_knowledge_points` / `exam_sessions` / `question_bank_state` / `question_registry`，并在前后重新计数校验（不一致就整体回滚）；目标 namespace 已有元数据或任何 learner 行时拒绝执行，避免把两个身份合并；`exam_questions` 不参与改写（它不含 `course_id`，始终跟随父 session）；如果改的正是持久化的 `legacy_course_id`，该键也会一起更新，所以重启后不会再出现一个空的 `legacy` 课程；`schema_meta.default_course_id` 指向被改名的课程时也会跟随更新，因此导航偏好不会指向已不存在的课程。
 
-**数据库改名与目录改名不是同一个事务。** 加 `--rename-directory` 时，
+**加 `--rename-directory` 时是三阶段协议，提交点是数据库事务：**
 
 ```text
-备份数据库
-  → 一个事务内完成数据库 namespace rename（提交后即生效）
-  → 之后才作为独立步骤把 courses/<from> 改名为 courses/<to>
-      并改写新目录里 manifest 的 course_id（title / title_zh 属于内容决定，不自动改）
+阶段 0（只读）：校验源/目标 namespace、目标目录不存在、源目录在 --courses-dir 内、
+               manifest 声明的 course_id 等于 --from、没有未完成的改名记录
+  → 复制带时间戳的数据库备份
+  → 阶段 1（可补偿）：courses/<from> 原子改名到 courses/.rename-staging-<from>-<时间戳>
+                     并在暂存目录内原子改写 manifest 的 course_id 为目标值；
+                     同时写入状态文件 courses/.rename-state-<from>.json
+  → 阶段 2（提交点）：单个 BEGIN IMMEDIATE 事务改写所有 course_id
+  → 阶段 3：暂存目录改名为 courses/<to>，删除状态文件
 ```
 
-因此目录改名失败（权限、目标目录已存在、文件被占用）**不会**回滚数据库：命令以退出码 1 结束，数据库里历史已经挂在新的 `course_id` 下，但目录仍是旧名字。此时课程会表现为 `undeployed`（数据库有身份、本 worker 未声明）。修复方式二选一：
+* **阶段 1 或 2 失败** → manifest 恢复为原始字节、目录恢复回 `courses/<from>`：退出码 1，
+  打印「已回滚并恢复课程目录，未改名任何内容」。若**补偿也失败**，退出码 **3**，打印两个路径、
+  状态文件路径与可直接复制的 `mv` 命令，并保留暂存目录。
+* **阶段 3 失败**（提交后）→ 数据库已改名，状态文件记录 `phase=db_committed`：退出码 **3**，
+  打印 `--recover` 命令。
+* **进程在阶段 1 与 2 之间被杀** → 状态文件与暂存目录仍在；`--recover` 会**回滚**（恢复原始
+  manifest 与目录名）。
+* `--dry-run` 会先打印阶段 0 的完整校验结果（行数、目录映射），不写任何内容。
 
-* 手工完成目录改名（`mv courses/<from> courses/<to>`），并把新目录 `course.json` 的 `course_id` 改成目标值 —— 结果与工具一致；
-* 或者用备份回退数据库（`cp instance/mcq.db.bak-<timestamp> instance/mcq.db`），再重新执行一次完整的 rename。
+收尾与恢复：
 
-它**不会**清理数据、不会推进 generation、也不会重算 fingerprint：历史只是换了 namespace。完成后记得让 `courses/<course_id>/course.json` 的 `course_id` 与数据库一致，再重启 worker，并用 `/ready/<course_id>` 确认。
+```bash
+# 只看会发生什么
+python scripts/rename_course.py --db instance/mcq.db --courses-dir courses --recover --dry-run
+
+# 收尾或回滚所有未完成的改名
+python scripts/rename_course.py --db instance/mcq.db --courses-dir courses --recover
+```
+
+`--recover` 依据**可观察事实**（数据库里属于哪个 namespace、目录当前在哪）决定动作：提交未发生时
+回滚，提交已发生时收尾，协议不可能产生的状态（两个 namespace 同时存在、都不存在、目录位置与数据库
+状态矛盾）一律拒绝并提示人工介入，不会猜测。存在未完成状态文件时主命令会拒绝执行并指向 `--recover`。
+
+它**不会**清理数据、不会推进 generation、也不会重算 fingerprint：历史只是换了 namespace。`title` /
+`title_zh` 属于内容决定，不自动修改。完成后重启 worker，并用 `/ready/<course_id>` 确认；浏览器里
+已打开的旧表单需要刷新（签名的 `form_context` 最长 12 小时有效）。
 
 ### 7.7 发布某门课的题库
 

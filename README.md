@@ -744,7 +744,8 @@ Local HTTP URL: http://127.0.0.1:8080
 | 工具 | 用途 |
 | --- | --- |
 | `python scripts/migrate_courses.py --db instance/mcq.db --dry-run` | 事务性、无损、幂等的命名空间迁移 / 检查（真实执行前会自动生成并校验带时间戳的备份） |
-| `python scripts/rename_course.py --db instance/mcq.db --from <old> --to <new> [--rename-directory]` | 重命名一门课程的 namespace（`course_id` 是数据库中每张学习者表的首列） |
+| `python scripts/rename_course.py --db instance/mcq.db --from <old> --to <new> [--rename-directory]` | 重命名一门课程的 namespace（`course_id` 是数据库中每张学习者表的首列）；`--rename-directory` 为“暂存 → 事务 → 转正”协议 |
+| `python scripts/rename_course.py --db instance/mcq.db --courses-dir courses --recover [--dry-run]` | 收尾或回滚一次中断的 `--rename-directory`（依据数据库归属与目录位置决定） |
 | `python scripts/delete_course.py --course <course_id> --dry-run` | 预览并删除课程目录、数据库 namespace 与全部引用（默认自动备份数据库；目录先隔离到 `courses/.trash/`，数据库提交后才物理删除） |
 | `python scripts/delete_course.py --purge [--course <course_id>] [--dry-run]` | 只清理 `courses/.trash/` 中上次运行留下的待清理条目（不写数据库） |
 | `python scripts/publish_course.py --course <course_id> --prune [--keep-versions N]` | 清理 `versions/`，每个内容类型只保留当前 + 上一版 |
